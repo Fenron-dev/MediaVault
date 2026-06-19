@@ -23,11 +23,7 @@ pub fn render_sidecar_yaml(entry: &MediaEntry) -> Result<String> {
     let source_file_path = entry.relative_path.to_string();
     render_scalar(&mut document, "media_type", &media_type);
     render_scalar(&mut document, "source_file_path", &source_file_path);
-    render_scalar(
-        &mut document,
-        "original_filename",
-        &entry.original_filename,
-    );
+    render_scalar(&mut document, "original_filename", &entry.original_filename);
 
     render_properties(&mut document, &entry.properties);
     document.push_str("---\n");
@@ -43,7 +39,11 @@ fn render_properties(document: &mut String, properties: &MediaProperties) {
         properties.title_original.clone(),
     );
     render_optional_string(document, "description", properties.description.clone());
-    render_optional_string(document, "description_de", properties.description_de.clone());
+    render_optional_string(
+        document,
+        "description_de",
+        properties.description_de.clone(),
+    );
     render_optional_string(
         document,
         "description_original",
@@ -66,7 +66,10 @@ fn render_properties(document: &mut String, properties: &MediaProperties) {
     render_optional_string(
         document,
         "thumbnail_path",
-        properties.thumbnail_path.as_ref().map(|path| path.to_string()),
+        properties
+            .thumbnail_path
+            .as_ref()
+            .map(|path| path.to_string()),
     );
     render_optional_string(document, "notes", properties.notes.clone());
     render_optional_string(
