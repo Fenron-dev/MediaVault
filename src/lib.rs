@@ -1,15 +1,15 @@
 #![doc = "MediaVault core foundation."]
 
 pub mod ai;
-pub mod app;
 pub mod api;
+pub mod app;
 pub mod core;
 pub mod error;
 pub mod media;
 
 pub use ai::{AnalysisProfile, LmStudioConfig};
-pub use app::AppConfig;
 pub use api::anilist::AniListClient;
+pub use app::AppConfig;
 pub use core::covers::{CoverCandidate, CoverFallbackChain, CoverSource};
 pub use core::duplicate::{compute_fingerprint, compute_fingerprint_for_file, FileFingerprint};
 pub use core::import::{

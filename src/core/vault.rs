@@ -194,8 +194,8 @@ mod tests {
 
     #[test]
     fn normalizes_relative_paths() {
-        let relative = RelativePath::new("Inbox/./movie.mkv")
-            .expect("relative path should be valid");
+        let relative =
+            RelativePath::new("Inbox/./movie.mkv").expect("relative path should be valid");
         assert_eq!(relative.to_string(), "Inbox/movie.mkv");
     }
 
