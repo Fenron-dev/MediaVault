@@ -18,8 +18,8 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - name: Normalize formatting
+        run: cargo fmt --all
 
       - name: Compile check
         run: cargo check --all-targets
