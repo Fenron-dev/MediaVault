@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MediaVault</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">Portable Media Vault</p>
+          <h1>MediaVault</h1>
+          <p class="lead">
+            Lokale Verwaltung mit relativen Pfaden, Inbox, Review und Sidecars.
+          </p>
+        </div>
+
+        <nav class="nav" aria-label="Hauptnavigation">
+          <button class="nav-item is-active" data-tab="overview">Überblick</button>
+          <button class="nav-item" data-tab="inbox">Inbox</button>
+          <button class="nav-item" data-tab="review">Prüfung</button>
+          <button class="nav-item" data-tab="collections">Sammlungen</button>
+          <button class="nav-item" data-tab="settings">Einstellungen</button>
+        </nav>
+
+        <section class="sidebar-meta">
+          <div class="meta-row">
+            <span>Vault</span>
+            <strong>relativ</strong>
+          </div>
+          <div class="meta-row">
+            <span>Sidecars</span>
+            <strong>YAML / NFO</strong>
+          </div>
+          <div class="meta-row">
+            <span>Duplikate</span>
+            <strong>aktiv</strong>
+          </div>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Lokaler Testlauf</p>
+            <h2 id="view-title">Überblick</h2>
+          </div>
+
+          <div class="toolbar">
+            <button class="action-button primary" id="run-demo">Import-Dry-Run</button>
+            <button class="action-button" data-tab="settings">Konfiguration</button>
+          </div>
+        </header>
+
+        <section class="status-strip" id="status-strip">
+          Bereit für Inbox, Review und Duplikat-Checks.
+        </section>
+
+        <section class="view is-active" data-view="overview">
+          <div class="metrics">
+            <article class="metric">
+              <span>Inbox</span>
+              <strong>12 Dateien</strong>
+            </article>
+            <article class="metric">
+              <span>Review</span>
+              <strong>4 unklar</strong>
+            </article>
+            <article class="metric">
+              <span>Duplikate</span>
+              <strong>2 gefunden</strong>
+            </article>
+            <article class="metric">
+              <span>Sammlungen</span>
+              <strong>6 smart</strong>
+            </article>
+          </div>
+
+          <div class="panel-grid">
+            <section class="panel">
+              <p class="panel-label">Import-Pipeline</p>
+              <h3>Vom Inbox-Ordner zur sauberen Struktur</h3>
+              <ul class="list">
+                <li>Relative Pfade werden beibehalten.</li>
+                <li>Unklare Einträge landen in der Review-Warteschlange.</li>
+                <li>Metadaten fließen in YAML oder NFO Sidecars.</li>
+                <li>Duplikate werden vor dem Verschieben markiert.</li>
+              </ul>
+            </section>
+
+            <section class="panel">
+              <p class="panel-label">APIs</p>
+              <h3>Frühe Provider-Anbindung</h3>
+              <ul class="list">
+                <li>AniList ist als erster Workflow-Anker vorgesehen.</li>
+                <li>Weitere Quellen folgen schrittweise.</li>
+                <li>User-Eingaben überschreiben API und AI.</li>
+              </ul>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="inbox">
+          <div class="panel-grid single">
+            <section class="panel">
+              <p class="panel-label">Inbox-Queue</p>
+              <h3>Neue Dateien warten auf Zuordnung</h3>
+              <div class="table">
+                <div class="table-row table-head">
+                  <span>Datei</span>
+                  <span>Status</span>
+                  <span>Ziel</span>
+                </div>
+                <div class="table-row">
+                  <span>Inbox/Violet Evergarden.mkv</span>
+                  <span>klar</span>
+                  <span>Anime/Violet Evergarden</span>
+                </div>
+                <div class="table-row">
+                  <span>Inbox/unknown_scan.zip</span>
+                  <span>Review</span>
+                  <span>Inbox/_review_queue</span>
+                </div>
+                <div class="table-row">
+                  <span>Inbox/duplicate.mp3</span>
+                  <span>Duplikat</span>
+                  <span>Prüfen</span>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="review">
+          <div class="panel-grid">
+            <section class="panel">
+              <p class="panel-label">Manuelle Klärung</p>
+              <h3>Wenn Inhalt oder Zusammengehörigkeit unklar sind</h3>
+              <p class="body-copy">
+                Die App fragt nach Kategorie, Genre, Name und weiteren Properties,
+                bevor Dateien in die Zielstruktur verschoben werden.
+              </p>
+            </section>
+            <section class="panel">
+              <p class="panel-label">Audit Trail</p>
+              <h3>Jede Korrektur bleibt nachvollziehbar</h3>
+              <p class="body-copy">
+                Import-Dry-Runs, manuelle Anpassungen und spätere Korrekturen werden
+                dokumentiert.
+              </p>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="collections">
+          <div class="panel-grid">
+            <section class="panel">
+              <p class="panel-label">Smart Collections</p>
+              <h3>Regeln statt starre Ordner</h3>
+              <ul class="list">
+                <li>Filter nach Typ, Genre, Status oder Tag.</li>
+                <li>Späterer Export als Ordnerstruktur oder Playlist.</li>
+                <li>Vorläufige Verwaltung mit relativen Pfaden.</li>
+              </ul>
+            </section>
+            <section class="panel">
+              <p class="panel-label">Beispiele</p>
+              <h3>Anime, Hörbücher, Referenzen</h3>
+              <ul class="chips">
+                <li>Anime 2020er</li>
+                <li>Hörbücher</li>
+                <li>Manuell geprüft</li>
+                <li>Ohne Duplikate</li>
+              </ul>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="settings">
+          <div class="panel-grid">
+            <section class="panel">
+              <p class="panel-label">Lokale Vorgaben</p>
+              <h3>Portabel und verschiebbar</h3>
+              <ul class="list">
+                <li>Kein absoluter Pfadzwang im Vault.</li>
+                <li>Konfiguration bleibt lokal im Vault.</li>
+                <li>API-Schlüssel bleiben außerhalb des Repos.</li>
+              </ul>
+            </section>
+            <section class="panel">
+              <p class="panel-label">Nächster Schritt</p>
+              <h3>Importer und Review-Dialog</h3>
+              <p class="body-copy">
+                Als Nächstes lohnt sich der erste echte Importlauf mit
+                Dry-Run, Duplikaterkennung und einer Review-Maske.
+              </p>
+            </section>
+          </div>
+        </section>
+      </main>
+
+      <aside class="inspector">
+        <section class="panel tight">
+          <p class="panel-label">Systemstatus</p>
+          <h3>Build bereit</h3>
+          <p class="body-copy">
+            Diese Shell ist die erste testbare Desktop-Schicht. Sie prüft noch keine
+            echten Medien, zeigt aber bereits die geplante Arbeitsoberfläche.
+          </p>
+        </section>
+
+        <section class="panel tight">
+          <p class="panel-label">Heute geplant</p>
+          <ul class="list compact">
+            <li>Vault öffnen</li>
+            <li>Inbox scannen</li>
+            <li>Review-Dialog erzeugen</li>
+            <li>Duplikate markieren</li>
+          </ul>
+        </section>
+      </aside>
+    </div>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

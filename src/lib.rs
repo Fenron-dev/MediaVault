@@ -1,5 +1,7 @@
 #![doc = "MediaVault core foundation."]
 
+mod desktop;
+
 pub mod ai;
 pub mod api;
 pub mod app;
@@ -24,10 +26,10 @@ pub use media::{
     MediaEntry, MediaProperties, MediaStatus, MediaType, PropertySource, ALL_MEDIA_TYPES,
 };
 
-/// Starts the current MediaVault scaffold.
+/// Starts the MediaVault desktop shell.
 ///
-/// The UI shell and persistence layer will be wired in later. For now, the
-/// library exposes the core data structures and planning primitives.
+/// The core modules still expose the vault, import, and metadata primitives;
+/// this entry point now opens the first testable Tauri window.
 pub fn run() -> Result<()> {
-    Ok(())
+    desktop::run()
 }

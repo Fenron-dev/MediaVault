@@ -18,6 +18,8 @@ pub enum VaultError {
     InvalidProperty(String),
     /// A dry-run or import plan could not be created.
     Planning(String),
+    /// The desktop application could not start.
+    AppStartup(String),
     /// Metadata serialization failed.
     Serialization(String),
     /// Duplicate detection could not be performed.
@@ -38,6 +40,7 @@ impl Display for VaultError {
             Self::InvalidMediaType(message) => write!(f, "invalid media type: {message}"),
             Self::InvalidProperty(message) => write!(f, "invalid property: {message}"),
             Self::Planning(message) => write!(f, "import planning failed: {message}"),
+            Self::AppStartup(message) => write!(f, "app startup failed: {message}"),
             Self::Serialization(message) => write!(f, "serialization failed: {message}"),
             Self::DuplicateDetectionUnavailable => write!(f, "duplicate detection unavailable"),
             Self::MissingFileName => write!(f, "missing file name"),
