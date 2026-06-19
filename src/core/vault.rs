@@ -187,13 +187,15 @@ mod tests {
 
     #[test]
     fn rejects_parent_directory_segments() {
-        let error = RelativePath::new("../escape").expect_err("parent segments must be rejected");
+        let error = RelativePath::new("../escape")
+            .expect_err("parent segments must be rejected");
         assert!(matches!(error, VaultError::InvalidRelativePath(_)));
     }
 
     #[test]
     fn normalizes_relative_paths() {
-        let relative = RelativePath::new("Inbox/./movie.mkv").expect("relative path should be valid");
+        let relative = RelativePath::new("Inbox/./movie.mkv")
+            .expect("relative path should be valid");
         assert_eq!(relative.to_string(), "Inbox/movie.mkv");
     }
 

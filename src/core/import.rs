@@ -233,7 +233,10 @@ impl ImportPlanner {
                 });
             } else if classification.confidence < self.config.high_confidence_threshold {
                 steps.push(PlannedImportStep::QueueReview {
-                    reason: format!("confidence below high threshold: {:.2}", classification.confidence),
+                    reason: format!(
+                        "confidence below high threshold: {:.2}",
+                        classification.confidence
+                    ),
                 });
             }
         } else {
@@ -454,7 +457,10 @@ mod tests {
 
         let plan = planner.plan_file(&file).expect("planning should succeed");
         assert!(plan.manual_review);
-        assert!(matches!(plan.target_path.as_ref(), Some(path) if path.to_string().starts_with("Inbox/")));
+        assert!(matches!(
+            plan.target_path.as_ref(),
+            Some(path) if path.to_string().starts_with("Inbox/")
+        ));
         assert!(plan
             .steps
             .iter()
@@ -480,7 +486,10 @@ mod tests {
 
         let plan = planner.plan_file(&file).expect("planning should succeed");
         assert!(!plan.manual_review);
-        assert!(matches!(plan.target_path.as_ref(), Some(path) if path.to_string().contains("Anime/")));
+        assert!(matches!(
+            plan.target_path.as_ref(),
+            Some(path) if path.to_string().contains("Anime/")
+        ));
         assert!(plan
             .steps
             .iter()

@@ -142,14 +142,24 @@ impl MediaType {
             Self::RPG => Some("rpggeek"),
             Self::VideoGame => Some("igdb"),
             Self::HentaiGame => Some("vndb"),
-            Self::Document | Self::Photo | Self::VideoMisc | Self::Font | Self::Software
-            | Self::Model3D | Self::Archive | Self::Image | Self::Unclassified => None,
+            Self::Document
+            | Self::Photo
+            | Self::VideoMisc
+            | Self::Font
+            | Self::Software
+            | Self::Model3D
+            | Self::Archive
+            | Self::Image
+            | Self::Unclassified => None,
         }
     }
 
     /// Returns whether the type is explicitly adult-oriented.
     pub fn is_adult(self) -> bool {
-        matches!(self, Self::HentaiAnime | Self::HentaiGame | Self::HentaiManga)
+        matches!(
+            self,
+            Self::HentaiAnime | Self::HentaiGame | Self::HentaiManga
+        )
     }
 }
 

@@ -41,7 +41,11 @@ pub struct WorkflowDefinition {
 
 impl WorkflowDefinition {
     /// Creates a new workflow definition.
-    pub fn new(name: impl Into<String>, trigger: WorkflowTrigger, steps: Vec<WorkflowStep>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        trigger: WorkflowTrigger,
+        steps: Vec<WorkflowStep>,
+    ) -> Self {
         Self {
             name: name.into(),
             trigger,
