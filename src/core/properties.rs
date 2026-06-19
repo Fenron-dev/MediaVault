@@ -163,10 +163,13 @@ mod tests {
 
     #[test]
     fn builds_sidecar_path_next_to_media_file() {
-        let media_path = RelativePath::new("Anime/Violet Evergarden.mkv")
-            .expect("media path should be valid");
+        let media_path =
+            RelativePath::new("Anime/Violet Evergarden.mkv").expect("media path should be valid");
         let sidecar = sidecar_path_for(&media_path).expect("sidecar path should be valid");
-        assert_eq!(sidecar.to_string(), "Anime/Violet Evergarden.mediashelf.yaml");
+        assert_eq!(
+            sidecar.to_string(),
+            "Anime/Violet Evergarden.mediashelf.yaml"
+        );
     }
 
     #[test]

@@ -187,8 +187,7 @@ mod tests {
 
     #[test]
     fn rejects_parent_directory_segments() {
-        let error = RelativePath::new("../escape")
-            .expect_err("parent segments must be rejected");
+        let error = RelativePath::new("../escape").expect_err("parent segments must be rejected");
         assert!(matches!(error, VaultError::InvalidRelativePath(_)));
     }
 
