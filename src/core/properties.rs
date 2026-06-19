@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::core::vault::RelativePath;
-use crate::error::{Result, VaultError};
+use crate::error::Result;
 use crate::media::{MediaEntry, MediaProperties};
 
 /// Returns the relative sidecar path for a media file.
@@ -101,7 +101,7 @@ fn render_scalar(document: &mut String, key: &str, value: &str) {
 
 fn render_optional_string(document: &mut String, key: &str, value: Option<String>) {
     if let Some(value) = value {
-        render_scalar(document, key, value);
+        render_scalar(document, key, &value);
     }
 }
 
