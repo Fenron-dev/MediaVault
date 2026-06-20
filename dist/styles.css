@@ -105,6 +105,11 @@ h3 {
   margin: 28px 0;
 }
 
+.is-collections .nav,
+.is-collections .sidebar-meta {
+  display: none;
+}
+
 .nav-item,
 .action-button {
   border: 1px solid var(--line);
@@ -615,6 +620,11 @@ h3 {
   background: var(--panel-strong);
 }
 
+.collection-empty.compact {
+  padding: 10px 12px;
+  font-size: 0.92rem;
+}
+
 .collection-profile {
   margin-top: 18px;
 }
@@ -664,6 +674,28 @@ h3 {
   margin-top: 18px;
 }
 
+.collection-folder-row > span:first-child::before {
+  content: ">";
+  color: var(--accent-strong);
+  margin-right: 8px;
+}
+
+.collection-editor {
+  display: none;
+  gap: 16px;
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.collection-editor.is-active {
+  display: grid;
+}
+
+.detail-summary.compact {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 @media (max-width: 1200px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -697,6 +729,7 @@ h3 {
   .table-row,
   .review-grid,
   .detail-summary,
+  .detail-summary.compact,
   .collection-hero,
   .collection-meta {
     grid-template-columns: 1fr;

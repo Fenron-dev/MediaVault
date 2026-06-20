@@ -17,6 +17,22 @@ const collectionDescription = document.getElementById("collection-description");
 const collectionMeta = document.getElementById("collection-meta");
 const collectionProfile = document.getElementById("collection-profile");
 const collectionRows = document.getElementById("collection-rows");
+const collectionEditor = document.getElementById("collection-editor");
+const collectionEditorTitle = document.getElementById("collection-editor-title");
+const collectionEditorSubtitle = document.getElementById("collection-editor-subtitle");
+const collectionEditorSource = document.getElementById("collection-editor-source");
+const collectionEditorTarget = document.getElementById("collection-editor-target");
+const collectionEditorType = document.getElementById("collection-editor-type");
+const collectionEditorSidecar = document.getElementById("collection-editor-sidecar");
+const collectionEditorName = document.getElementById("collection-editor-name");
+const collectionEditorMediaType = document.getElementById("collection-editor-media-type");
+const collectionEditorYear = document.getElementById("collection-editor-year");
+const collectionEditorStatus = document.getElementById("collection-editor-status");
+const collectionEditorNotes = document.getElementById("collection-editor-notes");
+const collectionEditorFetch = document.getElementById("collection-editor-fetch");
+const collectionEditorApply = document.getElementById("collection-editor-apply");
+const collectionEditorReset = document.getElementById("collection-editor-reset");
+const collectionEditorSidecarPreview = document.getElementById("collection-editor-sidecar-preview");
 const vaultRootInput = document.getElementById("vault-root-input");
 const vaultRootSave = document.getElementById("vault-root-save");
 const vaultRootClear = document.getElementById("vault-root-clear");
@@ -92,7 +108,8 @@ const statusOptions = [
 let sourcePlan = null;
 let currentPlan = null;
 let selectedItemKey = "";
-let selectedCollectionKey = "all";
+let selectedCollectionKey = "";
+let selectedCollectionItemKey = "";
 let corrections = loadStoredJson(correctionsKey, {});
 let apiMetadata = loadStoredJson(metadataKey, {});
 let auditTrail = loadStoredJson(auditTrailKey, []);
@@ -113,6 +130,7 @@ function setActiveTab(tab) {
   if (collectionSidebar) {
     collectionSidebar.classList.toggle("is-active", tab === "collections");
   }
+  document.body.classList.toggle("is-collections", tab === "collections");
 
   if (statusStrip) {
     statusStrip.textContent = `Ansicht gewechselt: ${labels[tab] ?? tab}.`;
@@ -646,7 +664,11 @@ function normalizeAniListMetadata(metadata, item) {
 }
 
 async function fetchAniListForItem(item) {
-  const searchTitle = detailTitle?.value.trim() || item.series_title || item.title || stripEpisodeMarkerText(fileStem(item.source_path));
+  const searchTitle =
+    item.series_title ||
+    item.title ||
+    detailTitle?.value.trim() ||
+    stripEpisodeMarkerText(fileStem(item.source_path));
   if (!searchTitle) {
     if (statusStrip) {
       statusStrip.textContent = "Kein Suchbegriff für AniList vorhanden.";
@@ -884,129 +906,140 @@ function renderPlan(plan) {
   }
 }
 
-function buildCollectionCatalog(items) {
-  const staticCollections = [
-    {
-      key: "all",
-      label: "Alle Dateien",
-      description: "Der gesamte aktuelle Scan.",
-      rule: "Alle gefundenen Einträge",
-      items,
-    },
-    {
-      key: "review",
-      label: "Zur Prüfung",
-      description: "Alles, was noch nicht klar ist.",
-      rule: "needs_review oder Duplikat",
-      items: items.filter((item) => item.needs_review || item.duplicate_of),
-    },
-    {
-      key: "duplicates",
-      label: "Duplikate",
-      description: "Markierte Mehrfachfunde.",
-      rule: "duplicate_of gesetzt",
-      items: items.filter((item) => item.duplicate_of),
-    },
-    {
-      key: "corrected",
-      label: "Korrigiert",
-      description: "Bereits lokal angepasst.",
-      rule: "lokale Korrektur vorhanden",
-      items: items.filter((item) => item.has_correction),
-    },
-    {
-      key: "photos",
-      label: "Fotos",
-      description: "Fotos und Kameraaufnahmen.",
-      rule: "media_type photo",
-      items: items.filter((item) => item.media_type === "photo"),
-    },
-    {
-      key: "images",
-      label: "Bilder",
-      description: "Grafiken, Screenshots, Icons.",
-      rule: "media_type image",
-      items: items.filter((item) => item.media_type === "image"),
-    },
-    {
-      key: "anime",
-      label: "Anime",
-      description: "Anime und verwandte Inhalte.",
-      rule: "media_type anime",
-      items: items.filter((item) => item.media_type === "anime"),
-    },
-    {
-      key: "video",
-      label: "Video",
-      description: "Filme, Serien und sonstige Videos.",
-      rule: "film, series, video-misc",
-      items: items.filter((item) =>
-        ["film", "series", "video-misc"].includes(item.media_type)
-      ),
-    },
-    {
-      key: "audio",
-      label: "Audio",
-      description: "Musik, Hörbücher und Podcasts.",
-      rule: "music, audiobook, podcast",
-      items: items.filter((item) =>
-        ["music-track", "music-album", "audiobook", "podcast"].includes(item.media_type)
-      ),
-    },
-    {
-      key: "books",
-      label: "Bücher",
-      description: "Bücher, E-Books, Comics und Manga.",
-      rule: "book, ebook, comic, manga",
-      items: items.filter((item) =>
-        ["book", "ebook", "comic", "manga"].includes(item.media_type)
-      ),
-    },
-    {
-      key: "docs",
-      label: "Dokumente",
-      description: "PDFs und andere Dokumente.",
-      rule: "media_type document",
-      items: items.filter((item) => item.media_type === "document"),
-    },
-  ];
-
-  const pathCollections = Array.from(
-    new Map(
-      items
-        .map((item) => item.collection_path)
-        .filter((value) => typeof value === "string" && value.length > 0)
-        .map((value) => [value, value])
-    ).values()
-  )
-    .sort((left, right) => left.localeCompare(right))
-    .map((path) => ({
-      key: `path:${path}`,
-      label: path.split("/").join(" > "),
-      description: "Pfadbasierte Sammlung aus AniList- und Vault-Metadaten.",
-      rule: path,
-      type: path.includes("/Staffel ") ? "series-season" : path.includes("/Filme/") ? "movie-folder" : "folder",
-      items: items.filter((item) => item.collection_path === path),
-    }));
-
-  return [...staticCollections, ...pathCollections];
+function createCollectionNode(path, label, parent = null) {
+  return {
+    path,
+    label,
+    parent,
+    children: new Map(),
+    items: [],
+    directItems: [],
+  };
 }
 
-function renderCollectionMeta(collection) {
+function buildCollectionTree(items) {
+  const root = createCollectionNode("", "Sammlungen");
+
+  items.forEach((item) => {
+    const parts = String(item.collection_path || folderSegmentFor(item.media_type))
+      .split("/")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    let node = root;
+    node.items.push(item);
+
+    parts.forEach((part, index) => {
+      const path = parts.slice(0, index + 1).join("/");
+      if (!node.children.has(part)) {
+        node.children.set(part, createCollectionNode(path, part, node));
+      }
+      node = node.children.get(part);
+      node.items.push(item);
+    });
+
+    node.directItems.push(item);
+  });
+
+  return root;
+}
+
+function findCollectionNode(root, path) {
+  if (!path) {
+    return root;
+  }
+
+  return path
+    .split("/")
+    .filter(Boolean)
+    .reduce((node, part) => node?.children.get(part), root) ?? root;
+}
+
+function sortedChildren(node) {
+  return Array.from(node.children.values()).sort((left, right) =>
+    left.label.localeCompare(right.label, "de")
+  );
+}
+
+function parentPath(path) {
+  const parts = String(path || "").split("/").filter(Boolean);
+  parts.pop();
+  return parts.join("/");
+}
+
+function collectionNodeKind(node) {
+  if (!node.path) {
+    return "root";
+  }
+  if (node.path.includes("/Staffel ")) {
+    return "season";
+  }
+  if (node.path.includes("/Filme/")) {
+    return "movie";
+  }
+  if (node.path.endsWith("/Serien") || node.path.endsWith("/Filme")) {
+    return "group";
+  }
+  if (sortedChildren(node).some((child) => child.label.startsWith("Staffel "))) {
+    return "series";
+  }
+  return sortedChildren(node).length ? "folder" : "folder";
+}
+
+function nodeTypeLabel(node) {
+  const kind = collectionNodeKind(node);
+  switch (kind) {
+    case "root":
+      return "Vault";
+    case "series":
+      return "Serie";
+    case "season":
+      return "Staffel";
+    case "movie":
+      return "Film";
+    case "group":
+      return "Ordner";
+    default:
+      return "Sammlung";
+  }
+}
+
+function representativeItem(node) {
+  return node.items.find((item) => item.anilist_id || item.series_title) ?? node.items[0] ?? null;
+}
+
+function collectionDescriptionFor(node) {
+  const kind = collectionNodeKind(node);
+  if (kind === "root") {
+    return "Wähle links einen Medienbereich. Dateien erscheinen erst auf Staffel- oder Filmebene.";
+  }
+  if (kind === "series") {
+    return "Serienübersicht mit Staffeln. Wähle eine Staffel, um die Dateien zu sehen.";
+  }
+  if (kind === "season") {
+    return "Staffelinhalt. Hier kannst du einzelne Dateien auswählen und bearbeiten.";
+  }
+  if (kind === "movie") {
+    return "Filmübersicht. Die zugehörige Datei kann unten ausgewählt und korrigiert werden.";
+  }
+  return "Ordneransicht innerhalb der geplanten Vault-Struktur.";
+}
+
+function renderCollectionMeta(node) {
   if (!collectionMeta) {
     return;
   }
 
   clearNode(collectionMeta);
 
-  const totalBytes = collection.items.reduce((sum, item) => sum + (item.size_bytes || 0), 0);
-  const reviewCount = collection.items.filter((item) => item.needs_review).length;
-  const duplicateCount = collection.items.filter((item) => item.duplicate_of).length;
+  const children = sortedChildren(node);
+  const totalBytes = node.items.reduce((sum, item) => sum + (item.size_bytes || 0), 0);
+  const reviewCount = node.items.filter((item) => item.needs_review).length;
 
   [
-    ["Treffer", `${collection.items.length}`],
+    ["Ordner", `${children.length}`],
+    ["Dateien", `${node.items.length}`],
     ["Größe", formatBytes(totalBytes)],
-    ["Review", `${reviewCount} / ${duplicateCount}`],
+    ["Review", `${reviewCount}`],
   ].forEach(([label, value]) => {
     const block = document.createElement("div");
     const span = document.createElement("span");
@@ -1019,43 +1052,69 @@ function renderCollectionMeta(collection) {
   });
 }
 
-function renderCollectionNavigation(collections) {
+function renderCollectionNavigation(root, node) {
   if (!collectionSidebarList) {
     return;
   }
 
   clearNode(collectionSidebarList);
 
-  collections.forEach((collection) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "collection-nav-item";
-    button.classList.toggle("is-active", collection.key === selectedCollectionKey);
-    button.addEventListener("click", () => {
-      selectedCollectionKey = collection.key;
+  if (node.path) {
+    const up = document.createElement("button");
+    up.type = "button";
+    up.className = "collection-nav-item";
+    up.addEventListener("click", () => {
+      selectedCollectionKey = parentPath(node.path);
       renderCollections(currentPlan?.items ?? []);
     });
 
     const label = document.createElement("strong");
-    label.textContent = collection.label;
+    label.textContent = "Eine Ebene zurück";
     const count = document.createElement("span");
-    count.textContent = `${collection.items.length}`;
+    count.textContent = "";
+    up.appendChild(label);
+    up.appendChild(count);
+    collectionSidebarList.appendChild(up);
+  }
+
+  sortedChildren(node).forEach((child) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "collection-nav-item";
+    button.classList.toggle("is-active", child.path === selectedCollectionKey);
+    button.addEventListener("click", () => {
+      selectedCollectionKey = child.path;
+      selectedCollectionItemKey = "";
+      renderCollections(currentPlan?.items ?? []);
+    });
+
+    const label = document.createElement("strong");
+    label.textContent = child.label;
+    const count = document.createElement("span");
+    count.textContent = `${child.items.length}`;
 
     button.appendChild(label);
     button.appendChild(count);
     collectionSidebarList.appendChild(button);
   });
+
+  if (!sortedChildren(node).length && node.path) {
+    const empty = document.createElement("div");
+    empty.className = "collection-empty compact";
+    empty.textContent = "Keine Unterordner.";
+    collectionSidebarList.appendChild(empty);
+  }
 }
 
-function renderCollectionProfile(collection) {
+function renderCollectionProfile(node) {
   if (!collectionProfile) {
     return;
   }
 
   clearNode(collectionProfile);
 
-  const primary = collection.items[0];
-  if (!primary || !collection.key.startsWith("path:")) {
+  const primary = representativeItem(node);
+  if (!primary || ["root", "group", "folder"].includes(collectionNodeKind(node))) {
     return;
   }
 
@@ -1066,9 +1125,9 @@ function renderCollectionProfile(collection) {
   heading.className = "collection-profile-heading";
 
   const label = document.createElement("span");
-  label.textContent = primary.media_type === "anime" ? "Anime" : mediaTypeLabel(primary.media_type);
+  label.textContent = nodeTypeLabel(node);
   const name = document.createElement("strong");
-  name.textContent = primary.series_title || primary.title || collection.label;
+  name.textContent = primary.series_title || primary.title || node.label;
   const meta = document.createElement("p");
   const parts = [
     primary.format,
@@ -1096,14 +1155,40 @@ function renderCollectionProfile(collection) {
   collectionProfile.appendChild(profile);
 }
 
+function createCollectionFolderRow(node) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "table-row table-row-button collection-folder-row";
+  row.addEventListener("click", () => {
+    selectedCollectionKey = node.path;
+    selectedCollectionItemKey = "";
+    renderCollections(currentPlan?.items ?? []);
+  });
+
+  [
+    node.label,
+    nodeTypeLabel(node),
+    `${sortedChildren(node).length} Ordner / ${node.items.length} Dateien`,
+  ].forEach((cell) => {
+    const span = document.createElement("span");
+    span.textContent = cell;
+    row.appendChild(span);
+  });
+
+  return row;
+}
+
 function createCollectionItemRow(item) {
   const row = document.createElement("button");
   row.type = "button";
   row.className = "table-row table-row-button";
+  row.classList.toggle("is-selected", item.source_path === selectedCollectionItemKey);
   row.dataset.sourcePath = item.source_path;
   row.addEventListener("click", () => {
     selectedItemKey = item.source_path;
-    renderDetail(item);
+    selectedCollectionItemKey = item.source_path;
+    renderCollectionEditor(item);
+    renderCollectionRows(findCollectionNode(buildCollectionTree(currentPlan?.items ?? []), selectedCollectionKey));
     if (statusStrip) {
       statusStrip.textContent = `Eintrag ausgewählt: ${item.source_path}`;
     }
@@ -1122,18 +1207,24 @@ function createCollectionItemRow(item) {
   return row;
 }
 
-function renderCollectionRows(collection) {
+function renderCollectionRows(node) {
   if (!collectionRows) {
     return;
   }
 
   clearNode(collectionRows);
 
-  collection.items.forEach((item) => {
-    collectionRows.appendChild(createCollectionItemRow(item));
+  sortedChildren(node).forEach((child) => {
+    collectionRows.appendChild(createCollectionFolderRow(child));
   });
 
-  if (!collection.items.length) {
+  if (!sortedChildren(node).length) {
+    node.directItems.forEach((item) => {
+      collectionRows.appendChild(createCollectionItemRow(item));
+    });
+  }
+
+  if (!sortedChildren(node).length && !node.directItems.length) {
     const empty = document.createElement("div");
     empty.className = "collection-empty";
     empty.textContent = "Keine Einträge in dieser Sammlung.";
@@ -1142,11 +1233,10 @@ function renderCollectionRows(collection) {
 }
 
 function renderCollections(items) {
-  const collections = buildCollectionCatalog(items);
-  const selected =
-    collections.find((collection) => collection.key === selectedCollectionKey) ?? collections[0];
+  const root = buildCollectionTree(items);
+  const selected = findCollectionNode(root, selectedCollectionKey);
 
-  if (!selected) {
+  if (!selected.items.length) {
     if (collectionTitle) {
       collectionTitle.textContent = "Keine Sammlungen";
     }
@@ -1159,27 +1249,124 @@ function renderCollections(items) {
     if (collectionRows) {
       clearNode(collectionRows);
     }
+    renderCollectionEditor(null);
     return;
   }
 
-  if (selected.key !== selectedCollectionKey) {
-    selectedCollectionKey = selected.key;
-  }
+  selectedCollectionKey = selected.path;
 
   if (collectionTitle) {
     collectionTitle.textContent = selected.label;
   }
   if (collectionDescription) {
-    collectionDescription.textContent = `${selected.description} Regel: ${selected.rule}.`;
+    collectionDescription.textContent = collectionDescriptionFor(selected);
   }
   if (metricCollections) {
-    metricCollections.textContent = `${collections.length} smart`;
+    metricCollections.textContent = `${root.items.length} Dateien`;
   }
 
-  renderCollectionNavigation(collections);
+  renderCollectionNavigation(root, selected);
   renderCollectionMeta(selected);
   renderCollectionProfile(selected);
   renderCollectionRows(selected);
+
+  const selectedItem = selected.directItems.find((item) => item.source_path === selectedCollectionItemKey);
+  renderCollectionEditor(selectedItem ?? null);
+}
+
+function renderCollectionEditor(item) {
+  if (!collectionEditor) {
+    return;
+  }
+
+  collectionEditor.classList.toggle("is-active", Boolean(item));
+
+  if (!item) {
+    if (collectionEditorTitle) collectionEditorTitle.textContent = "Eintrag auswählen";
+    if (collectionEditorSubtitle) {
+      collectionEditorSubtitle.textContent =
+        "Wähle unten eine Datei, um Zielpfad, Metadaten und Sidecar zu prüfen.";
+    }
+    if (collectionEditorSource) collectionEditorSource.textContent = "-";
+    if (collectionEditorTarget) collectionEditorTarget.textContent = "-";
+    if (collectionEditorType) collectionEditorType.textContent = "-";
+    if (collectionEditorSidecar) collectionEditorSidecar.textContent = "-";
+    if (collectionEditorName) collectionEditorName.value = "";
+    if (collectionEditorMediaType) collectionEditorMediaType.value = "unclassified";
+    if (collectionEditorYear) collectionEditorYear.value = "";
+    if (collectionEditorStatus) collectionEditorStatus.value = "inbox";
+    if (collectionEditorNotes) collectionEditorNotes.value = "";
+    if (collectionEditorSidecarPreview) {
+      collectionEditorSidecarPreview.textContent = "Wähle einen Eintrag aus.";
+    }
+    return;
+  }
+
+  if (collectionEditorTitle) {
+    collectionEditorTitle.textContent = item.title || fileStem(item.source_path) || "Unbenannt";
+  }
+  if (collectionEditorSubtitle) {
+    collectionEditorSubtitle.textContent = item.collection_path || "Noch keiner Sammlung zugeordnet.";
+  }
+  if (collectionEditorSource) collectionEditorSource.textContent = item.source_path;
+  if (collectionEditorTarget) collectionEditorTarget.textContent = item.target_path || "-";
+  if (collectionEditorType) collectionEditorType.textContent = mediaTypeLabel(item.media_type);
+  if (collectionEditorSidecar) collectionEditorSidecar.textContent = item.sidecar_path || "-";
+  if (collectionEditorName) collectionEditorName.value = item.title ?? "";
+  if (collectionEditorMediaType) collectionEditorMediaType.value = item.media_type ?? "unclassified";
+  if (collectionEditorYear) collectionEditorYear.value = item.year ?? "";
+  if (collectionEditorStatus) {
+    collectionEditorStatus.value = item.status ?? (item.needs_review ? "needs-review" : "inbox");
+  }
+  if (collectionEditorNotes) collectionEditorNotes.value = item.notes ?? "";
+  if (collectionEditorSidecarPreview) {
+    collectionEditorSidecarPreview.textContent = item.sidecar_preview;
+  }
+}
+
+function upsertCollectionCorrection(item) {
+  corrections[item.source_path] = {
+    title: collectionEditorName?.value.trim() || null,
+    media_type: collectionEditorMediaType?.value || item.media_type,
+    year: normalizeYear(collectionEditorYear?.value),
+    status: collectionEditorStatus?.value || null,
+    notes: collectionEditorNotes?.value.trim() || null,
+    updated_at: new Date().toISOString(),
+  };
+
+  if (!corrections[item.source_path].title) {
+    delete corrections[item.source_path].title;
+  }
+  if (corrections[item.source_path].year === null) {
+    delete corrections[item.source_path].year;
+  }
+  if (!corrections[item.source_path].status) {
+    delete corrections[item.source_path].status;
+  }
+  if (!corrections[item.source_path].notes) {
+    delete corrections[item.source_path].notes;
+  }
+
+  saveStoredJson(correctionsKey, corrections);
+}
+
+function currentCollectionEditorItem() {
+  if (!currentPlan || !selectedCollectionItemKey) {
+    return null;
+  }
+
+  return currentPlan.items.find((item) => item.source_path === selectedCollectionItemKey) ?? null;
+}
+
+function rerenderAfterCollectionEdit(item) {
+  currentPlan = projectPlan(sourcePlan);
+  const updated = currentPlan.items.find((candidate) => candidate.source_path === item.source_path);
+  if (updated) {
+    selectedCollectionItemKey = updated.source_path;
+    selectedItemKey = updated.source_path;
+    selectedCollectionKey = updated.collection_path || selectedCollectionKey;
+  }
+  renderPlan(currentPlan);
 }
 
 function getVaultRoot() {
@@ -1202,25 +1389,31 @@ function syncVaultHint() {
 }
 
 function populateSelectors() {
-  if (detailMediaTypeInput) {
-    clearNode(detailMediaTypeInput);
+  [detailMediaTypeInput, collectionEditorMediaType].forEach((select) => {
+    if (!select) {
+      return;
+    }
+    clearNode(select);
     mediaTypeOptions.forEach(([value, label]) => {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
-      detailMediaTypeInput.appendChild(option);
+      select.appendChild(option);
     });
-  }
+  });
 
-  if (detailStatus) {
-    clearNode(detailStatus);
+  [detailStatus, collectionEditorStatus].forEach((select) => {
+    if (!select) {
+      return;
+    }
+    clearNode(select);
     statusOptions.forEach(([value, label]) => {
       const option = document.createElement("option");
       option.value = value;
       option.textContent = label;
-      detailStatus.appendChild(option);
+      select.appendChild(option);
     });
-  }
+  });
 }
 
 function upsertCorrection(item) {
@@ -1392,9 +1585,65 @@ if (detailReset) {
   });
 }
 
+if (collectionEditorApply) {
+  collectionEditorApply.addEventListener("click", () => {
+    const item = currentCollectionEditorItem();
+    if (!item) {
+      return;
+    }
+
+    upsertCollectionCorrection(item);
+    rerenderAfterCollectionEdit(item);
+    updateAuditTrail(`Korrektur übernommen für ${item.source_path}.`);
+  });
+}
+
+if (collectionEditorFetch) {
+  collectionEditorFetch.addEventListener("click", async () => {
+    const item = currentCollectionEditorItem();
+    if (!item) {
+      return;
+    }
+
+    try {
+      upsertCollectionCorrection(item);
+      const draft = {
+        ...item,
+        title: collectionEditorName?.value.trim() || item.title,
+        media_type: collectionEditorMediaType?.value || item.media_type,
+      };
+      await fetchAniListForItem(draft);
+      const updated = currentPlan?.items.find((candidate) => candidate.source_path === item.source_path);
+      if (updated) {
+        selectedCollectionKey = updated.collection_path || selectedCollectionKey;
+        selectedCollectionItemKey = updated.source_path;
+      }
+      renderPlan(currentPlan);
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (collectionEditorReset) {
+  collectionEditorReset.addEventListener("click", () => {
+    const item = currentCollectionEditorItem();
+    if (!item) {
+      return;
+    }
+
+    clearCorrection(item);
+    rerenderAfterCollectionEdit(item);
+    updateAuditTrail(`Lokale Korrektur zurückgesetzt für ${item.source_path}.`);
+  });
+}
+
 if (collectionBackDashboard) {
   collectionBackDashboard.addEventListener("click", () => {
-    selectedCollectionKey = "all";
+    selectedCollectionKey = "";
+    selectedCollectionItemKey = "";
     setActiveTab("overview");
   });
 }

@@ -252,12 +252,72 @@
 
               <div class="table collection-table">
                 <div class="table-row table-head">
-                  <span>Datei</span>
+                  <span>Name</span>
                   <span>Typ</span>
-                  <span>Ziel / Status</span>
+                  <span>Inhalt</span>
                 </div>
                 <div id="collection-rows"></div>
               </div>
+
+              <section class="collection-editor" id="collection-editor">
+                <div>
+                  <p class="panel-label">Datei bearbeiten</p>
+                  <h3 id="collection-editor-title">Eintrag auswählen</h3>
+                  <p class="body-copy" id="collection-editor-subtitle">
+                    Wähle unten eine Datei, um Zielpfad, Metadaten und Sidecar zu prüfen.
+                  </p>
+                </div>
+
+                <div class="detail-summary compact">
+                  <div>
+                    <span>Quelle</span>
+                    <strong id="collection-editor-source">-</strong>
+                  </div>
+                  <div>
+                    <span>Ziel</span>
+                    <strong id="collection-editor-target">-</strong>
+                  </div>
+                  <div>
+                    <span>Typ</span>
+                    <strong id="collection-editor-type">-</strong>
+                  </div>
+                  <div>
+                    <span>Sidecar</span>
+                    <strong id="collection-editor-sidecar">-</strong>
+                  </div>
+                </div>
+
+                <div class="stack detail-form">
+                  <label class="field">
+                    <span>Titel</span>
+                    <input id="collection-editor-name" type="text" />
+                  </label>
+                  <label class="field">
+                    <span>Medientyp</span>
+                    <select id="collection-editor-media-type"></select>
+                  </label>
+                  <label class="field">
+                    <span>Jahr</span>
+                    <input id="collection-editor-year" type="number" min="1900" max="2100" />
+                  </label>
+                  <label class="field">
+                    <span>Status</span>
+                    <select id="collection-editor-status"></select>
+                  </label>
+                  <label class="field">
+                    <span>Notiz</span>
+                    <textarea id="collection-editor-notes" rows="3"></textarea>
+                  </label>
+                  <div class="toolbar">
+                    <button class="action-button" id="collection-editor-fetch">AniList abrufen</button>
+                    <button class="action-button primary" id="collection-editor-apply">Korrektur übernehmen</button>
+                    <button class="action-button" id="collection-editor-reset">Zurücksetzen</button>
+                  </div>
+                </div>
+
+                <p class="panel-label">Sidecar-Vorschau</p>
+                <pre class="code-block" id="collection-editor-sidecar-preview">Wähle einen Eintrag aus.</pre>
+              </section>
             </section>
           </div>
         </section>
