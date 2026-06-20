@@ -2,9 +2,13 @@ const tabs = Array.from(document.querySelectorAll("[data-tab]"));
 const views = Array.from(document.querySelectorAll("[data-view]"));
 const vaultGate = document.getElementById("vault-gate");
 const vaultOpenPath = document.getElementById("vault-open-path");
+const vaultOpenPicker = document.getElementById("vault-open-picker");
+const vaultOpenPathDisplay = document.getElementById("vault-open-path-display");
 const vaultOpenButton = document.getElementById("vault-open-button");
 const vaultCreateName = document.getElementById("vault-create-name");
 const vaultCreatePath = document.getElementById("vault-create-path");
+const vaultCreatePicker = document.getElementById("vault-create-picker");
+const vaultCreatePathDisplay = document.getElementById("vault-create-path-display");
 const vaultCreateButton = document.getElementById("vault-create-button");
 const recentVaultsList = document.getElementById("recent-vaults-list");
 const title = document.getElementById("view-title");
@@ -26,6 +30,7 @@ const collectionMeta = document.getElementById("collection-meta");
 const collectionProfile = document.getElementById("collection-profile");
 const collectionCards = document.getElementById("collection-cards");
 const collectionRows = document.getElementById("collection-rows");
+const collectionMultiToggle = document.getElementById("collection-multi-toggle");
 const collectionEditor = document.getElementById("collection-editor");
 const collectionEditorTitle = document.getElementById("collection-editor-title");
 const collectionEditorSubtitle = document.getElementById("collection-editor-subtitle");
@@ -80,6 +85,7 @@ const inspectorTitle = document.getElementById("inspector-title");
 const inspectorProperties = document.getElementById("inspector-properties");
 const inspectorEditToggle = document.getElementById("inspector-edit-toggle");
 const inspectorFetchMetadata = document.getElementById("inspector-fetch-metadata");
+const inspectorTrash = document.getElementById("inspector-trash");
 const inspectorEdit = document.getElementById("inspector-edit");
 const inspectorName = document.getElementById("inspector-name");
 const inspectorMediaType = document.getElementById("inspector-media-type");
@@ -108,6 +114,8 @@ const metadataKey = "mediavault.apiMetadata";
 const yamlOverridesKey = "mediavault.yamlOverrides";
 const auditTrailKey = "mediavault.auditTrail";
 const collectionViewKey = "mediavault.collectionView";
+const recentCollectionsKey = "mediavault.recentCollections";
+const trashKey = "mediavault.trash";
 
 const labels = {
   overview: "Überblick",
@@ -165,8 +173,19 @@ let auditTrail = loadStoredJson(auditTrailKey, []);
 let collectionView = localStorage.getItem(collectionViewKey) || "cover";
 let inspectorItemKey = "";
 let inspectorSelection = null;
+let recentCollections = loadStoredJson(recentCollectionsKey, []);
+let trashedEntries = loadStoredJson(trashKey, {});
+let isMultiEdit = false;
+let multiSelectedKeys = new Set();
 
-function setActiveTab(tab) {
+function setActiveTab(tab, options = {}) {
+  if (tab === "collections" && options.resetCollections) {
+    selectedCollectionKey = "";
+    selectedCollectionItemKey = "";
+    isMultiEdit = false;
+    multiSelectedKeys.clear();
+  }
+
   tabs.forEach((button) => {
     button.classList.toggle("is-active", button.dataset.tab === tab);
   });
@@ -223,6 +242,56 @@ function saveStoredJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+function setHiddenPath(input, display, value) {
+  const normalized = String(value || "").trim();
+  if (input) {
+    input.value = normalized;
+  }
+  if (display) {
+    display.textContent = normalized || "Kein Pfad ausgewählt";
+  }
+}
+
+function directoryFromPickedFile(file) {
+  if (!file) {
+    return "";
+  }
+  if (file.path) {
+    const normalized = String(file.path).replace(/\\/g, "/");
+    const index = normalized.lastIndexOf("/");
+    return index >= 0 ? normalized.slice(0, index) : normalized;
+  }
+  if (file.webkitRelativePath) {
+    return String(file.webkitRelativePath).split("/").filter(Boolean)[0] || "";
+  }
+  return "";
+}
+
+function pickDirectoryWithInput(input) {
+  return new Promise((resolve) => {
+    if (!input) {
+      resolve("");
+      return;
+    }
+
+    input.value = "";
+    input.onchange = () => {
+      resolve(directoryFromPickedFile(input.files?.[0]));
+    };
+    input.click();
+  });
+}
+
+async function pickDirectory(input) {
+  const dialog = window.__TAURI__?.dialog;
+  if (dialog?.open) {
+    const selected = await dialog.open({ directory: true, multiple: false });
+    return Array.isArray(selected) ? selected[0] || "" : selected || "";
+  }
+
+  return pickDirectoryWithInput(input);
+}
+
 function defaultPathTemplates() {
   return {
     animeTv: "Anime/Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}",
@@ -264,7 +333,7 @@ function openVault(path, name = "") {
   const value = String(path || "").trim();
   if (!value) {
     if (statusStrip) {
-      statusStrip.textContent = "Bitte einen Vault-Pfad eintragen.";
+      statusStrip.textContent = "Bitte einen Vault im Finder auswählen.";
     }
     return;
   }
@@ -273,10 +342,34 @@ function openVault(path, name = "") {
   if (vaultRootInput) {
     vaultRootInput.value = value;
   }
+  setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, value);
   rememberVault(value, name);
   document.body.classList.add("is-vault-open");
   syncVaultHint();
   loadPlan();
+}
+
+function rememberCollection(node) {
+  if (!node?.path) {
+    return;
+  }
+
+  const entry = {
+    path: node.path,
+    label: node.label,
+    at: new Date().toISOString(),
+  };
+  recentCollections = [
+    entry,
+    ...recentCollections.filter((candidate) => candidate.path !== node.path),
+  ].slice(0, 5);
+  saveStoredJson(recentCollectionsKey, recentCollections);
+}
+
+function validRecentCollections(root) {
+  return recentCollections
+    .map((entry) => ({ ...entry, node: findCollectionNode(root, entry.path) }))
+    .filter((entry) => entry.node?.path === entry.path);
 }
 
 function renderRecentVaults() {
@@ -532,11 +625,11 @@ function stripEpisodeMarkerText(value) {
 }
 
 function deriveSeriesTitle(item) {
-  if (item.series_title && !episodeMarker(item.series_title)) {
+  if (item.series_title && !episodeMarker(item.series_title) && !/^staffel\s+\d+$/i.test(cleanTitleText(item.series_title))) {
     return cleanTitleText(item.series_title);
   }
 
-  if (item.title && !episodeMarker(item.title)) {
+  if (item.title && !episodeMarker(item.title) && !/^staffel\s+\d+$/i.test(cleanTitleText(item.title))) {
     return cleanTitleText(item.title);
   }
 
@@ -773,7 +866,14 @@ function projectItem(item) {
 
 function projectPlan(plan) {
   const cloned = JSON.parse(JSON.stringify(plan));
-  cloned.items = cloned.items.map((item) => projectItem(item));
+  cloned.items = cloned.items
+    .filter((item) => !trashedEntries[item.source_path])
+    .map((item) => projectItem(item));
+  if (cloned.summary) {
+    cloned.summary.total_files = cloned.items.length;
+    cloned.summary.items_needing_review = cloned.items.filter((item) => item.needs_review).length;
+    cloned.summary.duplicates = cloned.items.filter((item) => item.duplicate_of).length;
+  }
   return cloned;
 }
 
@@ -1355,7 +1455,12 @@ function propertyEntriesFor(value) {
     return [];
   }
   const item = selection.item ?? {};
-  const baseEntries = selection.type === "node"
+  const baseEntries = selection.type === "bulk"
+    ? [
+        ["object_type", "Mehrfachauswahl"],
+        ["items", selection.items.length],
+      ]
+    : selection.type === "node"
     ? [
         ["object_type", nodeTypeLabel(selection.node)],
         ["collection_path", selection.node.path || "Sammlungen"],
@@ -1408,6 +1513,9 @@ function renderInspector(value) {
   inspectorSelection = selection;
   inspectorItemKey = selection?.key ?? "";
   const item = selection?.item ?? null;
+  const editable = selectionEditable(selection);
+  const metadataAllowed = selectionSupportsMetadata(selection);
+  const yamlEditable = editable && selection?.type !== "bulk";
 
   if (inspectorTitle) {
     inspectorTitle.textContent = selectionTitle(selection);
@@ -1431,7 +1539,7 @@ function renderInspector(value) {
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "property-empty";
-      empty.textContent = "Wähle eine Datei aus, um Properties zu sehen.";
+      empty.textContent = "Wähle eine Datei, Serie, Staffel oder Mehrfachauswahl aus.";
       inspectorProperties.appendChild(empty);
     } else {
       entries.forEach(([key, value]) => {
@@ -1455,18 +1563,29 @@ function renderInspector(value) {
 
   if (inspectorYaml) {
     inspectorYaml.value = selectionYamlPreview(selection);
-    inspectorYaml.disabled = !selection;
+    inspectorYaml.disabled = !yamlEditable;
   }
   if (inspectorYamlSave) {
-    inspectorYamlSave.disabled = !selection;
+    inspectorYamlSave.disabled = !yamlEditable;
   }
   if (inspectorYamlReset) {
-    inspectorYamlReset.disabled = !selection || !yamlOverrides[selection.key];
+    inspectorYamlReset.disabled = !yamlEditable || !yamlOverrides[selection.key];
   }
+  if (inspectorEditToggle) {
+    inspectorEditToggle.disabled = !editable;
+    inspectorEditToggle.textContent = document.body.classList.contains("inspector-editing")
+      ? "Edit schließen"
+      : "Titel & Typ bearbeiten";
+  }
+  if (inspectorFetchMetadata) {
+    inspectorFetchMetadata.disabled = !metadataAllowed;
+  }
+  [inspectorApply, inspectorTrash].forEach((control) => {
+    if (control) {
+      control.disabled = !editable;
+    }
+  });
   [
-    inspectorEditToggle,
-    inspectorFetchMetadata,
-    inspectorApply,
     inspectorPropertyAddToggle,
     inspectorPropertyKey,
     inspectorPropertyType,
@@ -1474,11 +1593,11 @@ function renderInspector(value) {
     inspectorPropertyAdd,
   ].forEach((control) => {
     if (control) {
-      control.disabled = !selection;
+      control.disabled = !yamlEditable;
     }
   });
   if (inspectorYamlHint) {
-    inspectorYamlHint.textContent = selection
+    inspectorYamlHint.textContent = yamlEditable
       ? `Lokale YAML-Fassung für ${selection.key}.`
       : "Wähle eine Datei oder Sammlung aus, um YAML zu bearbeiten.";
   }
@@ -1601,6 +1720,17 @@ function nodeTypeLabel(node) {
   }
 }
 
+function nodeDisplayTitle(node, item = null) {
+  const kind = collectionNodeKind(node);
+  if (["series", "season"].includes(kind)) {
+    return item ? deriveSeriesTitle(item) : node.label;
+  }
+  if (kind === "movie") {
+    return item?.title || node.label;
+  }
+  return node.label;
+}
+
 function representativeItem(node) {
   return node.items.find((item) => item.anilist_id || item.series_title) ?? node.items[0] ?? null;
 }
@@ -1608,6 +1738,16 @@ function representativeItem(node) {
 function normalizeSelection(value) {
   if (!value) {
     return null;
+  }
+  if (value.type === "bulk" && Array.isArray(value.items)) {
+    const items = value.items.filter(Boolean);
+    return {
+      type: "bulk",
+      key: `bulk:${items.map((item) => item.source_path).join("|")}`,
+      item: items[0] ?? null,
+      items,
+      node: null,
+    };
   }
   if (value.source_path) {
     return {
@@ -1630,17 +1770,35 @@ function normalizeSelection(value) {
   return null;
 }
 
+function selectionEditable(selection) {
+  if (!selection || !selection.items.length) {
+    return false;
+  }
+  if (selection.type === "bulk" || selection.type === "file") {
+    return true;
+  }
+  const kind = collectionNodeKind(selection.node);
+  return ["series", "season", "movie"].includes(kind);
+}
+
+function selectionSupportsMetadata(selection) {
+  if (!selectionEditable(selection) || selection.type === "bulk") {
+    return false;
+  }
+  const mediaType = mediaSelectionValue(selection.item ?? {});
+  return ["anime", "anime-tv", "anime-movie"].includes(mediaType);
+}
+
 function selectionTitle(selection) {
   if (!selection) {
     return "Kein Eintrag ausgewählt";
   }
+  if (selection.type === "bulk") {
+    return `${selection.items.length} Einträge ausgewählt`;
+  }
   if (selection.type === "node") {
     const primary = selection.item;
-    const kind = collectionNodeKind(selection.node);
-    if (kind === "series") {
-      return primary?.series_title || selection.node.label;
-    }
-    return selection.node.label || primary?.title || "Sammlung";
+    return nodeDisplayTitle(selection.node, primary) || "Sammlung";
   }
   return selection.item?.title || fileStem(selection.item?.source_path) || "Unbenannt";
 }
@@ -1654,6 +1812,17 @@ function selectionYamlPreview(selection) {
   }
   if (selection.type === "file") {
     return selection.item?.sidecar_preview ?? "";
+  }
+  if (selection.type === "bulk") {
+    const lines = [
+      "---",
+      `id: ${yamlScalar(selection.key)}`,
+      "object_type: mehrfachauswahl",
+      `items: ${selection.items.length}`,
+      `title: ${yamlScalar(selectionTitle(selection))}`,
+      "---",
+    ];
+    return lines.join("\n");
   }
 
   const primary = selection.item ?? {};
@@ -1768,6 +1937,35 @@ function renderCollectionNavigation(root, node) {
     button.appendChild(count);
     collectionSidebarList.appendChild(button);
   });
+
+  if (!node.path) {
+    const recent = validRecentCollections(root);
+    if (recent.length) {
+      const heading = document.createElement("p");
+      heading.className = "panel-label collection-recent-label";
+      heading.textContent = "Zuletzt angesehen";
+      collectionSidebarList.appendChild(heading);
+    }
+
+    recent.forEach((entry) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "collection-nav-item";
+      button.addEventListener("click", () => {
+        selectedCollectionKey = entry.path;
+        selectedCollectionItemKey = "";
+        renderCollections(currentPlan?.items ?? []);
+      });
+
+      const label = document.createElement("strong");
+      label.textContent = entry.label;
+      const count = document.createElement("span");
+      count.textContent = entry.path;
+      button.appendChild(label);
+      button.appendChild(count);
+      collectionSidebarList.appendChild(button);
+    });
+  }
 
   if (!sortedChildren(node).length && node.path) {
     const empty = document.createElement("div");
@@ -1884,6 +2082,37 @@ function renderCollectionProfile(node) {
   if (tagBar.childNodes.length) {
     heading.appendChild(tagBar);
   }
+
+  const actions = document.createElement("div");
+  actions.className = "media-actionbar";
+  const editButton = document.createElement("button");
+  editButton.type = "button";
+  editButton.className = "action-button";
+  editButton.textContent = "Titel bearbeiten";
+  editButton.addEventListener("click", () => {
+    renderInspector({ type: "node", node });
+    document.body.classList.add("inspector-editing");
+    inspectorName?.focus();
+  });
+  const metadataButton = document.createElement("button");
+  metadataButton.type = "button";
+  metadataButton.className = "action-button";
+  metadataButton.textContent = "AniList abrufen";
+  metadataButton.addEventListener("click", () => {
+    renderInspector({ type: "node", node });
+    inspectorFetchMetadata?.click();
+  });
+  const trashButton = document.createElement("button");
+  trashButton.type = "button";
+  trashButton.className = "action-button danger";
+  trashButton.textContent = "In Papierkorb";
+  trashButton.addEventListener("click", () => {
+    trashSelection(normalizeSelection({ type: "node", node }));
+  });
+  actions.appendChild(editButton);
+  actions.appendChild(metadataButton);
+  actions.appendChild(trashButton);
+  heading.appendChild(actions);
 
   profile.appendChild(cover);
   profile.appendChild(heading);
@@ -2019,6 +2248,52 @@ function createCollectionFolderRow(node) {
   return row;
 }
 
+function selectedBulkItems() {
+  return (currentPlan?.items ?? []).filter((item) => multiSelectedKeys.has(item.source_path));
+}
+
+function renderBulkInspector() {
+  renderInspector({ type: "bulk", items: selectedBulkItems() });
+}
+
+function toggleBulkItem(item) {
+  if (!item?.source_path) {
+    return;
+  }
+  if (multiSelectedKeys.has(item.source_path)) {
+    multiSelectedKeys.delete(item.source_path);
+  } else {
+    multiSelectedKeys.add(item.source_path);
+  }
+  renderCollections(currentPlan?.items ?? []);
+  renderBulkInspector();
+}
+
+function installLongPressSelection(element, item) {
+  let timer = null;
+  const clearTimer = () => {
+    if (timer) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  element.addEventListener("pointerdown", () => {
+    if (!item?.source_path) {
+      return;
+    }
+    clearTimer();
+    timer = window.setTimeout(() => {
+      isMultiEdit = true;
+      element.dataset.longPressFired = "true";
+      toggleBulkItem(item);
+    }, 450);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach((eventName) => {
+    element.addEventListener(eventName, clearTimer);
+  });
+}
+
 function createPosterCard(value, ordinal = null) {
   const isNode = !value.source_path;
   const node = isNode ? value : null;
@@ -2026,7 +2301,19 @@ function createPosterCard(value, ordinal = null) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "poster-card";
+  if (!isNode && item?.source_path) {
+    button.classList.toggle("is-bulk-selected", multiSelectedKeys.has(item.source_path));
+    installLongPressSelection(button, item);
+  }
   button.addEventListener("click", () => {
+    if (button.dataset.longPressFired === "true") {
+      button.dataset.longPressFired = "";
+      return;
+    }
+    if (!isNode && isMultiEdit) {
+      toggleBulkItem(item);
+      return;
+    }
     if (isNode) {
       selectedCollectionKey = node.path;
       selectedCollectionItemKey = "";
@@ -2064,9 +2351,7 @@ function createPosterCard(value, ordinal = null) {
   }
 
   const title = document.createElement("strong");
-  title.textContent = isNode
-    ? item?.series_title || item?.title || node.label
-    : item.title || fileStem(item.source_path);
+  title.textContent = isNode ? nodeDisplayTitle(node, item) : item.title || fileStem(item.source_path);
   const meta = document.createElement("span");
   meta.textContent = isNode
     ? [nodeTypeLabel(node), item?.year].filter(Boolean).join(" · ")
@@ -2083,8 +2368,18 @@ function createCollectionItemRow(item) {
   row.type = "button";
   row.className = "table-row table-row-button";
   row.classList.toggle("is-selected", item.source_path === selectedCollectionItemKey);
+  row.classList.toggle("is-bulk-selected", multiSelectedKeys.has(item.source_path));
   row.dataset.sourcePath = item.source_path;
+  installLongPressSelection(row, item);
   row.addEventListener("click", () => {
+    if (row.dataset.longPressFired === "true") {
+      row.dataset.longPressFired = "";
+      return;
+    }
+    if (isMultiEdit) {
+      toggleBulkItem(item);
+      return;
+    }
     selectedItemKey = item.source_path;
     selectedCollectionItemKey = item.source_path;
     renderCollectionEditor(item);
@@ -2158,6 +2453,13 @@ function renderCollectionCards(node) {
 function syncCollectionViewMode() {
   document.body.classList.toggle("collection-list-view", collectionView === "list");
   document.body.classList.toggle("collection-cover-view", collectionView !== "list");
+  document.body.classList.toggle("collection-bulk-mode", isMultiEdit);
+  if (collectionMultiToggle) {
+    collectionMultiToggle.classList.toggle("is-active", isMultiEdit);
+    collectionMultiToggle.textContent = isMultiEdit
+      ? `Auswahl beenden (${multiSelectedKeys.size})`
+      : "Mehrfachauswahl";
+  }
   document.querySelectorAll("[data-collection-view]").forEach((button) => {
     button.classList.toggle("is-active", button.dataset.collectionView === collectionView);
   });
@@ -2183,11 +2485,21 @@ function renderCollections(items) {
     if (collectionBreadcrumb) {
       clearNode(collectionBreadcrumb);
     }
+    if (collectionProfile) {
+      clearNode(collectionProfile);
+    }
+    if (collectionCards) {
+      clearNode(collectionCards);
+    }
     renderCollectionEditor(null);
+    renderInspector(null);
     return;
   }
 
   selectedCollectionKey = selected.path;
+  if (selected.path) {
+    rememberCollection(selected);
+  }
 
   if (collectionTitle) {
     collectionTitle.textContent = selected.label;
@@ -2209,7 +2521,9 @@ function renderCollections(items) {
 
   const selectedItem = selected.directItems.find((item) => item.source_path === selectedCollectionItemKey);
   renderCollectionEditor(selectedItem ?? null);
-  if (!selectedItem && currentActiveTab() === "collections") {
+  if (isMultiEdit && currentActiveTab() === "collections") {
+    renderBulkInspector();
+  } else if (!selectedItem && currentActiveTab() === "collections") {
     renderInspector({ type: "node", node: selected });
   }
 }
@@ -2403,7 +2717,7 @@ function upsertCorrection(item) {
 }
 
 function upsertSelectionCorrection(selection) {
-  if (!selection) {
+  if (!selectionEditable(selection)) {
     return;
   }
 
@@ -2419,8 +2733,15 @@ function upsertSelectionCorrection(selection) {
     };
 
     if (selection.type === "node") {
-      next.series_title = titleValue;
+      const kind = collectionNodeKind(selection.node);
+      if (["series", "season"].includes(kind)) {
+        next.series_title = titleValue;
+      }
       if (collectionNodeKind(selection.node) === "movie") {
+        next.title = titleValue;
+      }
+    } else if (selection.type === "bulk") {
+      if (titleValue && selection.items.length === 1) {
         next.title = titleValue;
       }
     } else {
@@ -2443,6 +2764,44 @@ function upsertSelectionCorrection(selection) {
   });
 
   saveStoredJson(correctionsKey, corrections);
+}
+
+function trashSelection(selection) {
+  if (!selectionEditable(selection)) {
+    return;
+  }
+
+  const count = selection.items.length;
+  const label = selectionTitle(selection);
+  const confirmed = window.confirm(
+    `${label} wirklich in den MediaVault-Papierkorb verschieben?\n\nDie Dateien werden jetzt noch nicht endgültig gelöscht.`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const at = new Date().toISOString();
+  selection.items.forEach((item) => {
+    trashedEntries[item.source_path] = {
+      source_path: item.source_path,
+      title: item.title || item.series_title || fileStem(item.source_path),
+      at,
+    };
+    delete corrections[item.source_path];
+    delete apiMetadata[item.source_path];
+  });
+  saveStoredJson(trashKey, trashedEntries);
+  saveStoredJson(correctionsKey, corrections);
+  saveStoredJson(metadataKey, apiMetadata);
+  multiSelectedKeys.clear();
+  selectedCollectionItemKey = "";
+  selectedItemKey = "";
+  currentPlan = projectPlan(sourcePlan);
+  renderPlan(currentPlan);
+  updateAuditTrail(`${count} Eintrag(e) in den App-Papierkorb verschoben.`);
+  if (statusStrip) {
+    statusStrip.textContent = `${count} Eintrag(e) in den MediaVault-Papierkorb verschoben.`;
+  }
 }
 
 function clearCorrection(item) {
@@ -2484,7 +2843,13 @@ async function loadPlan() {
 }
 
 tabs.forEach((button) => {
-  button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+  button.addEventListener("click", () => {
+    const tab = button.dataset.tab;
+    setActiveTab(tab, { resetCollections: tab === "collections" });
+    if (tab === "collections" && currentPlan) {
+      renderCollections(currentPlan.items);
+    }
+  });
 });
 
 document.querySelectorAll("[data-collection-view]").forEach((button) => {
@@ -2494,6 +2859,19 @@ document.querySelectorAll("[data-collection-view]").forEach((button) => {
     syncCollectionViewMode();
   });
 });
+
+if (collectionMultiToggle) {
+  collectionMultiToggle.addEventListener("click", () => {
+    isMultiEdit = !isMultiEdit;
+    if (!isMultiEdit) {
+      multiSelectedKeys.clear();
+    }
+    renderCollections(currentPlan?.items ?? []);
+    if (isMultiEdit) {
+      renderBulkInspector();
+    }
+  });
+}
 
 if (demoButton) {
   demoButton.addEventListener("click", () => {
@@ -2507,15 +2885,21 @@ if (demoButton) {
 }
 
 if (vaultOpenButton) {
-  vaultOpenButton.addEventListener("click", () => {
-    openVault(vaultOpenPath?.value || getVaultRoot());
+  vaultOpenButton.addEventListener("click", async () => {
+    const selected = await pickDirectory(vaultOpenPicker);
+    setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, selected);
+    openVault(selected || getVaultRoot());
   });
 }
 
 if (vaultCreateButton) {
-  vaultCreateButton.addEventListener("click", () => {
-    const path = vaultCreatePath?.value.trim();
-    const name = vaultCreateName?.value.trim() || basename(path || "");
+  vaultCreateButton.addEventListener("click", async () => {
+    const selected = await pickDirectory(vaultCreatePicker);
+    const name = vaultCreateName?.value.trim();
+    const path = name && selected && basename(selected) !== name
+      ? compactPath(`${selected}/${sanitizeSegment(name)}`)
+      : selected || vaultCreatePath?.value.trim();
+    setHiddenPath(vaultCreatePath, vaultCreatePathDisplay, path);
     openVault(path, name);
   });
 }
@@ -2524,6 +2908,7 @@ if (vaultRootInput) {
   const savedRoot = localStorage.getItem(storageKey);
   if (savedRoot) {
     vaultRootInput.value = savedRoot;
+    setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, savedRoot);
   }
 
   vaultRootInput.addEventListener("input", () => {
@@ -2719,10 +3104,13 @@ if (inspectorToggle) {
 
 if (inspectorEditToggle) {
   inspectorEditToggle.addEventListener("click", () => {
+    if (!selectionEditable(inspectorSelection)) {
+      return;
+    }
     document.body.classList.toggle("inspector-editing");
     inspectorEditToggle.textContent = document.body.classList.contains("inspector-editing")
       ? "Edit schließen"
-      : "Bearbeiten";
+      : "Titel & Typ bearbeiten";
   });
 }
 
@@ -2734,7 +3122,7 @@ if (inspectorPropertyAddToggle) {
 
 if (inspectorApply) {
   inspectorApply.addEventListener("click", () => {
-    if (!inspectorSelection) {
+    if (!selectionEditable(inspectorSelection)) {
       return;
     }
 
@@ -2758,7 +3146,7 @@ if (inspectorApply) {
 
 if (inspectorFetchMetadata) {
   inspectorFetchMetadata.addEventListener("click", async () => {
-    if (!inspectorSelection || !inspectorSelection.item) {
+    if (!selectionSupportsMetadata(inspectorSelection) || !inspectorSelection.item) {
       return;
     }
 
@@ -2779,6 +3167,12 @@ if (inspectorFetchMetadata) {
         "error"
       );
     }
+  });
+}
+
+if (inspectorTrash) {
+  inspectorTrash.addEventListener("click", () => {
+    trashSelection(inspectorSelection);
   });
 }
 
@@ -2844,6 +3238,8 @@ if (collectionBackDashboard) {
   collectionBackDashboard.addEventListener("click", () => {
     selectedCollectionKey = "";
     selectedCollectionItemKey = "";
+    isMultiEdit = false;
+    multiSelectedKeys.clear();
     setActiveTab("overview");
   });
 }

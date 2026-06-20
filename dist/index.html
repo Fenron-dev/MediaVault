@@ -16,9 +16,11 @@
         <div class="vault-gate-actions">
           <label class="field">
             <span>Bestehenden Vault öffnen</span>
-            <input id="vault-open-path" type="text" placeholder="/Pfad/zum/Vault" />
+            <input id="vault-open-path" type="hidden" />
+            <input class="visually-hidden" id="vault-open-picker" type="file" webkitdirectory directory />
+            <strong class="path-picker-value" id="vault-open-path-display">Kein Vault ausgewählt</strong>
           </label>
-          <button class="action-button primary" id="vault-open-button">Vault öffnen</button>
+          <button class="action-button primary" id="vault-open-button">Vault im Finder auswählen</button>
 
           <div class="vault-create-grid">
             <label class="field">
@@ -27,10 +29,12 @@
             </label>
             <label class="field">
               <span>Speicherort</span>
-              <input id="vault-create-path" type="text" placeholder="/Pfad/zum/neuen/Vault" />
+              <input id="vault-create-path" type="hidden" />
+              <input class="visually-hidden" id="vault-create-picker" type="file" webkitdirectory directory />
+              <strong class="path-picker-value" id="vault-create-path-display">Kein Speicherort ausgewählt</strong>
             </label>
           </div>
-          <button class="action-button" id="vault-create-button">Neuen Vault erstellen</button>
+          <button class="action-button" id="vault-create-button">Speicherort im Finder auswählen</button>
         </div>
 
         <section class="recent-vaults">
@@ -288,9 +292,12 @@
 
               <div class="collection-viewbar">
                 <p class="panel-label">Inhalt</p>
-                <div class="segmented-control" aria-label="Ansicht wechseln">
-                  <button class="is-active" data-collection-view="cover">Cover</button>
-                  <button data-collection-view="list">Liste</button>
+                <div class="collection-view-actions">
+                  <button class="action-button compact" id="collection-multi-toggle">Mehrfachauswahl</button>
+                  <div class="segmented-control" aria-label="Ansicht wechseln">
+                    <button class="is-active" data-collection-view="cover">Cover</button>
+                    <button data-collection-view="list">Liste</button>
+                  </div>
                 </div>
               </div>
 
@@ -446,8 +453,9 @@
           <p class="panel-label">Properties</p>
           <h3 id="inspector-title">Kein Eintrag ausgewählt</h3>
           <div class="inspector-actions">
-            <button class="action-button" id="inspector-edit-toggle">Bearbeiten</button>
+            <button class="action-button" id="inspector-edit-toggle">Titel & Typ bearbeiten</button>
             <button class="action-button" id="inspector-fetch-metadata">AniList abrufen</button>
+            <button class="action-button danger" id="inspector-trash">In Papierkorb</button>
           </div>
           <div class="inspector-edit" id="inspector-edit">
             <label class="property-edit-row">

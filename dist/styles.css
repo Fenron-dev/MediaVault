@@ -79,6 +79,28 @@ body:not(.is-vault-open) .app-shell {
   letter-spacing: 0.08em;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+.path-picker-value {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--muted);
+  padding: 10px 12px;
+  overflow-wrap: anywhere;
+}
+
 .vault-gate h1 {
   font-size: 2.4rem;
 }
@@ -941,6 +963,33 @@ h3 {
   margin-top: 18px;
 }
 
+.collection-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.action-button.compact {
+  padding: 8px 12px;
+}
+
+.action-button.danger {
+  border-color: rgba(255, 121, 107, 0.35);
+  color: #ff9286;
+}
+
+.action-button.danger:hover,
+.action-button.danger:focus-visible {
+  border-color: rgba(255, 121, 107, 0.65);
+  background: rgba(255, 121, 107, 0.1);
+}
+
+.action-button.is-active {
+  border-color: var(--accent);
+  background: rgba(122, 168, 116, 0.18);
+  color: var(--text);
+}
+
 .segmented-control {
   display: flex;
   border: 1px solid var(--line);
@@ -972,6 +1021,17 @@ h3 {
   padding: 0;
   text-align: left;
   cursor: pointer;
+}
+
+.poster-card.is-bulk-selected .poster-art,
+.table-row.is-bulk-selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(122, 168, 116, 0.18);
+}
+
+.collection-bulk-mode .poster-card:not(.is-bulk-selected),
+.collection-bulk-mode .table-row-button:not(.is-bulk-selected) {
+  opacity: 0.74;
 }
 
 .poster-art {
@@ -1078,6 +1138,13 @@ h3 {
   display: grid;
 }
 
+.media-actionbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
 .detail-summary.compact {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -1111,6 +1178,10 @@ h3 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
+}
+
+.inspector-actions .danger {
+  grid-column: 1 / -1;
 }
 
 .inspector-edit,
