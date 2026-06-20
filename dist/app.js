@@ -12,6 +12,7 @@ const metricCollections = document.getElementById("metric-collections");
 const collectionSidebar = document.getElementById("collection-sidebar");
 const collectionSidebarList = document.getElementById("collection-sidebar-list");
 const collectionBackDashboard = document.getElementById("collection-back-dashboard");
+const collectionBreadcrumb = document.getElementById("collection-breadcrumb");
 const collectionTitle = document.getElementById("collection-title");
 const collectionDescription = document.getElementById("collection-description");
 const collectionMeta = document.getElementById("collection-meta");
@@ -33,6 +34,7 @@ const collectionEditorFetch = document.getElementById("collection-editor-fetch")
 const collectionEditorApply = document.getElementById("collection-editor-apply");
 const collectionEditorReset = document.getElementById("collection-editor-reset");
 const collectionEditorSidecarPreview = document.getElementById("collection-editor-sidecar-preview");
+const collectionEditorApiFeedback = document.getElementById("collection-editor-api-feedback");
 const vaultRootInput = document.getElementById("vault-root-input");
 const vaultRootSave = document.getElementById("vault-root-save");
 const vaultRootClear = document.getElementById("vault-root-clear");
@@ -57,11 +59,24 @@ const detailFetchMetadata = document.getElementById("detail-fetch-metadata");
 const detailApply = document.getElementById("detail-apply");
 const detailReset = document.getElementById("detail-reset");
 const detailSidecarPreview = document.getElementById("detail-sidecar-preview");
+const detailApiFeedback = document.getElementById("detail-api-feedback");
+const inspectorToggle = document.getElementById("inspector-toggle");
+const inspectorTitle = document.getElementById("inspector-title");
+const inspectorProperties = document.getElementById("inspector-properties");
+const inspectorPropertyKey = document.getElementById("inspector-property-key");
+const inspectorPropertyType = document.getElementById("inspector-property-type");
+const inspectorPropertyValue = document.getElementById("inspector-property-value");
+const inspectorPropertyAdd = document.getElementById("inspector-property-add");
+const inspectorYaml = document.getElementById("inspector-yaml");
+const inspectorYamlSave = document.getElementById("inspector-yaml-save");
+const inspectorYamlReset = document.getElementById("inspector-yaml-reset");
+const inspectorYamlHint = document.getElementById("inspector-yaml-hint");
 const auditTrailNode = document.getElementById("audit-trail");
 
 const storageKey = "mediavault.vaultRoot";
 const correctionsKey = "mediavault.reviewCorrections";
 const metadataKey = "mediavault.apiMetadata";
+const yamlOverridesKey = "mediavault.yamlOverrides";
 const auditTrailKey = "mediavault.auditTrail";
 
 const labels = {
@@ -77,6 +92,8 @@ const mediaTypeOptions = [
   ["film", "Film"],
   ["series", "Serie"],
   ["anime", "Anime"],
+  ["anime-tv", "Anime (TV)"],
+  ["anime-movie", "Anime (Movie)"],
   ["photo", "Foto"],
   ["image", "Bild"],
   ["music-track", "Musikstück"],
@@ -112,7 +129,9 @@ let selectedCollectionKey = "";
 let selectedCollectionItemKey = "";
 let corrections = loadStoredJson(correctionsKey, {});
 let apiMetadata = loadStoredJson(metadataKey, {});
+let yamlOverrides = loadStoredJson(yamlOverridesKey, {});
 let auditTrail = loadStoredJson(auditTrailKey, []);
+let inspectorItemKey = "";
 
 function setActiveTab(tab) {
   tabs.forEach((button) => {
@@ -171,6 +190,10 @@ function saveStoredJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+function currentActiveTab() {
+  return tabs.find((button) => button.classList.contains("is-active"))?.dataset.tab ?? "overview";
+}
+
 function sanitizeSegment(value) {
   return String(value)
     .replace(/[\\/:"*?<>|]/g, " ")
@@ -224,8 +247,39 @@ function formatConfidence(value) {
 }
 
 function mediaTypeLabel(value) {
+  if (value === "anime-tv") return "Anime (TV)";
+  if (value === "anime-movie") return "Anime (Movie)";
   const found = mediaTypeOptions.find(([candidate]) => candidate === value);
   return found ? found[1] : value ?? "-";
+}
+
+function canonicalMediaType(value) {
+  switch (value) {
+    case "anime-tv":
+    case "anime-movie":
+      return "anime";
+    default:
+      return value ?? "unclassified";
+  }
+}
+
+function formatForMediaSelection(value) {
+  switch (value) {
+    case "anime-tv":
+      return "TV";
+    case "anime-movie":
+      return "MOVIE";
+    default:
+      return null;
+  }
+}
+
+function mediaSelectionValue(item) {
+  if (item.media_type === "anime") {
+    return String(item.format ?? "").toUpperCase() === "MOVIE" ? "anime-movie" : "anime-tv";
+  }
+
+  return item.media_type ?? "unclassified";
 }
 
 function statusLabel(value) {
@@ -439,7 +493,16 @@ function projectItem(item) {
     "title_original",
     "series_title",
     "description",
+    "media_type",
     "format",
+    "source",
+    "country_of_origin",
+    "hashtag",
+    "cover_image_medium",
+    "cover_image_large",
+    "cover_image_extra_large",
+    "cover_color",
+    "banner_image",
     "airing_season",
     "anilist_url",
     "episode_title",
@@ -457,9 +520,34 @@ function projectItem(item) {
     "episode_count",
     "runtime_minutes",
     "average_score",
+    "mean_score",
+    "popularity",
+    "favourites",
     "anilist_id",
+    "mal_id",
   ].forEach((field) => {
     if (typeof metadata[field] === "number") {
+      effective[field] = metadata[field];
+    }
+  });
+
+  [
+    "genres",
+    "synonyms",
+    "tags",
+    "studios",
+    "relations",
+    "characters",
+    "staff",
+    "reviews",
+  ].forEach((field) => {
+    if (Array.isArray(metadata[field])) {
+      effective[field] = metadata[field];
+    }
+  });
+
+  ["start_date", "end_date", "trailer"].forEach((field) => {
+    if (metadata[field] && typeof metadata[field] === "object") {
       effective[field] = metadata[field];
     }
   });
@@ -468,7 +556,11 @@ function projectItem(item) {
     effective.title = correction.title;
   }
   if (typeof correction.media_type === "string") {
-    effective.media_type = correction.media_type;
+    effective.media_type = canonicalMediaType(correction.media_type);
+    const selectedFormat = formatForMediaSelection(correction.media_type);
+    if (selectedFormat) {
+      effective.format = selectedFormat;
+    }
   }
   if (typeof correction.year !== "undefined") {
     effective.year = correction.year;
@@ -482,7 +574,7 @@ function projectItem(item) {
 
   effective.has_correction = Boolean(correction.updated_at);
   effective.folder_segment = correction.media_type
-    ? folderSegmentFor(correction.media_type)
+    ? folderSegmentFor(canonicalMediaType(correction.media_type))
     : effective.folder_segment ?? folderSegmentFor(effective.media_type);
   const marker = episodeMarker(effective.source_path) || episodeMarker(effective.title);
   if (marker) {
@@ -499,7 +591,7 @@ function projectItem(item) {
   effective.collection_path = collectionPathFor(effective);
   effective.target_path = buildTargetPath(effective);
   effective.sidecar_path = buildSidecarPath(effective.target_path);
-  effective.sidecar_preview = buildSidecarPreview(effective);
+  effective.sidecar_preview = yamlOverrides[item.source_path] || buildSidecarPreview(effective);
   return effective;
 }
 
@@ -562,6 +654,76 @@ function yamlScalar(value) {
   return JSON.stringify(String(value));
 }
 
+function appendYamlValue(lines, key, value, indent = 0) {
+  if (value === null || typeof value === "undefined" || value === "") {
+    return;
+  }
+
+  const prefix = " ".repeat(indent);
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      return;
+    }
+    lines.push(`${prefix}${key}:`);
+    value.forEach((entry) => {
+      if (entry && typeof entry === "object") {
+        lines.push(`${prefix}  - ${JSON.stringify(entry)}`);
+      } else {
+        lines.push(`${prefix}  - ${yamlScalar(entry)}`);
+      }
+    });
+    return;
+  }
+
+  if (typeof value === "object") {
+    if (!Object.keys(value).length) {
+      return;
+    }
+    lines.push(`${prefix}${key}: ${JSON.stringify(value)}`);
+    return;
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
+    lines.push(`${prefix}${key}: ${value}`);
+    return;
+  }
+
+  lines.push(`${prefix}${key}: ${yamlScalar(value)}`);
+}
+
+function yamlLineForTypedProperty(key, type, rawValue) {
+  const name = sanitizeSegment(key).replace(/\s+/g, "_").toLowerCase();
+  if (!name) {
+    return "";
+  }
+
+  const value = String(rawValue ?? "").trim();
+  switch (type) {
+    case "number":
+    case "rating": {
+      const parsed = Number.parseFloat(value.replace(",", "."));
+      return Number.isNaN(parsed) ? `${name}: ${yamlScalar(value)}` : `${name}: ${parsed}`;
+    }
+    case "date":
+      return `${name}: ${yamlScalar(value)}`;
+    case "tags": {
+      const values = value
+        .split(",")
+        .map((part) => part.trim())
+        .filter(Boolean);
+      return values.length
+        ? `${name}:\n${values.map((entry) => `  - ${yamlScalar(entry)}`).join("\n")}`
+        : `${name}: []`;
+    }
+    case "boolean":
+      return `${name}: ${["true", "ja", "yes", "1"].includes(value.toLowerCase())}`;
+    case "link":
+    case "text":
+    default:
+      return `${name}: ${yamlScalar(value)}`;
+  }
+}
+
 function buildSidecarPreview(item) {
   const targetPath = item.target_path || item.source_path;
   const status = item.status || (item.needs_review ? "needs-review" : "inbox");
@@ -615,6 +777,29 @@ function buildSidecarPreview(item) {
   if (item.anilist_url) {
     lines.push(`anilist_url: ${yamlScalar(item.anilist_url)}`);
   }
+  appendYamlValue(lines, "mal_id", item.mal_id);
+  appendYamlValue(lines, "source", item.source);
+  appendYamlValue(lines, "country_of_origin", item.country_of_origin);
+  appendYamlValue(lines, "hashtag", item.hashtag);
+  appendYamlValue(lines, "mean_score", item.mean_score);
+  appendYamlValue(lines, "popularity", item.popularity);
+  appendYamlValue(lines, "favourites", item.favourites);
+  appendYamlValue(lines, "start_date", item.start_date);
+  appendYamlValue(lines, "end_date", item.end_date);
+  appendYamlValue(lines, "genres", item.genres);
+  appendYamlValue(lines, "synonyms", item.synonyms);
+  appendYamlValue(lines, "tags", item.tags);
+  appendYamlValue(lines, "studios", item.studios);
+  appendYamlValue(lines, "relations", item.relations);
+  appendYamlValue(lines, "characters", item.characters);
+  appendYamlValue(lines, "staff", item.staff);
+  appendYamlValue(lines, "reviews", item.reviews);
+  appendYamlValue(lines, "cover_image_medium", item.cover_image_medium);
+  appendYamlValue(lines, "cover_image_large", item.cover_image_large);
+  appendYamlValue(lines, "cover_image_extra_large", item.cover_image_extra_large);
+  appendYamlValue(lines, "cover_color", item.cover_color);
+  appendYamlValue(lines, "banner_image", item.banner_image);
+  appendYamlValue(lines, "trailer", item.trailer);
   if (item.collection_path) {
     lines.push(`collection_path: ${yamlScalar(item.collection_path)}`);
   }
@@ -637,14 +822,38 @@ function normalizeAniListMetadata(metadata, item) {
     title_original: metadata.title_native || null,
     series_title: title || item.series_title || item.title,
     description: metadata.description || null,
+    media_type: "anime",
     year: metadata.season_year ?? item.year ?? null,
+    start_date: metadata.start_date ?? null,
+    end_date: metadata.end_date ?? null,
     episode_count: metadata.episodes ?? null,
     runtime_minutes: metadata.duration ?? null,
     average_score: metadata.average_score ?? null,
+    mean_score: metadata.mean_score ?? null,
+    popularity: metadata.popularity ?? null,
+    favourites: metadata.favourites ?? null,
     format: metadata.format || null,
+    source: metadata.source || null,
+    country_of_origin: metadata.country_of_origin || null,
+    hashtag: metadata.hashtag || null,
     airing_season: metadata.season || null,
     anilist_id: metadata.anilist_id ?? null,
     anilist_url: metadata.anilist_url || null,
+    mal_id: metadata.mal_id ?? null,
+    genres: Array.isArray(metadata.genres) ? metadata.genres : [],
+    synonyms: Array.isArray(metadata.synonyms) ? metadata.synonyms : [],
+    tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+    studios: Array.isArray(metadata.studios) ? metadata.studios : [],
+    relations: Array.isArray(metadata.relations) ? metadata.relations : [],
+    characters: Array.isArray(metadata.characters) ? metadata.characters : [],
+    staff: Array.isArray(metadata.staff) ? metadata.staff : [],
+    reviews: Array.isArray(metadata.reviews) ? metadata.reviews : [],
+    cover_image_medium: metadata.cover_image_medium || null,
+    cover_image_large: metadata.cover_image_large || null,
+    cover_image_extra_large: metadata.cover_image_extra_large || null,
+    cover_color: metadata.cover_color || null,
+    banner_image: metadata.banner_image || null,
+    trailer: metadata.trailer || null,
   };
 
   if (marker) {
@@ -655,7 +864,11 @@ function normalizeAniListMetadata(metadata, item) {
   }
 
   Object.keys(normalized).forEach((key) => {
-    if (normalized[key] === null || normalized[key] === "") {
+    if (
+      normalized[key] === null ||
+      normalized[key] === "" ||
+      (Array.isArray(normalized[key]) && !normalized[key].length)
+    ) {
       delete normalized[key];
     }
   });
@@ -663,13 +876,37 @@ function normalizeAniListMetadata(metadata, item) {
   return normalized;
 }
 
-async function fetchAniListForItem(item) {
+function setApiFeedback(node, message, tone = "") {
+  if (!node) {
+    return;
+  }
+  node.className = `api-feedback${tone ? ` is-${tone}` : ""}`;
+  node.textContent = message;
+}
+
+function aniListSummary(metadata) {
+  const parts = [
+    metadata.title || metadata.series_title,
+    metadata.format ? `Format ${metadata.format}` : "",
+    metadata.year ? `Jahr ${metadata.year}` : "",
+    typeof metadata.episode_count === "number" ? `${metadata.episode_count} Folgen` : "",
+    typeof metadata.average_score === "number" ? `Score ${Math.round(metadata.average_score)} / 100` : "",
+    Array.isArray(metadata.tags) ? `${metadata.tags.length} Tags` : "",
+    Array.isArray(metadata.relations) ? `${metadata.relations.length} Relationen` : "",
+    Array.isArray(metadata.characters) ? `${metadata.characters.length} Charaktere` : "",
+    Array.isArray(metadata.staff) ? `${metadata.staff.length} Staff` : "",
+  ].filter(Boolean);
+  return parts.join(" | ");
+}
+
+async function fetchAniListForItem(item, feedbackNode = null) {
   const searchTitle =
     item.series_title ||
     item.title ||
     detailTitle?.value.trim() ||
     stripEpisodeMarkerText(fileStem(item.source_path));
   if (!searchTitle) {
+    setApiFeedback(feedbackNode, `Kein Suchbegriff für ${item.source_path} vorhanden.`, "error");
     if (statusStrip) {
       statusStrip.textContent = "Kein Suchbegriff für AniList vorhanden.";
     }
@@ -679,8 +916,9 @@ async function fetchAniListForItem(item) {
   if (statusStrip) {
     statusStrip.textContent = `AniList-Suche läuft für: ${searchTitle}`;
   }
+  setApiFeedback(feedbackNode, `Suche AniList für ${item.source_path} mit "${searchTitle}"...`, "loading");
 
-  const adult = item.media_type === "hentai-anime";
+  const adult = canonicalMediaType(item.media_type) === "hentai-anime";
   const response = await fetch(`/api/anilist-search?title=${encodeURIComponent(searchTitle)}&adult=${adult ? "true" : "false"}`);
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -688,15 +926,23 @@ async function fetchAniListForItem(item) {
 
   const payload = await response.json();
   if (!payload.metadata) {
+    setApiFeedback(
+      feedbackNode,
+      `Kein AniList-Treffer für "${searchTitle}" bei ${item.source_path}. Titel korrigieren und erneut abrufen.`,
+      "error"
+    );
     throw new Error(payload.error || "Kein AniList-Treffer");
   }
 
-  apiMetadata[item.source_path] = normalizeAniListMetadata(payload.metadata, item);
+  const normalized = normalizeAniListMetadata(payload.metadata, item);
+  apiMetadata[item.source_path] = normalized;
   saveStoredJson(metadataKey, apiMetadata);
   currentPlan = projectPlan(sourcePlan);
   selectedItemKey = item.source_path;
   renderPlan(currentPlan);
+  setApiFeedback(feedbackNode, `AniList übernommen: ${aniListSummary(normalized)}`, "success");
   updateAuditTrail(`AniList-Metadaten übernommen für ${item.source_path}.`);
+  return normalized;
 }
 
 function updateAuditTrail(message) {
@@ -846,6 +1092,9 @@ function renderDetail(item) {
     if (detailStatus) detailStatus.value = "inbox";
     if (detailNotes) detailNotes.value = "";
     if (detailSidecarPreview) detailSidecarPreview.textContent = "Wähle einen Eintrag aus.";
+    if (currentActiveTab() !== "collections") {
+      renderInspector(null);
+    }
     return;
   }
 
@@ -856,7 +1105,7 @@ function renderDetail(item) {
 
   if (detailSourcePath) detailSourcePath.textContent = item.source_path;
   if (detailTargetPath) detailTargetPath.textContent = item.target_path || "-";
-  if (detailMediaType) detailMediaType.textContent = mediaTypeLabel(item.media_type);
+  if (detailMediaType) detailMediaType.textContent = mediaTypeLabel(mediaSelectionValue(item));
   if (detailClassificationSource) {
     detailClassificationSource.textContent = classificationSourceLabel(item.classification_source);
   }
@@ -879,11 +1128,159 @@ function renderDetail(item) {
   }
 
   if (detailTitle) detailTitle.value = item.title ?? "";
-  if (detailMediaTypeInput) detailMediaTypeInput.value = item.media_type ?? "unclassified";
+  if (detailMediaTypeInput) detailMediaTypeInput.value = mediaSelectionValue(item);
   if (detailYear) detailYear.value = item.year ?? "";
   if (detailStatus) detailStatus.value = item.status ?? (item.needs_review ? "needs-review" : "inbox");
   if (detailNotes) detailNotes.value = item.notes ?? "";
   if (detailSidecarPreview) detailSidecarPreview.textContent = item.sidecar_preview;
+  if (currentActiveTab() !== "collections") {
+    renderInspector(item);
+  }
+}
+
+function propertyTypeLabel(key, value) {
+  if (key.includes("url") || key.includes("link") || key.includes("image")) {
+    return "Link";
+  }
+  if (key.includes("date")) {
+    return "Datum";
+  }
+  if (key.includes("score") || key.includes("rating")) {
+    return "Bewertung";
+  }
+  if (typeof value === "number") {
+    return "Nummer";
+  }
+  if (Array.isArray(value)) {
+    return key === "tags" || key === "genres" ? "Tags" : "Liste";
+  }
+  if (value && typeof value === "object") {
+    return "Objekt";
+  }
+  return "Text";
+}
+
+function propertyDisplayValue(value) {
+  if (Array.isArray(value)) {
+    if (!value.length) {
+      return "-";
+    }
+    return value
+      .slice(0, 5)
+      .map((entry) => {
+        if (entry && typeof entry === "object") {
+          return entry.name || entry.title || entry.character_name || entry.relation_type || JSON.stringify(entry);
+        }
+        return String(entry);
+      })
+      .join(", ");
+  }
+
+  if (value && typeof value === "object") {
+    return JSON.stringify(value);
+  }
+
+  return value === null || typeof value === "undefined" || value === "" ? "-" : String(value);
+}
+
+function propertyEntriesFor(item) {
+  if (!item) {
+    return [];
+  }
+
+  return [
+    ["media_type", mediaTypeLabel(mediaSelectionValue(item))],
+    ["format", item.format],
+    ["title", item.title],
+    ["series_title", item.series_title],
+    ["season_number", item.season_number],
+    ["episode_start", item.episode_start],
+    ["episode_end", item.episode_end],
+    ["year", item.year],
+    ["status", statusLabel(item.status || (item.needs_review ? "needs-review" : "inbox"))],
+    ["collection_path", item.collection_path],
+    ["target_path", item.target_path],
+    ["anilist_id", item.anilist_id],
+    ["anilist_url", item.anilist_url],
+    ["mal_id", item.mal_id],
+    ["average_score", item.average_score],
+    ["mean_score", item.mean_score],
+    ["popularity", item.popularity],
+    ["favourites", item.favourites],
+    ["genres", item.genres],
+    ["tags", item.tags],
+    ["studios", item.studios],
+    ["relations", item.relations],
+    ["characters", item.characters],
+    ["staff", item.staff],
+    ["reviews", item.reviews],
+    ["cover_image_extra_large", item.cover_image_extra_large],
+    ["banner_image", item.banner_image],
+  ].filter(([, value]) => {
+    if (Array.isArray(value)) {
+      return value.length;
+    }
+    return value !== null && typeof value !== "undefined" && value !== "";
+  });
+}
+
+function renderInspector(item) {
+  inspectorItemKey = item?.source_path ?? "";
+
+  if (inspectorTitle) {
+    inspectorTitle.textContent = item
+      ? item.title || fileStem(item.source_path) || "Unbenannt"
+      : "Kein Eintrag ausgewählt";
+  }
+
+  if (inspectorProperties) {
+    clearNode(inspectorProperties);
+    const entries = propertyEntriesFor(item);
+    if (!entries.length) {
+      const empty = document.createElement("div");
+      empty.className = "property-empty";
+      empty.textContent = "Wähle eine Datei aus, um Properties zu sehen.";
+      inspectorProperties.appendChild(empty);
+    } else {
+      entries.forEach(([key, value]) => {
+        const row = document.createElement("div");
+        row.className = "property-row";
+
+        const name = document.createElement("strong");
+        name.textContent = key;
+        const type = document.createElement("span");
+        type.textContent = propertyTypeLabel(key, value);
+        const body = document.createElement("p");
+        body.textContent = propertyDisplayValue(value);
+
+        row.appendChild(name);
+        row.appendChild(type);
+        row.appendChild(body);
+        inspectorProperties.appendChild(row);
+      });
+    }
+  }
+
+  if (inspectorYaml) {
+    inspectorYaml.value = item ? item.sidecar_preview ?? "" : "";
+    inspectorYaml.disabled = !item;
+  }
+  if (inspectorYamlSave) {
+    inspectorYamlSave.disabled = !item;
+  }
+  if (inspectorYamlReset) {
+    inspectorYamlReset.disabled = !item || !yamlOverrides[item.source_path];
+  }
+  [inspectorPropertyKey, inspectorPropertyType, inspectorPropertyValue, inspectorPropertyAdd].forEach((control) => {
+    if (control) {
+      control.disabled = !item;
+    }
+  });
+  if (inspectorYamlHint) {
+    inspectorYamlHint.textContent = item
+      ? `Lokale YAML-Fassung für ${item.source_path}.`
+      : "Wähle eine Datei aus, um YAML zu bearbeiten.";
+  }
 }
 
 function renderPlan(plan) {
@@ -1106,6 +1503,43 @@ function renderCollectionNavigation(root, node) {
   }
 }
 
+function renderCollectionBreadcrumb(node) {
+  if (!collectionBreadcrumb) {
+    return;
+  }
+
+  clearNode(collectionBreadcrumb);
+
+  const rootButton = document.createElement("button");
+  rootButton.type = "button";
+  rootButton.textContent = "Sammlungen";
+  rootButton.addEventListener("click", () => {
+    selectedCollectionKey = "";
+    selectedCollectionItemKey = "";
+    renderCollections(currentPlan?.items ?? []);
+  });
+  collectionBreadcrumb.appendChild(rootButton);
+
+  const parts = String(node.path || "").split("/").filter(Boolean);
+  parts.forEach((part, index) => {
+    const separator = document.createElement("span");
+    separator.textContent = ">";
+    collectionBreadcrumb.appendChild(separator);
+
+    const path = parts.slice(0, index + 1).join("/");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = part;
+    button.classList.toggle("is-active", index === parts.length - 1);
+    button.addEventListener("click", () => {
+      selectedCollectionKey = path;
+      selectedCollectionItemKey = "";
+      renderCollections(currentPlan?.items ?? []);
+    });
+    collectionBreadcrumb.appendChild(button);
+  });
+}
+
 function renderCollectionProfile(node) {
   if (!collectionProfile) {
     return;
@@ -1196,7 +1630,7 @@ function createCollectionItemRow(item) {
 
   [
     item.source_path,
-    mediaTypeLabel(item.media_type),
+    mediaTypeLabel(mediaSelectionValue(item)),
     item.target_path || statusLabel(item.status || "inbox"),
   ].forEach((cell) => {
     const span = document.createElement("span");
@@ -1249,6 +1683,9 @@ function renderCollections(items) {
     if (collectionRows) {
       clearNode(collectionRows);
     }
+    if (collectionBreadcrumb) {
+      clearNode(collectionBreadcrumb);
+    }
     renderCollectionEditor(null);
     return;
   }
@@ -1266,6 +1703,7 @@ function renderCollections(items) {
   }
 
   renderCollectionNavigation(root, selected);
+  renderCollectionBreadcrumb(selected);
   renderCollectionMeta(selected);
   renderCollectionProfile(selected);
   renderCollectionRows(selected);
@@ -1299,6 +1737,9 @@ function renderCollectionEditor(item) {
     if (collectionEditorSidecarPreview) {
       collectionEditorSidecarPreview.textContent = "Wähle einen Eintrag aus.";
     }
+    if (currentActiveTab() === "collections") {
+      renderInspector(null);
+    }
     return;
   }
 
@@ -1310,10 +1751,10 @@ function renderCollectionEditor(item) {
   }
   if (collectionEditorSource) collectionEditorSource.textContent = item.source_path;
   if (collectionEditorTarget) collectionEditorTarget.textContent = item.target_path || "-";
-  if (collectionEditorType) collectionEditorType.textContent = mediaTypeLabel(item.media_type);
+  if (collectionEditorType) collectionEditorType.textContent = mediaTypeLabel(mediaSelectionValue(item));
   if (collectionEditorSidecar) collectionEditorSidecar.textContent = item.sidecar_path || "-";
   if (collectionEditorName) collectionEditorName.value = item.title ?? "";
-  if (collectionEditorMediaType) collectionEditorMediaType.value = item.media_type ?? "unclassified";
+  if (collectionEditorMediaType) collectionEditorMediaType.value = mediaSelectionValue(item);
   if (collectionEditorYear) collectionEditorYear.value = item.year ?? "";
   if (collectionEditorStatus) {
     collectionEditorStatus.value = item.status ?? (item.needs_review ? "needs-review" : "inbox");
@@ -1321,6 +1762,9 @@ function renderCollectionEditor(item) {
   if (collectionEditorNotes) collectionEditorNotes.value = item.notes ?? "";
   if (collectionEditorSidecarPreview) {
     collectionEditorSidecarPreview.textContent = item.sidecar_preview;
+  }
+  if (currentActiveTab() === "collections") {
+    renderInspector(item);
   }
 }
 
@@ -1559,10 +2003,16 @@ if (detailFetchMetadata) {
       const draft = {
         ...item,
         title: detailTitle?.value.trim() || item.title,
+        series_title: detailTitle?.value.trim() || item.series_title,
         media_type: detailMediaTypeInput?.value || item.media_type,
       };
-      await fetchAniListForItem(draft);
+      await fetchAniListForItem(draft, detailApiFeedback);
     } catch (error) {
+      setApiFeedback(
+        detailApiFeedback,
+        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        "error"
+      );
       if (statusStrip) {
         statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
       }
@@ -1610,9 +2060,10 @@ if (collectionEditorFetch) {
       const draft = {
         ...item,
         title: collectionEditorName?.value.trim() || item.title,
+        series_title: collectionEditorName?.value.trim() || item.series_title,
         media_type: collectionEditorMediaType?.value || item.media_type,
       };
-      await fetchAniListForItem(draft);
+      await fetchAniListForItem(draft, collectionEditorApiFeedback);
       const updated = currentPlan?.items.find((candidate) => candidate.source_path === item.source_path);
       if (updated) {
         selectedCollectionKey = updated.collection_path || selectedCollectionKey;
@@ -1620,6 +2071,11 @@ if (collectionEditorFetch) {
       }
       renderPlan(currentPlan);
     } catch (error) {
+      setApiFeedback(
+        collectionEditorApiFeedback,
+        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        "error"
+      );
       if (statusStrip) {
         statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
       }
@@ -1637,6 +2093,73 @@ if (collectionEditorReset) {
     clearCorrection(item);
     rerenderAfterCollectionEdit(item);
     updateAuditTrail(`Lokale Korrektur zurückgesetzt für ${item.source_path}.`);
+  });
+}
+
+if (inspectorToggle) {
+  inspectorToggle.addEventListener("click", () => {
+    document.body.classList.toggle("inspector-collapsed");
+    inspectorToggle.textContent = document.body.classList.contains("inspector-collapsed")
+      ? "Properties anzeigen"
+      : "Properties ausblenden";
+  });
+}
+
+if (inspectorYamlSave) {
+  inspectorYamlSave.addEventListener("click", () => {
+    if (!inspectorItemKey || !inspectorYaml) {
+      return;
+    }
+
+    yamlOverrides[inspectorItemKey] = inspectorYaml.value;
+    saveStoredJson(yamlOverridesKey, yamlOverrides);
+    currentPlan = projectPlan(sourcePlan);
+    renderPlan(currentPlan);
+    updateAuditTrail(`YAML lokal gespeichert für ${inspectorItemKey}.`);
+  });
+}
+
+if (inspectorYamlReset) {
+  inspectorYamlReset.addEventListener("click", () => {
+    if (!inspectorItemKey) {
+      return;
+    }
+
+    delete yamlOverrides[inspectorItemKey];
+    saveStoredJson(yamlOverridesKey, yamlOverrides);
+    currentPlan = projectPlan(sourcePlan);
+    renderPlan(currentPlan);
+    updateAuditTrail(`YAML-Override zurückgesetzt für ${inspectorItemKey}.`);
+  });
+}
+
+if (inspectorPropertyAdd) {
+  inspectorPropertyAdd.addEventListener("click", () => {
+    if (!inspectorItemKey || !inspectorYaml || !inspectorPropertyKey) {
+      return;
+    }
+
+    const line = yamlLineForTypedProperty(
+      inspectorPropertyKey.value,
+      inspectorPropertyType?.value || "text",
+      inspectorPropertyValue?.value || ""
+    );
+    if (!line) {
+      return;
+    }
+
+    const current = inspectorYaml.value.trimEnd();
+    inspectorYaml.value = `${current}\n${line}\n`;
+    yamlOverrides[inspectorItemKey] = inspectorYaml.value;
+    saveStoredJson(yamlOverridesKey, yamlOverrides);
+    currentPlan = projectPlan(sourcePlan);
+    renderPlan(currentPlan);
+    updateAuditTrail(`Property ${inspectorPropertyKey.value} lokal ergänzt für ${inspectorItemKey}.`);
+
+    inspectorPropertyKey.value = "";
+    if (inspectorPropertyValue) {
+      inspectorPropertyValue.value = "";
+    }
   });
 }
 

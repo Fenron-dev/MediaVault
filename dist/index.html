@@ -211,6 +211,7 @@
                     <button class="action-button primary" id="detail-apply">Korrektur übernehmen</button>
                     <button class="action-button" id="detail-reset">Zurücksetzen</button>
                   </div>
+                  <div class="api-feedback" id="detail-api-feedback"></div>
                 </div>
 
                 <p class="field-hint" id="detail-hint">
@@ -236,6 +237,8 @@
         <section class="view" data-view="collections">
           <div class="collections-layout">
             <section class="panel collection-detail">
+              <nav class="collection-breadcrumb" id="collection-breadcrumb" aria-label="Sammlungspfad"></nav>
+
               <div class="collection-hero">
                 <div>
                   <p class="panel-label">Sammlung</p>
@@ -313,6 +316,7 @@
                     <button class="action-button primary" id="collection-editor-apply">Korrektur übernehmen</button>
                     <button class="action-button" id="collection-editor-reset">Zurücksetzen</button>
                   </div>
+                  <div class="api-feedback" id="collection-editor-api-feedback"></div>
                 </div>
 
                 <p class="panel-label">Sidecar-Vorschau</p>
@@ -363,23 +367,40 @@
       </main>
 
       <aside class="inspector">
-        <section class="panel tight">
-          <p class="panel-label">Systemstatus</p>
-          <h3>Build bereit</h3>
-          <p class="body-copy">
-            Diese Shell ist die erste testbare Desktop-Schicht. Sie prüft noch keine
-            echten Medien, zeigt aber bereits die geplante Arbeitsoberfläche.
-          </p>
+        <button class="action-button inspector-toggle" id="inspector-toggle">
+          Properties ausblenden
+        </button>
+
+        <section class="panel tight inspector-panel">
+          <p class="panel-label">Properties</p>
+          <h3 id="inspector-title">Kein Eintrag ausgewählt</h3>
+          <div class="property-add">
+            <input id="inspector-property-key" type="text" placeholder="property_name" />
+            <select id="inspector-property-type">
+              <option value="text">Text</option>
+              <option value="number">Nummer</option>
+              <option value="rating">Bewertung</option>
+              <option value="date">Datum</option>
+              <option value="tags">Tags</option>
+              <option value="link">Link</option>
+              <option value="boolean">Ja/Nein</option>
+            </select>
+            <input id="inspector-property-value" type="text" placeholder="Wert" />
+            <button class="action-button" id="inspector-property-add">Property hinzufügen</button>
+          </div>
+          <div class="property-list" id="inspector-properties"></div>
         </section>
 
-        <section class="panel tight">
-          <p class="panel-label">Heute geplant</p>
-          <ul class="list compact">
-            <li>Vault öffnen</li>
-            <li>Inbox scannen</li>
-            <li>Review-Dialog erzeugen</li>
-            <li>Duplikate markieren</li>
-          </ul>
+        <section class="panel tight inspector-panel">
+          <p class="panel-label">YAML</p>
+          <textarea class="yaml-editor" id="inspector-yaml" spellcheck="false"></textarea>
+          <div class="toolbar">
+            <button class="action-button primary" id="inspector-yaml-save">YAML speichern</button>
+            <button class="action-button" id="inspector-yaml-reset">Zurücksetzen</button>
+          </div>
+          <p class="field-hint" id="inspector-yaml-hint">
+            Änderungen werden zunächst lokal gespeichert.
+          </p>
         </section>
       </aside>
     </div>
