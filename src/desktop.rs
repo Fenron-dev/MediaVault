@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
 
 const PROTOCOL_SCHEME: &str = "mediavault";
+const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
+const LEGACY_SIDECAR_SUFFIX: &str = ".mediashelf.yaml";
 
 const INDEX_HTML: &str = include_str!("../dist/index.html");
 const APP_JS: &str = include_str!("../dist/app.js");
@@ -61,6 +63,7 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_vault_root_response(request.uri().query()),
                 ),
+                "/api/media-file" => build_media_file_response(request.uri().query()),
                 "/api/apply-import" => json_response(
                     StatusCode::OK,
                     &build_apply_import_response(request.body()),
@@ -215,6 +218,89 @@ fn build_select_folder_response() -> SelectFolderResponse {
     }
 }
 
+fn build_media_file_response(query: Option<&str>) -> Response<Vec<u8>> {
+    let Some(query) = query else {
+        return response(
+            StatusCode::BAD_REQUEST,
+            "text/plain; charset=utf-8",
+            "missing query",
+        );
+    };
+
+    let Some(path) = extract_query_value(query, "path") else {
+        return response(
+            StatusCode::BAD_REQUEST,
+            "text/plain; charset=utf-8",
+            "missing path",
+        );
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                "no vault open",
+            );
+        }
+        Err(error) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            );
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(vault) => vault,
+        Err(error) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            );
+        }
+    };
+
+    let relative = match RelativePath::new(path) {
+        Ok(path) => path,
+        Err(error) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            );
+        }
+    };
+
+    let absolute = match vault.resolve(relative.as_path()) {
+        Ok(path) => path,
+        Err(error) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            );
+        }
+    };
+
+    match fs::read(&absolute) {
+        Ok(body) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, media_content_type(&absolute))
+            .body(body)
+            .expect("media response construction should succeed"),
+        Err(error) => response(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            &error.to_string(),
+        ),
+    }
+}
+
 fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
     let request: ApplyImportRequest = match serde_json::from_slice(body) {
         Ok(request) => request,
@@ -315,7 +401,7 @@ fn build_vault_plan(root_override: Option<&str>) -> Result<DemoPlanResponse> {
 
 fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
     let vault = Vault::new(vault_root.clone())?;
-    let files = scan_inbox_files(&vault)?;
+    let files = scan_vault_files(&vault)?;
     let planner = ImportPlanner::new(ImportConfig {
         duplicate_policy: DuplicatePolicy::AskUser,
         ..ImportConfig::default()
@@ -327,31 +413,38 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
     let mut seen_fingerprints = HashSet::new();
 
     for file in &files {
-        let mut item = planner.plan_file(file)?;
-        anilist_results.push(resolve_anilist_metadata(&anilist_client, file, &item));
-        if let Some(fingerprint) = item.fingerprint.as_ref() {
-            let is_duplicate = !seen_fingerprints.insert(fingerprint.hash.clone());
-            if is_duplicate {
-                item.duplicate_of = Some(fingerprint.hash.clone());
-                item.manual_review = true;
-                item.target_path = None;
-                item.steps.retain(|step| {
-                    !matches!(
-                        step,
-                        PlannedImportStep::MoveFile { .. } | PlannedImportStep::WriteSidecar { .. }
-                    )
-                });
-                item.steps.push(PlannedImportStep::AskUser {
-                    prompt: UserPrompt {
-                        field_name: "duplicate".to_string(),
-                        message: "Duplikat gefunden".to_string(),
-                        options: vec![
-                            "Behalten".to_string(),
-                            "Überspringen".to_string(),
-                            "Zusammenführen".to_string(),
-                        ],
-                    },
-                });
+        let mut item = planner.plan_file(&file.incoming)?;
+        anilist_results.push(resolve_anilist_metadata(
+            &anilist_client,
+            &file.incoming,
+            &item,
+        ));
+        if is_in_inbox(&file.incoming.source_path) {
+            if let Some(fingerprint) = item.fingerprint.as_ref() {
+                let is_duplicate = !seen_fingerprints.insert(fingerprint.hash.clone());
+                if is_duplicate {
+                    item.duplicate_of = Some(fingerprint.hash.clone());
+                    item.manual_review = true;
+                    item.target_path = None;
+                    item.steps.retain(|step| {
+                        !matches!(
+                            step,
+                            PlannedImportStep::MoveFile { .. }
+                                | PlannedImportStep::WriteSidecar { .. }
+                        )
+                    });
+                    item.steps.push(PlannedImportStep::AskUser {
+                        prompt: UserPrompt {
+                            field_name: "duplicate".to_string(),
+                            message: "Duplikat gefunden".to_string(),
+                            options: vec![
+                                "Behalten".to_string(),
+                                "Überspringen".to_string(),
+                                "Zusammenführen".to_string(),
+                            ],
+                        },
+                    });
+                }
             }
         }
 
@@ -370,7 +463,7 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
         source: "vault".to_string(),
         vault_root: Some(vault_root.display().to_string()),
         note: if files.is_empty() {
-            Some("Inbox ist leer.".to_string())
+            Some("Vault ist leer.".to_string())
         } else {
             None
         },
@@ -380,7 +473,13 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
             .zip(items.iter())
             .zip(anilist_results.iter())
             .map(|((file, item), anilist_metadata)| {
-                DemoPlanItem::from_scanned(file, item, anilist_metadata.as_ref())
+                DemoPlanItem::from_scanned(
+                    &file.incoming,
+                    item,
+                    anilist_metadata.as_ref(),
+                    file.sidecar.as_ref(),
+                    file.sidecar_preview.as_deref(),
+                )
             })
             .collect(),
     })
@@ -506,7 +605,7 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
             .zip(items.iter())
             .zip(anilist_results.iter())
             .map(|((file, item), anilist_metadata)| {
-                DemoPlanItem::from_scanned(file, item, anilist_metadata.as_ref())
+                DemoPlanItem::from_scanned(file, item, anilist_metadata.as_ref(), None, None)
             })
             .collect(),
     }
@@ -629,6 +728,33 @@ struct SelectFolderResponse {
     error: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ScannedVaultFile {
+    incoming: IncomingFile,
+    sidecar: Option<ParsedSidecar>,
+    sidecar_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedSidecar {
+    media_type: Option<MediaType>,
+    title: Option<String>,
+    year: Option<u16>,
+    series_title: Option<String>,
+    season_number: Option<u16>,
+    episode_start: Option<u16>,
+    episode_end: Option<u16>,
+    episode_title: Option<String>,
+    episode_count: Option<u16>,
+    runtime_minutes: Option<u16>,
+    average_score: Option<f32>,
+    format: Option<String>,
+    airing_season: Option<String>,
+    anilist_id: Option<u32>,
+    anilist_url: Option<String>,
+    status: Option<MediaStatus>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct ApplyImportRequest {
     vault_root: Option<String>,
@@ -702,14 +828,32 @@ impl DemoPlanItem {
         file: &IncomingFile,
         item: &ImportPlanItem,
         anilist: Option<&AniListAnimeMetadata>,
+        sidecar: Option<&ParsedSidecar>,
+        sidecar_preview: Option<&str>,
     ) -> Self {
         let classification = item.classification.as_ref().or(file.classification.as_ref());
         let media_type = classification
             .map(|classification| classification.media_type)
+            .or(sidecar.and_then(|value| value.media_type))
             .unwrap_or(MediaType::Unclassified);
         let needs_review = requires_review(item);
         let title = build_display_title(file, anilist, media_type);
         let anime_context = derive_anime_context(file, item, anilist, title.as_deref());
+        let effective_series_title = sidecar
+            .and_then(|value| value.series_title.clone())
+            .or_else(|| anime_context.as_ref().and_then(|context| context.series_title.clone()));
+        let effective_season_number = sidecar
+            .and_then(|value| value.season_number)
+            .or_else(|| anime_context.as_ref().and_then(|context| context.season_number));
+        let effective_episode_start = sidecar
+            .and_then(|value| value.episode_start)
+            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_start));
+        let effective_episode_end = sidecar
+            .and_then(|value| value.episode_end)
+            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_end));
+        let effective_episode_title = sidecar
+            .and_then(|value| value.episode_title.clone())
+            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_title.clone()));
         let collection_path = build_collection_path(
             media_type,
             title.as_deref(),
@@ -741,40 +885,46 @@ impl DemoPlanItem {
                 .map(|classification| classification_source_label(&classification.source)),
             confidence: classification.map(|classification| classification.confidence),
             title,
-            year: file.metadata.as_ref().and_then(|metadata| metadata.year),
-            series_title: anime_context
+            year: file
+                .metadata
                 .as_ref()
-                .and_then(|context| context.series_title.clone()),
-            season_number: anime_context
-                .as_ref()
-                .and_then(|context| context.season_number),
-            episode_start: anime_context
-                .as_ref()
-                .and_then(|context| context.episode_start),
-            episode_end: anime_context
-                .as_ref()
-                .and_then(|context| context.episode_end),
-            episode_title: anime_context
-                .as_ref()
-                .and_then(|context| context.episode_title.clone()),
-            episode_count: anilist.and_then(|metadata| metadata.episodes),
-            runtime_minutes: anilist.and_then(|metadata| metadata.duration),
-            average_score: anilist.and_then(|metadata| metadata.average_score),
-            format: anilist.and_then(|metadata| metadata.format.clone()),
-            airing_season: anilist.and_then(|metadata| metadata.season.clone()),
-            anilist_id: anilist.map(|metadata| metadata.anilist_id),
-            anilist_url: anilist.and_then(|metadata| metadata.anilist_url.clone()),
+                .and_then(|metadata| metadata.year)
+                .or_else(|| sidecar.and_then(|value| value.year)),
+            series_title: effective_series_title,
+            season_number: effective_season_number,
+            episode_start: effective_episode_start,
+            episode_end: effective_episode_end,
+            episode_title: effective_episode_title,
+            episode_count: sidecar
+                .and_then(|value| value.episode_count)
+                .or_else(|| anilist.and_then(|metadata| metadata.episodes)),
+            runtime_minutes: sidecar
+                .and_then(|value| value.runtime_minutes)
+                .or_else(|| anilist.and_then(|metadata| metadata.duration)),
+            average_score: sidecar
+                .and_then(|value| value.average_score)
+                .or_else(|| anilist.and_then(|metadata| metadata.average_score)),
+            format: sidecar
+                .and_then(|value| value.format.clone())
+                .or_else(|| anilist.and_then(|metadata| metadata.format.clone())),
+            airing_season: sidecar
+                .and_then(|value| value.airing_season.clone())
+                .or_else(|| anilist.and_then(|metadata| metadata.season.clone())),
+            anilist_id: sidecar
+                .and_then(|value| value.anilist_id)
+                .or_else(|| anilist.map(|metadata| metadata.anilist_id)),
+            anilist_url: sidecar
+                .and_then(|value| value.anilist_url.clone())
+                .or_else(|| anilist.and_then(|metadata| metadata.anilist_url.clone())),
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
             sidecar_path: sidecar_path_for(&preview_path).ok().map(|path| path.to_string()),
-            sidecar_preview: render_sidecar_preview(
-                file,
-                item,
-                media_type,
-                anilist,
-                anime_context.as_ref(),
-            ),
+            sidecar_preview: sidecar_preview
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref())
+                }),
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
         }
     }
@@ -1460,6 +1610,25 @@ fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
     None
 }
 
+fn media_content_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("avif") => "image/avif",
+        Some("tif" | "tiff") => "image/tiff",
+        _ => "application/octet-stream",
+    }
+}
+
 fn apply_import_item(vault: &Vault, item: &ApplyImportItem) -> Result<()> {
     let source_relative = RelativePath::new(&item.source_path)?;
     let target_relative = RelativePath::new(&item.target_path)?;
@@ -1647,7 +1816,9 @@ fn auto_detect_vault_roots() -> Vec<PathBuf> {
 }
 
 fn looks_like_vault_root(path: &Path) -> bool {
-    path.join("Inbox").is_dir() || path.join(".mediashelf").is_dir()
+    path.join("Inbox").is_dir()
+        || path.join(".mediavault").is_dir()
+        || path.join(LEGACY_SYSTEM_DIR).is_dir()
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -1670,29 +1841,23 @@ impl VaultRootResponse {
     }
 }
 
-fn scan_inbox_files(vault: &Vault) -> Result<Vec<IncomingFile>> {
-    let inbox_dir = vault.inbox_dir();
-    if !inbox_dir.exists() {
-        return Ok(Vec::new());
-    }
-
+fn scan_vault_files(vault: &Vault) -> Result<Vec<ScannedVaultFile>> {
     let mut files = Vec::new();
-    scan_directory(vault, &inbox_dir, &mut files)?;
+    scan_directory(vault, vault.root(), &mut files)?;
     Ok(files)
 }
 
-fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<IncomingFile>) -> Result<()> {
+fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultFile>) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(VaultError::from)? {
         let entry = entry.map_err(VaultError::from)?;
         let path = entry.path();
 
-        if should_skip_scanned_entry(&path) {
-            continue;
-        }
-
         let metadata = entry.metadata().map_err(VaultError::from)?;
 
         if metadata.is_dir() {
+            if should_skip_scanned_directory(vault, &path) {
+                continue;
+            }
             scan_directory(vault, &path, files)?;
             continue;
         }
@@ -1701,34 +1866,191 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<IncomingFile>
             continue;
         }
 
+        if should_skip_scanned_file(&path) {
+            continue;
+        }
+
         let relative_path = vault.relative_from_absolute(&path)?;
+        let sidecar_file = find_sidecar_file(vault, &relative_path)?;
+        let sidecar_preview = sidecar_file
+            .as_ref()
+            .map(|path| fs::read_to_string(path).map_err(VaultError::from))
+            .transpose()?;
+        let parsed_sidecar = sidecar_preview
+            .as_deref()
+            .map(parse_sidecar_metadata)
+            .transpose()?;
         let fingerprint = Some(compute_fingerprint_for_file(&path)?);
-        let classification = detect_classification(&relative_path);
+        let classification = parsed_sidecar
+            .as_ref()
+            .and_then(classification_from_sidecar)
+            .or_else(|| detect_classification(&relative_path));
+        let resolved_title = parsed_sidecar
+            .as_ref()
+            .and_then(|sidecar| {
+                sidecar
+                    .series_title
+                    .clone()
+                    .or_else(|| sidecar.title.clone())
+            })
+            .or_else(|| relative_path.file_stem().map(|stem| stem.to_string_lossy().to_string()));
         let resolved_metadata = Some(ResolvedMetadata {
-            title: relative_path
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().to_string()),
-            year: None,
+            title: resolved_title,
+            year: parsed_sidecar.as_ref().and_then(|sidecar| sidecar.year),
         });
 
-        files.push(IncomingFile {
-            source_path: relative_path,
-            size_bytes: metadata.len(),
-            fingerprint,
-            classification,
-            metadata: resolved_metadata,
+        files.push(ScannedVaultFile {
+            incoming: IncomingFile {
+                source_path: relative_path,
+                size_bytes: metadata.len(),
+                fingerprint,
+                classification,
+                metadata: resolved_metadata,
+            },
+            sidecar: parsed_sidecar,
+            sidecar_preview,
         });
     }
 
     Ok(())
 }
 
-fn should_skip_scanned_entry(path: &Path) -> bool {
+fn should_skip_scanned_directory(vault: &Vault, path: &Path) -> bool {
+    if path == vault.system_dir() || path == vault.root().join(LEGACY_SYSTEM_DIR) {
+        return true;
+    }
+
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    name.eq_ignore_ascii_case("_review_queue") || is_hidden_system_entry(name)
+}
+
+fn should_skip_scanned_file(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
         return false;
     };
 
     is_hidden_system_entry(name)
+        || name.ends_with(".mediavault.yaml")
+        || name.ends_with(LEGACY_SIDECAR_SUFFIX)
+}
+
+fn find_sidecar_file(vault: &Vault, media_path: &RelativePath) -> Result<Option<PathBuf>> {
+    let current = vault.resolve(sidecar_path_for(media_path)?.as_path())?;
+    if current.exists() {
+        return Ok(Some(current));
+    }
+
+    let mut legacy_relative = media_path.to_path_buf();
+    legacy_relative.set_extension("mediashelf.yaml");
+    let legacy = vault.resolve(legacy_relative)?;
+    if legacy.exists() {
+        return Ok(Some(legacy));
+    }
+
+    Ok(None)
+}
+
+fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassification> {
+    sidecar.media_type.map(|media_type| FileClassification {
+        media_type,
+        confidence: 0.99,
+        source: ClassificationSource::User,
+    })
+}
+
+fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
+    let mut sidecar = ParsedSidecar::default();
+    let mut lines = raw.lines();
+
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == "---" {
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+
+        match key {
+            "media_type" => sidecar.media_type = parse_media_type(unquote_yaml(value)),
+            "title" => sidecar.title = Some(unquote_yaml(value)),
+            "year" => sidecar.year = value.parse::<u16>().ok(),
+            "series_title" => sidecar.series_title = Some(unquote_yaml(value)),
+            "season_number" => sidecar.season_number = value.parse::<u16>().ok(),
+            "episode_start" => sidecar.episode_start = value.parse::<u16>().ok(),
+            "episode_end" => sidecar.episode_end = value.parse::<u16>().ok(),
+            "episode_title" => sidecar.episode_title = Some(unquote_yaml(value)),
+            "episode_count" => sidecar.episode_count = value.parse::<u16>().ok(),
+            "runtime_minutes" => sidecar.runtime_minutes = value.parse::<u16>().ok(),
+            "average_score" => sidecar.average_score = value.parse::<f32>().ok(),
+            "format" => sidecar.format = Some(unquote_yaml(value)),
+            "airing_season" => sidecar.airing_season = Some(unquote_yaml(value)),
+            "anilist_id" => sidecar.anilist_id = value.parse::<u32>().ok(),
+            "anilist_url" => sidecar.anilist_url = Some(unquote_yaml(value)),
+            "status" => sidecar.status = parse_media_status(unquote_yaml(value).as_str()),
+            _ => {}
+        }
+    }
+
+    Ok(sidecar)
+}
+
+fn unquote_yaml(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        return trimmed[1..trimmed.len() - 1]
+            .replace("\\n", "\n")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\");
+    }
+    trimmed.to_string()
+}
+
+fn parse_media_type(value: String) -> Option<MediaType> {
+    match value.trim().to_lowercase().as_str() {
+        "film" => Some(MediaType::Film),
+        "series" => Some(MediaType::Series),
+        "anime" => Some(MediaType::Anime),
+        "hentai-anime" => Some(MediaType::HentaiAnime),
+        "book" => Some(MediaType::Book),
+        "ebook" => Some(MediaType::Ebook),
+        "comic" => Some(MediaType::Comic),
+        "manga" => Some(MediaType::Manga),
+        "music-album" => Some(MediaType::MusicAlbum),
+        "music-track" => Some(MediaType::MusicTrack),
+        "podcast" => Some(MediaType::Podcast),
+        "audiobook" => Some(MediaType::Audiobook),
+        "video-game" => Some(MediaType::VideoGame),
+        "document" => Some(MediaType::Document),
+        "photo" => Some(MediaType::Photo),
+        "video-misc" => Some(MediaType::VideoMisc),
+        "archive" => Some(MediaType::Archive),
+        "image" => Some(MediaType::Image),
+        "software" => Some(MediaType::Software),
+        "3d-model" => Some(MediaType::Model3D),
+        "unclassified" => Some(MediaType::Unclassified),
+        _ => None,
+    }
+}
+
+fn parse_media_status(value: &str) -> Option<MediaStatus> {
+    match value.trim().to_lowercase().as_str() {
+        "inbox" => Some(MediaStatus::Inbox),
+        "needs-review" => Some(MediaStatus::NeedsReview),
+        "in-library" => Some(MediaStatus::InLibrary),
+        "wishlist" => Some(MediaStatus::Wishlist),
+        "completed" => Some(MediaStatus::Completed),
+        "on-hold" => Some(MediaStatus::OnHold),
+        "archived" => Some(MediaStatus::Archived),
+        "ignored" => Some(MediaStatus::Ignored),
+        _ => None,
+    }
 }
 
 fn detect_classification(relative_path: &RelativePath) -> Option<FileClassification> {
@@ -1839,6 +2161,15 @@ const IMAGE_HINTS: [&str; 7] = [
 
 fn contains_any(value: &str, hints: &[&str]) -> bool {
     hints.iter().any(|hint| value.contains(hint))
+}
+
+fn is_in_inbox(relative_path: &RelativePath) -> bool {
+    relative_path
+        .as_path()
+        .components()
+        .next()
+        .map(|component| component.as_os_str() == "Inbox")
+        .unwrap_or(false)
 }
 
 fn has_season_episode_marker(value: &str) -> bool {

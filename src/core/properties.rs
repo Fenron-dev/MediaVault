@@ -10,7 +10,7 @@ use crate::media::{MediaEntry, MediaProperties};
 /// Returns the relative sidecar path for a media file.
 pub fn sidecar_path_for(media_path: &RelativePath) -> Result<RelativePath> {
     let mut path = PathBuf::from(media_path.as_path());
-    path.set_extension("mediashelf.yaml");
+    path.set_extension("mediavault.yaml");
     RelativePath::new(path)
 }
 
@@ -184,7 +184,7 @@ mod tests {
         let sidecar = sidecar_path_for(&media_path).expect("sidecar path should be valid");
         assert_eq!(
             sidecar.to_string(),
-            "Anime/Violet Evergarden.mediashelf.yaml"
+            "Anime/Violet Evergarden.mediavault.yaml"
         );
     }
 

@@ -119,6 +119,10 @@ const anilistDialogSearch = document.getElementById("anilist-dialog-search");
 const anilistDialogCancel = document.getElementById("anilist-dialog-cancel");
 const anilistDialogFeedback = document.getElementById("anilist-dialog-feedback");
 const anilistDialogResults = document.getElementById("anilist-dialog-results");
+const imageDialog = document.getElementById("image-dialog");
+const imageDialogTitle = document.getElementById("image-dialog-title");
+const imageDialogPreview = document.getElementById("image-dialog-preview");
+const imageDialogClose = document.getElementById("image-dialog-close");
 
 const storageKey = "mediavault.vaultRoot";
 const recentVaultsKey = "mediavault.recentVaults";
@@ -541,8 +545,28 @@ function scoreLabel(value) {
   return typeof value === "number" ? `${(value / 10).toFixed(1)}` : "-";
 }
 
+function mediaFileUrlFor(item) {
+  const path = item?.source_path || item?.target_path;
+  if (!path) {
+    return "";
+  }
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  return `/api/media-file?path=${encodeURIComponent(path)}${rootQuery}`;
+}
+
+function isLocalImageItem(item) {
+  const type = mediaSelectionValue(item);
+  return type === "photo" || type === "image";
+}
+
 function coverUrlFor(item) {
-  return item?.cover_image_extra_large || item?.cover_image_large || item?.cover_image_medium || "";
+  return (
+    item?.cover_image_extra_large ||
+    item?.cover_image_large ||
+    item?.cover_image_medium ||
+    (isLocalImageItem(item) ? mediaFileUrlFor(item) : "")
+  );
 }
 
 function datePartsLabel(value) {
@@ -868,7 +892,7 @@ function needsReviewInUi(item) {
 
 function projectItem(item) {
   const correction = corrections[item.source_path] ?? {};
-  const metadata = apiMetadata[item.source_path] ?? {};
+  const metadata = apiMetadata[item.source_path] ?? parseSidecarPreviewMetadata(item.sidecar_preview);
   const effective = { ...item };
 
   [
@@ -1009,6 +1033,9 @@ function isReadyForImport(item) {
   if (!item || !item.target_path) {
     return false;
   }
+  if (!String(item.source_path || "").startsWith("Inbox/")) {
+    return false;
+  }
   if (trashedEntries[item.source_path]) {
     return false;
   }
@@ -1139,7 +1166,7 @@ function buildSidecarPath(targetPath) {
   const stemIndex = fileName.lastIndexOf(".");
   const stem = stemIndex > 0 ? fileName.slice(0, stemIndex) : fileName;
   const prefix = slashIndex >= 0 ? normalized.slice(0, slashIndex + 1) : "";
-  return `${prefix}${stem}.mediashelf.yaml`;
+  return `${prefix}${stem}.mediavault.yaml`;
 }
 
 function yamlScalar(value) {
@@ -1306,6 +1333,78 @@ function buildSidecarPreview(item) {
   return lines.join("\n");
 }
 
+function parseYamlScalarValue(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      return JSON.parse(trimmed);
+    } catch (_error) {
+      return trimmed;
+    }
+  }
+  if (trimmed.startsWith("\"") && trimmed.endsWith("\"")) {
+    try {
+      return JSON.parse(trimmed);
+    } catch (_error) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  return trimmed;
+}
+
+function parseSidecarPreviewMetadata(raw) {
+  if (!raw || typeof raw !== "string") {
+    return {};
+  }
+
+  const metadata = {};
+  const lines = raw.split(/\r?\n/);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed === "---") {
+      continue;
+    }
+
+    const separator = trimmed.indexOf(":");
+    if (separator <= 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, separator).trim();
+    const value = trimmed.slice(separator + 1).trim();
+    if (!key) {
+      continue;
+    }
+
+    if (!value) {
+      const entries = [];
+      while (index + 1 < lines.length && lines[index + 1].trimStart().startsWith("- ")) {
+        index += 1;
+        entries.push(parseYamlScalarValue(lines[index].trimStart().slice(2)));
+      }
+      metadata[key] = entries;
+      continue;
+    }
+
+    metadata[key] = parseYamlScalarValue(value);
+  }
+
+  return metadata;
+}
+
 function normalizeAniListMetadata(metadata, item) {
   const title = metadata.title_english || metadata.title_romaji || metadata.title_native;
   const marker = episodeMarker(item.source_path) || episodeMarker(item.title);
@@ -1414,9 +1513,30 @@ function closeActionModal() {
   if (anilistDialog) {
     anilistDialog.hidden = true;
   }
+  if (imageDialog) {
+    imageDialog.hidden = true;
+  }
   if (appModal) {
     appModal.classList.remove("is-active");
     appModal.hidden = true;
+  }
+}
+
+function openImagePreview(item) {
+  const imageUrl = coverUrlFor(item);
+  if (!imageDialog || !imageDialogPreview || !imageUrl) {
+    return;
+  }
+
+  if (imageDialogTitle) {
+    imageDialogTitle.textContent = item?.title || fileStem(item?.source_path || "") || "Bildansicht";
+  }
+  imageDialogPreview.src = imageUrl;
+  imageDialogPreview.alt = item?.title || "Bildvorschau";
+  imageDialog.hidden = false;
+  if (appModal) {
+    appModal.hidden = false;
+    appModal.classList.add("is-active");
   }
 }
 
@@ -1886,6 +2006,28 @@ function propertyTypeLabel(key, value) {
   return "Text";
 }
 
+function propertyTypeIcon(key, value) {
+  const type = propertyTypeLabel(key, value);
+  switch (type) {
+    case "Link":
+      return "↗";
+    case "Datum":
+      return "◷";
+    case "Bewertung":
+      return "★";
+    case "Nummer":
+      return "#";
+    case "Tags":
+      return "⌘";
+    case "Liste":
+      return "☰";
+    case "Objekt":
+      return "{}";
+    default:
+      return "Aa";
+  }
+}
+
 function propertyDisplayValue(value) {
   if (Array.isArray(value)) {
     if (!value.length) {
@@ -2012,15 +2154,19 @@ function renderInspector(value) {
 
         const meta = document.createElement("div");
         meta.className = "property-row-meta";
+        const label = document.createElement("div");
+        label.className = "property-label";
+        const icon = document.createElement("span");
+        icon.className = "property-type-icon";
+        icon.textContent = propertyTypeIcon(key, value);
         const name = document.createElement("strong");
         name.textContent = key;
-        const type = document.createElement("span");
-        type.textContent = propertyTypeLabel(key, value);
         const body = document.createElement("p");
         body.textContent = propertyDisplayValue(value);
 
-        meta.appendChild(name);
-        meta.appendChild(type);
+        label.appendChild(icon);
+        label.appendChild(name);
+        meta.appendChild(label);
         row.appendChild(meta);
         row.appendChild(body);
         inspectorProperties.appendChild(row);
@@ -2562,6 +2708,10 @@ function renderCollectionProfile(node) {
     image.src = coverUrl;
     image.alt = primary.series_title || primary.title || node.label;
     cover.appendChild(image);
+    if (isLocalImageItem(primary)) {
+      cover.classList.add("is-clickable");
+      cover.addEventListener("click", () => openImagePreview(primary));
+    }
   } else {
     cover.textContent = "MV";
   }
@@ -2632,77 +2782,134 @@ function renderCollectionProfile(node) {
     });
     seasons.appendChild(cards);
     stack.appendChild(seasons);
-    if (kind !== "series") {
-      const synopsis = createMediaSection("Synopsis");
-      const synopsisText = document.createElement("p");
-      synopsisText.className = "media-synopsis";
-      synopsisText.textContent = description.textContent;
-      synopsis.appendChild(synopsisText);
-      stack.appendChild(synopsis);
-
-      const details = createMediaSection("Details");
-      details.appendChild(createDetailsGrid(primary));
-      stack.appendChild(details);
-
-      if (Array.isArray(primary.relations) && primary.relations.length) {
-        const relations = createMediaSection("Relations");
-        const relationGrid = document.createElement("div");
-        relationGrid.className = "relation-grid";
-        primary.relations.slice(0, 6).forEach((relation) => {
-          const card = document.createElement("div");
-          card.className = "relation-card";
-          const relationType = document.createElement("span");
-          relationType.textContent = relation.relation_type || "Verknüpft";
-          const title = document.createElement("strong");
-          title.textContent = relation.title || "Unbekannt";
-          const meta = document.createElement("p");
-          meta.textContent = [relation.media_type, relation.format].filter(Boolean).join(" · ");
-          card.appendChild(relationType);
-          card.appendChild(title);
-          card.appendChild(meta);
-          relationGrid.appendChild(card);
-        });
-        relations.appendChild(relationGrid);
-        stack.appendChild(relations);
-      }
-    }
+    appendCollectionMetadataSections(stack, primary, description.textContent);
     collectionProfile.appendChild(stack);
-  } else if (kind !== "series") {
+  } else {
     const stack = document.createElement("div");
     stack.className = "media-section-stack";
-    const synopsis = createMediaSection("Synopsis");
-    const synopsisText = document.createElement("p");
-    synopsisText.className = "media-synopsis";
-    synopsisText.textContent = description.textContent;
-    synopsis.appendChild(synopsisText);
-    stack.appendChild(synopsis);
-
-    const details = createMediaSection("Details");
-    details.appendChild(createDetailsGrid(primary));
-    stack.appendChild(details);
-    if (Array.isArray(primary.relations) && primary.relations.length) {
-      const relations = createMediaSection("Relations");
-      const relationGrid = document.createElement("div");
-      relationGrid.className = "relation-grid";
-      primary.relations.slice(0, 6).forEach((relation) => {
-        const card = document.createElement("div");
-        card.className = "relation-card";
-        const relationType = document.createElement("span");
-        relationType.textContent = relation.relation_type || "Verknüpft";
-        const title = document.createElement("strong");
-        title.textContent = relation.title || "Unbekannt";
-        const meta = document.createElement("p");
-        meta.textContent = [relation.media_type, relation.format].filter(Boolean).join(" · ");
-        card.appendChild(relationType);
-        card.appendChild(title);
-        card.appendChild(meta);
-        relationGrid.appendChild(card);
-      });
-      relations.appendChild(relationGrid);
-      stack.appendChild(relations);
-    }
+    appendCollectionMetadataSections(stack, primary, description.textContent);
     collectionProfile.appendChild(stack);
   }
+}
+
+function appendCollectionMetadataSections(stack, item, synopsisText) {
+  const synopsis = createMediaSection("Synopsis");
+  const synopsisBody = document.createElement("p");
+  synopsisBody.className = "media-synopsis";
+  synopsisBody.textContent = synopsisText;
+  synopsis.appendChild(synopsisBody);
+  stack.appendChild(synopsis);
+
+  const details = createMediaSection("Details");
+  details.appendChild(createDetailsGrid(item));
+  stack.appendChild(details);
+
+  if (Array.isArray(item.relations) && item.relations.length) {
+    const relations = createMediaSection("Relationen");
+    const relationGrid = document.createElement("div");
+    relationGrid.className = "relation-grid";
+    item.relations.slice(0, 8).forEach((relation) => {
+      const card = document.createElement("div");
+      card.className = "relation-card";
+      const imageUrl = relation.cover_image_large || relation.cover_image_medium || "";
+      if (imageUrl) {
+        const image = document.createElement("img");
+        image.src = imageUrl;
+        image.alt = relation.title || "Relation";
+        card.appendChild(image);
+      }
+      const relationType = document.createElement("span");
+      relationType.textContent = relation.relation_type || "Verknüpft";
+      const title = document.createElement("strong");
+      title.textContent = relation.title || "Unbekannt";
+      const meta = document.createElement("p");
+      meta.textContent = [relation.media_type, relation.format, relation.status].filter(Boolean).join(" · ");
+      card.appendChild(relationType);
+      card.appendChild(title);
+      card.appendChild(meta);
+      relationGrid.appendChild(card);
+    });
+    relations.appendChild(relationGrid);
+    stack.appendChild(relations);
+  }
+
+  if (Array.isArray(item.characters) && item.characters.length) {
+    const characters = createMediaSection("Charaktere");
+    const list = document.createElement("div");
+    list.className = "credit-grid";
+    item.characters.slice(0, 8).forEach((character) => {
+      list.appendChild(
+        createCreditCard(
+          character.character_name || character.name || "Unbekannt",
+          character.voice_actor_name || character.voice_actor?.name || "",
+          character.role || character.language || "",
+          character.character_image || character.character?.image || "",
+          character.voice_actor_image || character.voice_actor?.image || ""
+        )
+      );
+    });
+    characters.appendChild(list);
+    stack.appendChild(characters);
+  }
+
+  if (Array.isArray(item.staff) && item.staff.length) {
+    const staff = createMediaSection("Staff");
+    const list = document.createElement("div");
+    list.className = "credit-grid";
+    item.staff.slice(0, 8).forEach((entry) => {
+      list.appendChild(
+        createCreditCard(
+          entry.name || "Unbekannt",
+          entry.role || "",
+          entry.language || "",
+          entry.image || "",
+          ""
+        )
+      );
+    });
+    staff.appendChild(list);
+    stack.appendChild(staff);
+  }
+}
+
+function createCreditCard(name, subline, meta, leftImageUrl = "", rightImageUrl = "") {
+  const card = document.createElement("div");
+  card.className = "credit-card";
+
+  if (leftImageUrl) {
+    const left = document.createElement("img");
+    left.src = leftImageUrl;
+    left.alt = name;
+    left.className = "credit-thumb";
+    card.appendChild(left);
+  }
+
+  const text = document.createElement("div");
+  text.className = "credit-card-copy";
+  const title = document.createElement("strong");
+  title.textContent = name;
+  text.appendChild(title);
+  if (subline) {
+    const support = document.createElement("span");
+    support.textContent = subline;
+    text.appendChild(support);
+  }
+  if (meta) {
+    const metaNode = document.createElement("p");
+    metaNode.textContent = meta;
+    text.appendChild(metaNode);
+  }
+  card.appendChild(text);
+
+  if (rightImageUrl) {
+    const right = document.createElement("img");
+    right.src = rightImageUrl;
+    right.alt = subline || name;
+    right.className = "credit-thumb is-secondary";
+    card.appendChild(right);
+  }
+
+  return card;
 }
 
 function createMediaSection(title, subtitle = "") {
@@ -3942,6 +4149,12 @@ if (anilistDialogSearch) {
 
 if (anilistDialogCancel) {
   anilistDialogCancel.addEventListener("click", () => {
+    closeActionModal();
+  });
+}
+
+if (imageDialogClose) {
+  imageDialogClose.addEventListener("click", () => {
     closeActionModal();
   });
 }

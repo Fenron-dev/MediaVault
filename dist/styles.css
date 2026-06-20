@@ -878,7 +878,7 @@ h3 {
 
 .collection-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }
@@ -923,9 +923,10 @@ h3 {
 
 .collection-meta {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 16px;
+  margin-top: 12px;
+  max-width: 900px;
 }
 
 .collection-meta div {
@@ -1006,6 +1007,10 @@ h3 {
   background: #111417;
   color: var(--accent-strong);
   font-weight: 800;
+}
+
+.collection-cover.is-clickable {
+  cursor: zoom-in;
 }
 
 .collection-cover img {
@@ -1143,15 +1148,16 @@ h3 {
 .collection-viewbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
-  margin-top: 18px;
+  margin-top: 12px;
 }
 
 .collection-view-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+  margin-left: auto;
 }
 
 .action-button.compact {
@@ -1277,6 +1283,7 @@ h3 {
 
 .relation-card {
   display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
   gap: 8px;
   padding: 14px;
   border: 1px solid var(--line);
@@ -1284,12 +1291,68 @@ h3 {
   background: var(--panel-strong);
 }
 
+.relation-card img {
+  width: 84px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 8px;
+}
+
 .relation-card span {
   color: var(--accent-strong);
   font-size: 0.82rem;
 }
 
+.relation-card strong,
 .relation-card p {
+  overflow-wrap: anywhere;
+}
+
+.relation-card p {
+  color: var(--muted);
+}
+
+.credit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.credit-card {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) 96px;
+  gap: 14px;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+  overflow: hidden;
+}
+
+.credit-thumb {
+  width: 100%;
+  min-height: 118px;
+  height: 100%;
+  object-fit: cover;
+  background: #111417;
+}
+
+.credit-card-copy {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 14px 0;
+  min-width: 0;
+}
+
+.credit-card-copy strong,
+.credit-card-copy span,
+.credit-card-copy p {
+  overflow-wrap: anywhere;
+}
+
+.credit-card-copy span,
+.credit-card-copy p {
   color: var(--muted);
 }
 
@@ -1352,6 +1415,8 @@ h3 {
   align-content: start;
   gap: 16px;
   min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
 .inspector-toggle {
@@ -1476,39 +1541,50 @@ h3 {
 
 .property-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.65fr) minmax(0, 1fr);
+  grid-template-columns: minmax(150px, 0.52fr) minmax(0, 1fr);
   gap: 10px 14px;
   align-items: start;
 }
 
 .property-row-meta {
   display: grid;
-  gap: 4px;
+  gap: 6px;
   min-width: 0;
+}
+
+.property-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.property-type-icon {
+  min-width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(122, 168, 116, 0.12);
+  color: var(--accent-strong);
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .property-row strong {
   min-width: 0;
-  overflow-wrap: break-word;
-  color: var(--muted);
-  font-weight: 500;
-}
-
-.property-row span {
-  display: block;
-  color: var(--accent-strong);
-  font-size: 0.74rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  line-height: 1.35;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .property-row p,
 .property-empty {
   color: var(--text);
   line-height: 1.4;
-  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
   margin: 0;
+  min-width: 0;
 }
 
 .property-empty {
@@ -1585,6 +1661,23 @@ h3 {
   padding: 10px 8px;
 }
 
+.image-modal {
+  max-width: min(1280px, calc(100vw - 48px));
+}
+
+.image-modal-stage {
+  display: grid;
+  place-items: center;
+  padding: 8px 0 16px;
+}
+
+.image-modal-stage img {
+  max-width: 100%;
+  max-height: min(78vh, 980px);
+  border-radius: var(--radius-sm);
+  object-fit: contain;
+}
+
 @media (max-width: 1200px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -1598,6 +1691,10 @@ h3 {
 
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .credit-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1640,5 +1737,10 @@ h3 {
 
   .sidebar {
     min-height: auto;
+  }
+
+  .credit-card,
+  .relation-card {
+    grid-template-columns: 1fr;
   }
 }

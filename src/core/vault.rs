@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::{Result, VaultError};
 
-const SYSTEM_DIR: &str = ".mediashelf";
+const SYSTEM_DIR: &str = ".mediavault";
 const INBOX_DIR: &str = "Inbox";
 const REVIEW_QUEUE_DIR: &str = "_review_queue";
 const COVERS_DIR: &str = "covers";
