@@ -120,95 +120,98 @@
         </section>
 
         <section class="view" data-view="review">
-          <div class="panel-grid review-grid">
-            <section class="panel">
-              <p class="panel-label">Manuelle Klärung</p>
-              <h3>Wenn Inhalt oder Zusammengehörigkeit unklar sind</h3>
-              <div class="table">
-                <div class="table-row table-head">
-                  <span>Fall</span>
-                  <span>Status</span>
-                  <span>Aktion</span>
+          <div class="review-layout">
+            <div class="panel-grid review-grid">
+              <section class="panel">
+                <p class="panel-label">Manuelle Klärung</p>
+                <h3>Wenn Inhalt oder Zusammengehörigkeit unklar sind</h3>
+                <div class="table">
+                  <div class="table-row table-head">
+                    <span>Fall</span>
+                    <span>Status</span>
+                    <span>Aktion</span>
+                  </div>
+                  <div id="review-rows"></div>
                 </div>
-                <div id="review-rows"></div>
-              </div>
-            </section>
-            <section class="panel">
-              <p class="panel-label">Detail & Korrektur</p>
-              <h3 id="detail-heading">Eintrag auswählen</h3>
-              <p class="body-copy" id="detail-subtitle">
-                Die gewählte Datei wird hier mit Zielpfad, Sidecar-Vorschau und Korrekturfeldern angezeigt.
-              </p>
+              </section>
+              <section class="panel">
+                <p class="panel-label">Detail & Korrektur</p>
+                <h3 id="detail-heading">Eintrag auswählen</h3>
+                <p class="body-copy" id="detail-subtitle">
+                  Die gewählte Datei wird hier mit Zielpfad, Sidecar-Vorschau und Korrekturfeldern angezeigt.
+                </p>
 
-              <div class="detail-summary">
-                <div>
-                  <span>Quelle</span>
-                  <strong id="detail-source-path">-</strong>
+                <div class="detail-summary">
+                  <div>
+                    <span>Quelle</span>
+                    <strong id="detail-source-path">-</strong>
+                  </div>
+                  <div>
+                    <span>Ziel</span>
+                    <strong id="detail-target-path">-</strong>
+                  </div>
+                  <div>
+                    <span>Typ</span>
+                    <strong id="detail-media-type">-</strong>
+                  </div>
+                  <div>
+                    <span>Quelle der Erkennung</span>
+                    <strong id="detail-classification-source">-</strong>
+                  </div>
+                  <div>
+                    <span>Confidence</span>
+                    <strong id="detail-confidence">-</strong>
+                  </div>
+                  <div>
+                    <span>Größe</span>
+                    <strong id="detail-size">-</strong>
+                  </div>
+                  <div>
+                    <span>Status</span>
+                    <strong id="detail-status-label">-</strong>
+                  </div>
+                  <div>
+                    <span>Sidecar</span>
+                    <strong id="detail-sidecar-path">-</strong>
+                  </div>
                 </div>
-                <div>
-                  <span>Ziel</span>
-                  <strong id="detail-target-path">-</strong>
-                </div>
-                <div>
-                  <span>Typ</span>
-                  <strong id="detail-media-type">-</strong>
-                </div>
-                <div>
-                  <span>Quelle der Erkennung</span>
-                  <strong id="detail-classification-source">-</strong>
-                </div>
-                <div>
-                  <span>Confidence</span>
-                  <strong id="detail-confidence">-</strong>
-                </div>
-                <div>
-                  <span>Größe</span>
-                  <strong id="detail-size">-</strong>
-                </div>
-                <div>
-                  <span>Status</span>
-                  <strong id="detail-status-label">-</strong>
-                </div>
-                <div>
-                  <span>Sidecar</span>
-                  <strong id="detail-sidecar-path">-</strong>
-                </div>
-              </div>
 
-              <div class="stack detail-form">
-                <label class="field">
-                  <span>Titel</span>
-                  <input id="detail-title" type="text" />
-                </label>
-                <label class="field">
-                  <span>Medientyp</span>
-                  <select id="detail-media-type-input"></select>
-                </label>
-                <label class="field">
-                  <span>Jahr</span>
-                  <input id="detail-year" type="number" min="1900" max="2100" />
-                </label>
-                <label class="field">
-                  <span>Status</span>
-                  <select id="detail-status"></select>
-                </label>
-                <label class="field">
-                  <span>Notiz</span>
-                  <textarea id="detail-notes" rows="3"></textarea>
-                </label>
-                <div class="toolbar">
-                  <button class="action-button primary" id="detail-apply">Korrektur übernehmen</button>
-                  <button class="action-button" id="detail-reset">Zurücksetzen</button>
+                <div class="stack detail-form">
+                  <label class="field">
+                    <span>Titel</span>
+                    <input id="detail-title" type="text" />
+                  </label>
+                  <label class="field">
+                    <span>Medientyp</span>
+                    <select id="detail-media-type-input"></select>
+                  </label>
+                  <label class="field">
+                    <span>Jahr</span>
+                    <input id="detail-year" type="number" min="1900" max="2100" />
+                  </label>
+                  <label class="field">
+                    <span>Status</span>
+                    <select id="detail-status"></select>
+                  </label>
+                  <label class="field">
+                    <span>Notiz</span>
+                    <textarea id="detail-notes" rows="3"></textarea>
+                  </label>
+                  <div class="toolbar">
+                    <button class="action-button primary" id="detail-apply">Korrektur übernehmen</button>
+                    <button class="action-button" id="detail-reset">Zurücksetzen</button>
+                  </div>
                 </div>
-              </div>
 
-              <p class="field-hint" id="detail-hint">
-                Korrekturen landen zunächst lokal im Browser-Cache und bleiben so portabel.
-              </p>
-              <p class="panel-label">Sidecar-Vorschau</p>
-              <pre class="code-block" id="detail-sidecar-preview">Wähle einen Eintrag aus.</pre>
-            </section>
-            <section class="panel">
+                <p class="field-hint" id="detail-hint">
+                  Korrekturen landen zunächst lokal im Browser-Cache und bleiben so portabel.
+                </p>
+                <p class="panel-label">Sidecar-Vorschau</p>
+                <pre class="code-block" id="detail-sidecar-preview">Wähle einen Eintrag aus.</pre>
+              </section>
+            </div>
+
+            <section class="panel review-footer">
               <p class="panel-label">Audit Trail</p>
               <h3>Jede Korrektur bleibt nachvollziehbar</h3>
               <p class="body-copy">
