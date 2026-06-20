@@ -49,6 +49,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_anilist_search_response(request.uri().query()),
                 ),
+                "/api/create-vault" => json_response(
+                    StatusCode::OK,
+                    &build_create_vault_response(request.uri().query()),
+                ),
                 _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
             }
         })
@@ -136,6 +140,67 @@ fn build_anilist_search_response(query: Option<&str>) -> AniListSearchResponse {
         },
         Err(error) => AniListSearchResponse::error(error.to_string()),
     }
+}
+
+fn build_create_vault_response(query: Option<&str>) -> CreateVaultResponse {
+    let Some(query) = query else {
+        return CreateVaultResponse::error("missing query".to_string());
+    };
+
+    let Some(parent) = extract_query_value(query, "parent") else {
+        return CreateVaultResponse::error("missing parent".to_string());
+    };
+    let Some(name) = extract_query_value(query, "name") else {
+        return CreateVaultResponse::error("missing name".to_string());
+    };
+
+    match create_vault_at(&parent, &name) {
+        Ok(path) => CreateVaultResponse {
+            path: Some(path.display().to_string()),
+            created: true,
+            error: None,
+        },
+        Err(error) => CreateVaultResponse::error(error.to_string()),
+    }
+}
+
+fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
+    let parent = PathBuf::from(parent.trim());
+    if parent.as_os_str().is_empty() {
+        return Err(VaultError::InvalidVaultPath(
+            "parent path is empty".to_string(),
+        ));
+    }
+    if !parent.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "parent path does not exist: {}",
+            parent.display()
+        )));
+    }
+    if !parent.is_dir() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "parent path is not a directory: {}",
+            parent.display()
+        )));
+    }
+
+    let vault_name = sanitize_path_segment(name.trim());
+    if vault_name.is_empty() {
+        return Err(VaultError::InvalidVaultPath(
+            "vault name is empty".to_string(),
+        ));
+    }
+
+    let vault_root = parent.join(vault_name);
+    fs::create_dir_all(&vault_root).map_err(VaultError::from)?;
+
+    let vault = Vault::new(vault_root.clone())?;
+    fs::create_dir_all(vault.inbox_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.review_queue_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.covers_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.system_dir()).map_err(VaultError::from)?;
+
+    fs::canonicalize(&vault_root).map_err(VaultError::from)
 }
 
 fn build_vault_plan(root_override: Option<&str>) -> Result<DemoPlanResponse> {
@@ -432,6 +497,23 @@ impl AniListSearchResponse {
         Self {
             metadata: None,
             results: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CreateVaultResponse {
+    path: Option<String>,
+    created: bool,
+    error: Option<String>,
+}
+
+impl CreateVaultResponse {
+    fn error(error: String) -> Self {
+        Self {
+            path: None,
+            created: false,
             error: Some(error),
         }
     }
@@ -836,10 +918,7 @@ fn resolve_anilist_metadata(
     item: &ImportPlanItem,
 ) -> Option<AniListAnimeMetadata> {
     let classification = item.classification.as_ref().or(file.classification.as_ref())?;
-    if !matches!(
-        classification.media_type,
-        MediaType::Anime | MediaType::HentaiAnime
-    ) {
+    if !should_attempt_anilist(classification.media_type, &file.source_path) {
         return None;
     }
 
@@ -848,6 +927,17 @@ fn resolve_anilist_metadata(
         .search_anime(&search_title, AniListClient::adult_flag_for(classification.media_type))
         .ok()
         .flatten()
+}
+
+fn should_attempt_anilist(media_type: MediaType, source_path: &RelativePath) -> bool {
+    if matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+        return true;
+    }
+
+    source_path
+        .to_string()
+        .to_lowercase()
+        .contains("anime")
 }
 
 fn build_anime_search_title(file: &IncomingFile) -> Option<String> {

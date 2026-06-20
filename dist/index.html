@@ -10,31 +10,32 @@
     <section class="vault-gate" id="vault-gate" aria-label="Vault öffnen">
       <div class="vault-gate-inner">
         <div class="vault-mark">MV</div>
-        <h1>MediaVault</h1>
-        <p class="body-copy">Lokale Medienverwaltung mit portablem Vault.</p>
+        <div class="vault-gate-copy">
+          <h1>MediaVault</h1>
+          <p class="body-copy">Lokale Medienverwaltung mit portablem Vault.</p>
+        </div>
 
-        <div class="vault-gate-actions">
-          <label class="field">
-            <span>Bestehenden Vault öffnen</span>
+        <div class="vault-gate-card">
+          <section class="gate-section">
+            <p class="section-label">Bestehenden Vault öffnen</p>
             <input id="vault-open-path" type="hidden" />
-            <input class="visually-hidden" id="vault-open-picker" type="file" webkitdirectory directory />
             <strong class="path-picker-value" id="vault-open-path-display">Kein Vault ausgewählt</strong>
-          </label>
-          <button class="action-button primary" id="vault-open-button">Vault im Finder auswählen</button>
+            <button class="action-button primary" id="vault-open-button">Vault im Finder auswählen</button>
+          </section>
 
           <div class="vault-create-grid">
-            <label class="field">
-              <span>Neuer Vault</span>
+            <section class="gate-section">
+              <p class="section-label">Neuer Vault</p>
               <input id="vault-create-name" type="text" placeholder="Mein MediaVault" />
-            </label>
-            <label class="field">
-              <span>Speicherort</span>
+            </section>
+            <section class="gate-section">
+              <p class="section-label">Speicherort</p>
               <input id="vault-create-path" type="hidden" />
-              <input class="visually-hidden" id="vault-create-picker" type="file" webkitdirectory directory />
               <strong class="path-picker-value" id="vault-create-path-display">Kein Speicherort ausgewählt</strong>
-            </label>
+              <button class="action-button" id="vault-create-button">Speicherort im Finder auswählen</button>
+              <button class="action-button primary" id="vault-create-submit">Vault erstellen</button>
+            </section>
           </div>
-          <button class="action-button" id="vault-create-button">Speicherort im Finder auswählen</button>
         </div>
 
         <section class="recent-vaults">

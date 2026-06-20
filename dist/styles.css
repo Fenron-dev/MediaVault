@@ -61,15 +61,22 @@ body:not(.is-vault-open) .app-shell {
 }
 
 .vault-gate-inner {
-  width: min(620px, 100%);
+  width: min(720px, 100%);
   display: grid;
   justify-items: center;
-  gap: 18px;
+  gap: 20px;
+}
+
+.vault-gate-copy {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
 }
 
 .vault-mark {
-  width: 72px;
-  height: 72px;
+  width: 86px;
+  height: 86px;
   display: grid;
   place-items: center;
   border: 2px solid rgba(155, 194, 139, 0.5);
@@ -77,6 +84,7 @@ body:not(.is-vault-open) .app-shell {
   color: var(--accent-strong);
   font-weight: 800;
   letter-spacing: 0.08em;
+  font-size: 1.1rem;
 }
 
 .visually-hidden {
@@ -103,6 +111,43 @@ body:not(.is-vault-open) .app-shell {
 
 .vault-gate h1 {
   font-size: 2.4rem;
+}
+
+.vault-gate-card {
+  width: 100%;
+  display: grid;
+  gap: 18px;
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgb(255 255 255 / 0.02);
+  box-shadow: var(--shadow);
+}
+
+.gate-section {
+  display: grid;
+  gap: 10px;
+}
+
+.section-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gate-section input[type="text"] {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+.gate-section .action-button {
+  width: 100%;
 }
 
 .app-modal {
@@ -204,7 +249,7 @@ body:not(.is-vault-open) .app-shell {
 .vault-create-grid {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-  gap: 10px;
+  gap: 14px;
 }
 
 .recent-vaults {

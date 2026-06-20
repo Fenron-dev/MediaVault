@@ -2,14 +2,13 @@ const tabs = Array.from(document.querySelectorAll("[data-tab]"));
 const views = Array.from(document.querySelectorAll("[data-view]"));
 const vaultGate = document.getElementById("vault-gate");
 const vaultOpenPath = document.getElementById("vault-open-path");
-const vaultOpenPicker = document.getElementById("vault-open-picker");
 const vaultOpenPathDisplay = document.getElementById("vault-open-path-display");
 const vaultOpenButton = document.getElementById("vault-open-button");
 const vaultCreateName = document.getElementById("vault-create-name");
 const vaultCreatePath = document.getElementById("vault-create-path");
-const vaultCreatePicker = document.getElementById("vault-create-picker");
 const vaultCreatePathDisplay = document.getElementById("vault-create-path-display");
 const vaultCreateButton = document.getElementById("vault-create-button");
+const vaultCreateSubmit = document.getElementById("vault-create-submit");
 const recentVaultsList = document.getElementById("recent-vaults-list");
 const title = document.getElementById("view-title");
 const statusStrip = document.getElementById("status-strip");
@@ -259,13 +258,13 @@ function saveStoredJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-function setHiddenPath(input, display, value) {
+function setHiddenPath(input, display, value, emptyLabel = "Kein Pfad ausgewählt") {
   const normalized = String(value || "").trim();
   if (input) {
     input.value = normalized;
   }
   if (display) {
-    display.textContent = normalized || "Kein Pfad ausgewählt";
+    display.textContent = normalized || emptyLabel;
   }
 }
 
@@ -286,16 +285,31 @@ function directoryFromPickedFile(file) {
 
 function pickDirectoryWithInput(input) {
   return new Promise((resolve) => {
+    const picker = input || document.createElement("input");
+    let cleanup = () => {};
+
     if (!input) {
-      resolve("");
-      return;
+      picker.type = "file";
+      picker.webkitdirectory = true;
+      picker.directory = true;
+      picker.className = "visually-hidden";
+      picker.setAttribute("aria-hidden", "true");
+      document.body.appendChild(picker);
+      cleanup = () => {
+        picker.remove();
+      };
     }
 
-    input.value = "";
-    input.onchange = () => {
-      resolve(directoryFromPickedFile(input.files?.[0]));
+    picker.value = "";
+    picker.onchange = () => {
+      resolve(directoryFromPickedFile(picker.files?.[0]));
+      cleanup();
     };
-    input.click();
+    picker.oncancel = () => {
+      resolve("");
+      cleanup();
+    };
+    picker.click();
   });
 }
 
@@ -307,6 +321,25 @@ async function pickDirectory(input) {
   }
 
   return pickDirectoryWithInput(input);
+}
+
+async function createVault(parent, name) {
+  const response = await fetch(
+    `/api/create-vault?parent=${encodeURIComponent(parent)}&name=${encodeURIComponent(name)}`
+  );
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || payload?.error) {
+    throw new Error(payload?.error || `HTTP ${response.status}`);
+  }
+
+  return payload;
 }
 
 function defaultPathTemplates() {
@@ -503,6 +536,38 @@ function canonicalMediaType(value) {
   }
 }
 
+function isAnimeContext(item) {
+  const haystack = [
+    item?.collection_path,
+    item?.source_path,
+    item?.series_title,
+    item?.title,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return haystack.includes("anime");
+}
+
+function inferredMediaType(item) {
+  const raw = item?.media_type ?? "unclassified";
+
+  if (raw === "anime") {
+    return String(item?.format ?? "").toUpperCase() === "MOVIE" ? "anime-movie" : "anime-tv";
+  }
+
+  if (raw === "series" && isAnimeContext(item)) {
+    return String(item?.format ?? "").toUpperCase() === "MOVIE" ? "anime-movie" : "anime-tv";
+  }
+
+  if (raw === "film" && isAnimeContext(item) && String(item?.format ?? "").toUpperCase() === "MOVIE") {
+    return "anime-movie";
+  }
+
+  return raw;
+}
+
 function formatForMediaSelection(value) {
   switch (value) {
     case "anime-tv":
@@ -515,11 +580,7 @@ function formatForMediaSelection(value) {
 }
 
 function mediaSelectionValue(item) {
-  if (item.media_type === "anime") {
-    return String(item.format ?? "").toUpperCase() === "MOVIE" ? "anime-movie" : "anime-tv";
-  }
-
-  return item.media_type ?? "unclassified";
+  return inferredMediaType(item);
 }
 
 function statusLabel(value) {
@@ -1302,7 +1363,10 @@ function showAniListResults(results, query) {
 }
 
 function openAniListDialog(selection, feedbackNode = null, targetItems = []) {
-  const resolvedSelection = normalizeSelection(selection);
+  const resolvedSelection =
+    selection && Array.isArray(selection.items) && typeof selection.key === "string"
+      ? selection
+      : normalizeSelection(selection);
   if (!resolvedSelection || !resolvedSelection.item) {
     return;
   }
@@ -1332,7 +1396,7 @@ function openAniListDialog(selection, feedbackNode = null, targetItems = []) {
     appModal.classList.add("is-active");
   }
   if (statusStrip) {
-    statusStrip.textContent = `Papierkorb für ${selectionTitle(selection)} bereit.`;
+    statusStrip.textContent = `AniList-Treffer für ${selectionTitle(selection)} werden geladen.`;
   }
 }
 
@@ -1378,7 +1442,12 @@ async function runAniListDialogSearch() {
 }
 
 async function fetchAniListForItem(item, feedbackNode = null, targetItems = [item], selection = null) {
-  const resolvedSelection = selection ? normalizeSelection(selection) : normalizeSelection(item);
+  const resolvedSelection =
+    selection && Array.isArray(selection.items) && typeof selection.key === "string"
+      ? selection
+      : selection
+        ? normalizeSelection(selection)
+        : normalizeSelection(item);
   if (!resolvedSelection) {
     throw new Error("Kein gültiger Eintrag für AniList vorhanden");
   }
@@ -2006,11 +2075,7 @@ function selectionEditable(selection) {
 }
 
 function selectionSupportsMetadata(selection) {
-  if (!selectionEditable(selection) || selection.type === "bulk") {
-    return false;
-  }
-  const mediaType = mediaSelectionValue(selection.item ?? {});
-  return ["anime", "anime-tv", "anime-movie"].includes(mediaType);
+  return Boolean(selectionEditable(selection) && selection.type !== "bulk");
 }
 
 function selectionTitle(selection) {
@@ -3142,21 +3207,71 @@ if (demoButton) {
 
 if (vaultOpenButton) {
   vaultOpenButton.addEventListener("click", async () => {
-    const selected = await pickDirectory(vaultOpenPicker);
+    const selected = await pickDirectory();
+    if (!selected) {
+      if (statusStrip) {
+        statusStrip.textContent = "Kein Vault ausgewählt.";
+      }
+      return;
+    }
     setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, selected);
-    openVault(selected || getVaultRoot());
+    if (statusStrip) {
+      statusStrip.textContent = `Vault ausgewählt: ${selected}`;
+    }
+    openVault(selected);
   });
 }
 
 if (vaultCreateButton) {
   vaultCreateButton.addEventListener("click", async () => {
-    const selected = await pickDirectory(vaultCreatePicker);
+    const selected = await pickDirectory();
+    if (!selected) {
+      if (statusStrip) {
+        statusStrip.textContent = "Kein Speicherort ausgewählt.";
+      }
+      return;
+    }
+
+    setHiddenPath(vaultCreatePath, vaultCreatePathDisplay, selected, "Kein Speicherort ausgewählt");
+    if (statusStrip) {
+      statusStrip.textContent = `Speicherort ausgewählt: ${selected}. Jetzt den Vault-Namen prüfen und auf \"Vault erstellen\" klicken.`;
+    }
+  });
+}
+
+if (vaultCreateSubmit) {
+  vaultCreateSubmit.addEventListener("click", async () => {
+    const parent = vaultCreatePath?.value.trim();
     const name = vaultCreateName?.value.trim();
-    const path = name && selected && basename(selected) !== name
-      ? compactPath(`${selected}/${sanitizeSegment(name)}`)
-      : selected || vaultCreatePath?.value.trim();
-    setHiddenPath(vaultCreatePath, vaultCreatePathDisplay, path);
-    openVault(path, name);
+
+    if (!parent) {
+      if (statusStrip) {
+        statusStrip.textContent = "Bitte zuerst einen Speicherort auswählen.";
+      }
+      return;
+    }
+
+    if (!name) {
+      if (statusStrip) {
+        statusStrip.textContent = "Bitte einen Vault-Namen eingeben.";
+      }
+      return;
+    }
+
+    try {
+      if (statusStrip) {
+        statusStrip.textContent = "Vault wird angelegt...";
+      }
+
+      const result = await createVault(parent, name);
+      const path = result?.path || compactPath(`${parent}/${sanitizeSegment(name)}`);
+      setHiddenPath(vaultCreatePath, vaultCreatePathDisplay, parent, "Kein Speicherort ausgewählt");
+      openVault(path, name);
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Vault konnte nicht angelegt werden: ${error.message}`;
+      }
+    }
   });
 }
 
@@ -3259,7 +3374,7 @@ if (detailFetchMetadata) {
         series_title: detailTitle?.value.trim() || item.series_title,
         media_type: detailMediaTypeInput?.value || item.media_type,
       };
-      await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(item));
+      await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
     } catch (error) {
       setApiFeedback(
         detailApiFeedback,
@@ -3316,7 +3431,7 @@ if (collectionEditorFetch) {
         series_title: collectionEditorName?.value.trim() || item.series_title,
         media_type: collectionEditorMediaType?.value || item.media_type,
       };
-      await fetchAniListForItem(draft, collectionEditorApiFeedback, [item], normalizeSelection(item));
+      await fetchAniListForItem(draft, collectionEditorApiFeedback, [item], normalizeSelection(draft));
     } catch (error) {
       setApiFeedback(
         collectionEditorApiFeedback,
@@ -3402,17 +3517,24 @@ if (inspectorFetchMetadata) {
 
     try {
       upsertSelectionCorrection(inspectorSelection);
-      const draft = {
+      const inspectorDraft = {
         ...inspectorSelection.item,
         title: inspectorName?.value.trim() || inspectorSelection.item.title,
         series_title: inspectorName?.value.trim() || inspectorSelection.item.series_title,
         media_type: inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item),
       };
+      const selectionForSearch =
+        inspectorSelection.type === "node"
+          ? {
+              ...inspectorSelection,
+              item: inspectorDraft,
+            }
+          : normalizeSelection(inspectorDraft);
       await fetchAniListForItem(
-        draft,
+        inspectorDraft,
         inspectorApiFeedback,
         inspectorSelection.items,
-        inspectorSelection
+        selectionForSearch
       );
     } catch (error) {
       setApiFeedback(
