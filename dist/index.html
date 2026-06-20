@@ -49,7 +49,7 @@
           </div>
 
           <div class="toolbar">
-            <button class="action-button primary" id="run-demo">Import-Dry-Run</button>
+            <button class="action-button primary" id="run-demo">Vault scannen</button>
             <button class="action-button" data-tab="settings">Konfiguration</button>
           </div>
         </header>
@@ -178,6 +178,23 @@
                 <li>Konfiguration bleibt lokal im Vault.</li>
                 <li>API-Schlüssel bleiben außerhalb des Repos.</li>
               </ul>
+              <div class="stack">
+                <label class="field">
+                  <span>Vault-Pfad</span>
+                  <input
+                    id="vault-root-input"
+                    type="text"
+                    placeholder="/Pfad/zum/Vault"
+                  />
+                </label>
+                <div class="toolbar">
+                  <button class="action-button primary" id="vault-root-save">Speichern</button>
+                  <button class="action-button" id="vault-root-clear">Zurücksetzen</button>
+                </div>
+                <p class="field-hint" id="vault-root-hint">
+                  Leer lassen, dann versucht MediaVault den Vault automatisch zu finden.
+                </p>
+              </div>
             </section>
             <section class="panel">
               <p class="panel-label">Nächster Schritt</p>

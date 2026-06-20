@@ -9,6 +9,11 @@ const metricInbox = document.getElementById("metric-inbox");
 const metricReview = document.getElementById("metric-review");
 const metricDuplicates = document.getElementById("metric-duplicates");
 const metricCollections = document.getElementById("metric-collections");
+const vaultRootInput = document.getElementById("vault-root-input");
+const vaultRootSave = document.getElementById("vault-root-save");
+const vaultRootClear = document.getElementById("vault-root-clear");
+const vaultRootHint = document.getElementById("vault-root-hint");
+const storageKey = "mediavault.vaultRoot";
 
 const labels = {
   overview: "Überblick",
@@ -116,17 +121,42 @@ function renderPlan(plan) {
   renderReviewRows(plan.items);
 
   if (statusStrip) {
-    statusStrip.textContent = `${plan.title} geladen: ${plan.summary.total_files} Dateien, ${plan.summary.items_needing_review} zur Prüfung, ${plan.summary.duplicates} Duplikat(e).`;
+    const rootText = plan.vault_root ? ` Vault: ${plan.vault_root}.` : "";
+    const noteText = plan.note ? ` ${plan.note}` : "";
+    statusStrip.textContent = `${plan.title} (${plan.source}) geladen: ${plan.summary.total_files} Dateien, ${plan.summary.items_needing_review} zur Prüfung, ${plan.summary.duplicates} Duplikat(e).${rootText}${noteText}`;
   }
+}
+
+function getVaultRoot() {
+  if (vaultRootInput && vaultRootInput.value.trim()) {
+    return vaultRootInput.value.trim();
+  }
+
+  return localStorage.getItem(storageKey) ?? "";
+}
+
+function syncVaultHint() {
+  if (!vaultRootHint) {
+    return;
+  }
+
+  const value = getVaultRoot();
+  vaultRootHint.textContent = value
+    ? `Aktiver Vault-Pfad: ${value}`
+    : "Leer lassen, dann versucht MediaVault den Vault automatisch zu finden.";
 }
 
 async function loadPlan() {
   if (statusStrip) {
-    statusStrip.textContent = "Import-Dry-Run wird geladen...";
+    statusStrip.textContent = "Vault-Scan wird geladen...";
   }
 
   try {
-    const response = await fetch("/api/demo-plan");
+    const root = getVaultRoot();
+    const path = root
+      ? `/api/vault-plan?root=${encodeURIComponent(root)}`
+      : "/api/vault-plan";
+    const response = await fetch(path);
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}`);
     }
@@ -135,7 +165,7 @@ async function loadPlan() {
     renderPlan(plan);
   } catch (error) {
     if (statusStrip) {
-      statusStrip.textContent = `Demo-Dry-Run konnte nicht geladen werden: ${error.message}`;
+      statusStrip.textContent = `Vault-Scan konnte nicht geladen werden: ${error.message}`;
     }
   }
 }
@@ -151,4 +181,46 @@ if (demoButton) {
   });
 }
 
+if (vaultRootInput) {
+  const savedRoot = localStorage.getItem(storageKey);
+  if (savedRoot) {
+    vaultRootInput.value = savedRoot;
+  }
+
+  vaultRootInput.addEventListener("input", () => {
+    syncVaultHint();
+  });
+}
+
+if (vaultRootSave) {
+  vaultRootSave.addEventListener("click", () => {
+    if (!vaultRootInput) {
+      return;
+    }
+
+    const value = vaultRootInput.value.trim();
+    if (value) {
+      localStorage.setItem(storageKey, value);
+    } else {
+      localStorage.removeItem(storageKey);
+    }
+
+    syncVaultHint();
+    loadPlan();
+  });
+}
+
+if (vaultRootClear) {
+  vaultRootClear.addEventListener("click", () => {
+    if (vaultRootInput) {
+      vaultRootInput.value = "";
+    }
+
+    localStorage.removeItem(storageKey);
+    syncVaultHint();
+    loadPlan();
+  });
+}
+
+syncVaultHint();
 loadPlan();

@@ -288,6 +288,44 @@ h3 {
   color: var(--text);
 }
 
+.stack {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.field input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+  color: var(--text);
+  padding: 11px 12px;
+}
+
+.field input:focus {
+  outline: 2px solid rgb(122 168 116 / 0.32);
+  outline-offset: 1px;
+}
+
+.field-hint {
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
 @media (max-width: 1200px) {
   .app-shell {
     grid-template-columns: 1fr;
