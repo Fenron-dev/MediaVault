@@ -62,19 +62,19 @@
           <div class="metrics">
             <article class="metric">
               <span>Inbox</span>
-              <strong>12 Dateien</strong>
+              <strong id="metric-inbox">12 Dateien</strong>
             </article>
             <article class="metric">
               <span>Review</span>
-              <strong>4 unklar</strong>
+              <strong id="metric-review">4 unklar</strong>
             </article>
             <article class="metric">
               <span>Duplikate</span>
-              <strong>2 gefunden</strong>
+              <strong id="metric-duplicates">2 gefunden</strong>
             </article>
             <article class="metric">
               <span>Sammlungen</span>
-              <strong>6 smart</strong>
+              <strong id="metric-collections">6 smart</strong>
             </article>
           </div>
 
@@ -113,21 +113,7 @@
                   <span>Status</span>
                   <span>Ziel</span>
                 </div>
-                <div class="table-row">
-                  <span>Inbox/Violet Evergarden.mkv</span>
-                  <span>klar</span>
-                  <span>Anime/Violet Evergarden</span>
-                </div>
-                <div class="table-row">
-                  <span>Inbox/unknown_scan.zip</span>
-                  <span>Review</span>
-                  <span>Inbox/_review_queue</span>
-                </div>
-                <div class="table-row">
-                  <span>Inbox/duplicate.mp3</span>
-                  <span>Duplikat</span>
-                  <span>Prüfen</span>
-                </div>
+                <div id="inbox-rows"></div>
               </div>
             </section>
           </div>
@@ -138,17 +124,21 @@
             <section class="panel">
               <p class="panel-label">Manuelle Klärung</p>
               <h3>Wenn Inhalt oder Zusammengehörigkeit unklar sind</h3>
-              <p class="body-copy">
-                Die App fragt nach Kategorie, Genre, Name und weiteren Properties,
-                bevor Dateien in die Zielstruktur verschoben werden.
-              </p>
+              <div class="table">
+                <div class="table-row table-head">
+                  <span>Fall</span>
+                  <span>Status</span>
+                  <span>Aktion</span>
+                </div>
+                <div id="review-rows"></div>
+              </div>
             </section>
             <section class="panel">
               <p class="panel-label">Audit Trail</p>
               <h3>Jede Korrektur bleibt nachvollziehbar</h3>
               <p class="body-copy">
                 Import-Dry-Runs, manuelle Anpassungen und spätere Korrekturen werden
-                dokumentiert.
+                protokolliert, damit die Medienstruktur immer erklärbar bleibt.
               </p>
             </section>
           </div>

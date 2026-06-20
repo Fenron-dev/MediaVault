@@ -257,30 +257,6 @@ impl ImportPlanner {
             steps.push(PlannedImportStep::RegisterDuplicate {
                 fingerprint: fingerprint.hash.clone(),
             });
-            duplicate_of = Some(fingerprint.hash.clone());
-
-            match self.config.duplicate_policy {
-                DuplicatePolicy::AskUser => {
-                    manual_review = true;
-                    steps.push(PlannedImportStep::AskUser {
-                        prompt: UserPrompt {
-                            field_name: "duplicate".to_string(),
-                            message: "Duplikat gefunden".to_string(),
-                            options: vec![
-                                "Behalten".to_string(),
-                                "Überspringen".to_string(),
-                                "Zusammenführen".to_string(),
-                            ],
-                        },
-                    });
-                }
-                DuplicatePolicy::KeepBoth => {}
-                DuplicatePolicy::Skip => {
-                    steps.push(PlannedImportStep::Skip {
-                        reason: "duplicate policy is skip".to_string(),
-                    });
-                }
-            }
         }
 
         let target_path = self.build_target_path(file)?;
