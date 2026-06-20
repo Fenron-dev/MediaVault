@@ -286,6 +286,16 @@
 
               <div class="collection-profile" id="collection-profile"></div>
 
+              <div class="collection-viewbar">
+                <p class="panel-label">Inhalt</p>
+                <div class="segmented-control" aria-label="Ansicht wechseln">
+                  <button class="is-active" data-collection-view="cover">Cover</button>
+                  <button data-collection-view="list">Liste</button>
+                </div>
+              </div>
+
+              <div class="collection-card-grid" id="collection-cards"></div>
+
               <div class="table collection-table">
                 <div class="table-row table-head">
                   <span>Name</span>
@@ -393,20 +403,24 @@
               <p class="body-copy">
                 Platzhalter: {title}, {series}, {season}, {year}, {filename}.
               </p>
-              <div class="stack">
-                <label class="field">
+              <div class="folder-template-table">
+                <div class="folder-template-row table-head">
+                  <span>Medientyp</span>
+                  <span>Template</span>
+                </div>
+                <label class="folder-template-row">
                   <span>Anime Serien</span>
                   <input id="template-anime-tv" type="text" />
                 </label>
-                <label class="field">
+                <label class="folder-template-row">
                   <span>Anime Filme</span>
                   <input id="template-anime-movie" type="text" />
                 </label>
-                <label class="field">
+                <label class="folder-template-row">
                   <span>Serien</span>
                   <input id="template-series" type="text" />
                 </label>
-                <label class="field">
+                <label class="folder-template-row">
                   <span>Filme</span>
                   <input id="template-film" type="text" />
                 </label>

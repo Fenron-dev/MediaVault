@@ -24,6 +24,7 @@ const collectionTitle = document.getElementById("collection-title");
 const collectionDescription = document.getElementById("collection-description");
 const collectionMeta = document.getElementById("collection-meta");
 const collectionProfile = document.getElementById("collection-profile");
+const collectionCards = document.getElementById("collection-cards");
 const collectionRows = document.getElementById("collection-rows");
 const collectionEditor = document.getElementById("collection-editor");
 const collectionEditorTitle = document.getElementById("collection-editor-title");
@@ -106,6 +107,7 @@ const correctionsKey = "mediavault.reviewCorrections";
 const metadataKey = "mediavault.apiMetadata";
 const yamlOverridesKey = "mediavault.yamlOverrides";
 const auditTrailKey = "mediavault.auditTrail";
+const collectionViewKey = "mediavault.collectionView";
 
 const labels = {
   overview: "Überblick",
@@ -160,6 +162,7 @@ let apiMetadata = loadStoredJson(metadataKey, {});
 let yamlOverrides = loadStoredJson(yamlOverridesKey, {});
 let pathTemplates = normalizeTemplateConfig(loadStoredJson(pathTemplatesKey, defaultPathTemplates()));
 let auditTrail = loadStoredJson(auditTrailKey, []);
+let collectionView = localStorage.getItem(collectionViewKey) || "cover";
 let inspectorItemKey = "";
 let inspectorSelection = null;
 
@@ -356,6 +359,21 @@ function formatConfidence(value) {
   }
 
   return `${Math.round(value * 100)} %`;
+}
+
+function scoreLabel(value) {
+  return typeof value === "number" ? `${(value / 10).toFixed(1)}` : "-";
+}
+
+function coverUrlFor(item) {
+  return item?.cover_image_extra_large || item?.cover_image_large || item?.cover_image_medium || "";
+}
+
+function datePartsLabel(value) {
+  if (!value || typeof value !== "object") {
+    return "";
+  }
+  return [value.year, value.month, value.day].filter(Boolean).join("-");
 }
 
 function mediaTypeLabel(value) {
@@ -1817,7 +1835,7 @@ function renderCollectionProfile(node) {
 
   const cover = document.createElement("div");
   cover.className = "collection-cover";
-  const coverUrl = primary.cover_image_extra_large || primary.cover_image_large || primary.cover_image_medium;
+  const coverUrl = coverUrlFor(primary);
   if (coverUrl) {
     const image = document.createElement("img");
     image.src = coverUrl;
@@ -1834,6 +1852,7 @@ function renderCollectionProfile(node) {
   label.textContent = nodeTypeLabel(node);
   const name = document.createElement("strong");
   name.textContent = primary.series_title || primary.title || node.label;
+  name.className = "media-title";
   const meta = document.createElement("p");
   const parts = [
     primary.format,
@@ -1862,7 +1881,6 @@ function renderCollectionProfile(node) {
   heading.appendChild(label);
   heading.appendChild(name);
   heading.appendChild(meta);
-  heading.appendChild(description);
   if (tagBar.childNodes.length) {
     heading.appendChild(tagBar);
   }
@@ -1879,6 +1897,103 @@ function renderCollectionProfile(node) {
   }
 
   collectionProfile.appendChild(profile);
+
+  const stack = document.createElement("div");
+  stack.className = "media-section-stack";
+
+  const children = sortedChildren(node);
+  if (children.length) {
+    const seasons = createMediaSection("Staffeln", `${children.length} Einträge in dieser Serie`);
+    const cards = document.createElement("div");
+    cards.className = "season-card-row";
+    children.forEach((child, index) => {
+      cards.appendChild(createPosterCard(child, index + 1));
+    });
+    seasons.appendChild(cards);
+    stack.appendChild(seasons);
+  }
+
+  const synopsis = createMediaSection("Synopsis");
+  const synopsisText = document.createElement("p");
+  synopsisText.className = "media-synopsis";
+  synopsisText.textContent = description.textContent;
+  synopsis.appendChild(synopsisText);
+  stack.appendChild(synopsis);
+
+  const details = createMediaSection("Details");
+  details.appendChild(createDetailsGrid(primary));
+  stack.appendChild(details);
+
+  if (Array.isArray(primary.relations) && primary.relations.length) {
+    const relations = createMediaSection("Relations");
+    const relationGrid = document.createElement("div");
+    relationGrid.className = "relation-grid";
+    primary.relations.slice(0, 6).forEach((relation) => {
+      const card = document.createElement("div");
+      card.className = "relation-card";
+      const relationType = document.createElement("span");
+      relationType.textContent = relation.relation_type || "Verknüpft";
+      const title = document.createElement("strong");
+      title.textContent = relation.title || "Unbekannt";
+      const meta = document.createElement("p");
+      meta.textContent = [relation.media_type, relation.format].filter(Boolean).join(" · ");
+      card.appendChild(relationType);
+      card.appendChild(title);
+      card.appendChild(meta);
+      relationGrid.appendChild(card);
+    });
+    relations.appendChild(relationGrid);
+    stack.appendChild(relations);
+  }
+
+  collectionProfile.appendChild(stack);
+}
+
+function createMediaSection(title, subtitle = "") {
+  const section = document.createElement("section");
+  section.className = "media-section";
+  const heading = document.createElement("div");
+  heading.className = "media-section-heading";
+  const icon = document.createElement("span");
+  icon.textContent = "◆";
+  const text = document.createElement("div");
+  const strong = document.createElement("strong");
+  strong.textContent = title;
+  text.appendChild(strong);
+  if (subtitle) {
+    const sub = document.createElement("p");
+    sub.textContent = subtitle;
+    text.appendChild(sub);
+  }
+  heading.appendChild(icon);
+  heading.appendChild(text);
+  section.appendChild(heading);
+  return section;
+}
+
+function createDetailsGrid(item) {
+  const grid = document.createElement("div");
+  grid.className = "media-details-grid";
+  [
+    ["Typ", item.format || mediaTypeLabel(mediaSelectionValue(item))],
+    ["Status", item.status || "-"],
+    ["Staffel", item.airing_season || "-"],
+    ["Ausgestrahlt", [datePartsLabel(item.start_date), datePartsLabel(item.end_date)].filter(Boolean).join(" - ")],
+    ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
+    ["Score", typeof item.average_score === "number" ? scoreLabel(item.average_score) : "-"],
+    ["Studios", (item.studios || []).map((studio) => studio.name).filter(Boolean).join(", ")],
+    ["Synonyme", (item.synonyms || []).slice(0, 4).join(", ")],
+  ].forEach(([label, value]) => {
+    const block = document.createElement("div");
+    const span = document.createElement("span");
+    span.textContent = label;
+    const strong = document.createElement("strong");
+    strong.textContent = value || "-";
+    block.appendChild(span);
+    block.appendChild(strong);
+    grid.appendChild(block);
+  });
+  return grid;
 }
 
 function createCollectionFolderRow(node) {
@@ -1902,6 +2017,65 @@ function createCollectionFolderRow(node) {
   });
 
   return row;
+}
+
+function createPosterCard(value, ordinal = null) {
+  const isNode = !value.source_path;
+  const node = isNode ? value : null;
+  const item = isNode ? representativeItem(node) : value;
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "poster-card";
+  button.addEventListener("click", () => {
+    if (isNode) {
+      selectedCollectionKey = node.path;
+      selectedCollectionItemKey = "";
+      renderCollections(currentPlan?.items ?? []);
+    } else {
+      selectedItemKey = item.source_path;
+      selectedCollectionItemKey = item.source_path;
+      renderInspector(item);
+      renderCollectionRows(findCollectionNode(buildCollectionTree(currentPlan?.items ?? []), selectedCollectionKey));
+    }
+  });
+
+  const artwork = document.createElement("div");
+  artwork.className = "poster-art";
+  const imageUrl = coverUrlFor(item);
+  if (imageUrl) {
+    const image = document.createElement("img");
+    image.src = imageUrl;
+    image.alt = item?.series_title || item?.title || node?.label || "Cover";
+    artwork.appendChild(image);
+  } else {
+    artwork.textContent = ordinal || "MV";
+  }
+
+  const badge = document.createElement("span");
+  badge.className = "poster-badge";
+  badge.textContent = ordinal || (item ? mediaTypeLabel(mediaSelectionValue(item)) : nodeTypeLabel(node));
+  artwork.appendChild(badge);
+
+  if (typeof item?.average_score === "number") {
+    const score = document.createElement("span");
+    score.className = "poster-score";
+    score.textContent = `★ ${scoreLabel(item.average_score)}`;
+    artwork.appendChild(score);
+  }
+
+  const title = document.createElement("strong");
+  title.textContent = isNode
+    ? item?.series_title || item?.title || node.label
+    : item.title || fileStem(item.source_path);
+  const meta = document.createElement("span");
+  meta.textContent = isNode
+    ? [nodeTypeLabel(node), item?.year].filter(Boolean).join(" · ")
+    : [mediaTypeLabel(mediaSelectionValue(item)), formatBytes(item.size_bytes)].filter(Boolean).join(" · ");
+
+  button.appendChild(artwork);
+  button.appendChild(title);
+  button.appendChild(meta);
+  return button;
 }
 
 function createCollectionItemRow(item) {
@@ -1959,6 +2133,36 @@ function renderCollectionRows(node) {
   }
 }
 
+function renderCollectionCards(node) {
+  if (!collectionCards) {
+    return;
+  }
+
+  clearNode(collectionCards);
+  sortedChildren(node).forEach((child, index) => {
+    collectionCards.appendChild(createPosterCard(child, index + 1));
+  });
+  if (!sortedChildren(node).length) {
+    node.directItems.forEach((item, index) => {
+      collectionCards.appendChild(createPosterCard(item, index + 1));
+    });
+  }
+  if (!collectionCards.childNodes.length) {
+    const empty = document.createElement("div");
+    empty.className = "collection-empty";
+    empty.textContent = "Keine Einträge in dieser Sammlung.";
+    collectionCards.appendChild(empty);
+  }
+}
+
+function syncCollectionViewMode() {
+  document.body.classList.toggle("collection-list-view", collectionView === "list");
+  document.body.classList.toggle("collection-cover-view", collectionView !== "list");
+  document.querySelectorAll("[data-collection-view]").forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.collectionView === collectionView);
+  });
+}
+
 function renderCollections(items) {
   const root = buildCollectionTree(items);
   const selected = findCollectionNode(root, selectedCollectionKey);
@@ -2000,6 +2204,8 @@ function renderCollections(items) {
   renderCollectionMeta(selected);
   renderCollectionProfile(selected);
   renderCollectionRows(selected);
+  renderCollectionCards(selected);
+  syncCollectionViewMode();
 
   const selectedItem = selected.directItems.find((item) => item.source_path === selectedCollectionItemKey);
   renderCollectionEditor(selectedItem ?? null);
@@ -2279,6 +2485,14 @@ async function loadPlan() {
 
 tabs.forEach((button) => {
   button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+});
+
+document.querySelectorAll("[data-collection-view]").forEach((button) => {
+  button.addEventListener("click", () => {
+    collectionView = button.dataset.collectionView || "cover";
+    localStorage.setItem(collectionViewKey, collectionView);
+    syncCollectionViewMode();
+  });
 });
 
 if (demoButton) {
