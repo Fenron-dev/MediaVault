@@ -77,6 +77,7 @@
 
           <div class="toolbar">
             <button class="action-button primary" id="run-demo">Vault scannen</button>
+            <button class="action-button primary subtle" id="apply-import">Import anwenden</button>
             <button class="action-button" data-tab="settings">Konfiguration</button>
           </div>
         </header>
@@ -234,7 +235,7 @@
                 </div>
 
                 <p class="field-hint" id="detail-hint">
-                  Korrekturen landen zunächst lokal im Browser-Cache und bleiben so portabel.
+                  Korrekturen bleiben lokal vorgemerkt, bis du oben den Import anwendest.
                 </p>
                 <p class="panel-label">Sidecar-Vorschau</p>
                 <pre class="code-block" id="detail-sidecar-preview">Wähle einen Eintrag aus.</pre>
@@ -418,7 +419,7 @@
                   <button class="action-button" id="templates-reset">Standard</button>
                 </div>
                 <p class="field-hint" id="templates-hint">
-                  Änderungen wirken zunächst auf die geplanten Zielpfade. Echte Verschiebungen werden später separat bestätigt.
+                  Änderungen wirken sofort auf die Zielvorschau und werden beim Import anwenden physisch verschoben.
                 </p>
               </div>
             </section>

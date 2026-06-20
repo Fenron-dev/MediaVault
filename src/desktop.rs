@@ -61,6 +61,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_vault_root_response(request.uri().query()),
                 ),
+                "/api/apply-import" => json_response(
+                    StatusCode::OK,
+                    &build_apply_import_response(request.body()),
+                ),
                 _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
             }
         })
@@ -207,6 +211,59 @@ fn build_select_folder_response() -> SelectFolderResponse {
     let selected = rfd::FileDialog::new().pick_folder();
     SelectFolderResponse {
         path: selected.map(|path| path.display().to_string()),
+        error: None,
+    }
+}
+
+fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
+    let request: ApplyImportRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => {
+            return ApplyImportResponse::error(format!(
+                "Import-Anfrage konnte nicht gelesen werden: {error}"
+            ));
+        }
+    };
+
+    let vault_root = match resolve_vault_root(request.vault_root.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => {
+            return ApplyImportResponse::error("Kein Vault geöffnet.".to_string());
+        }
+        Err(error) => {
+            return ApplyImportResponse::error(format!(
+                "Vault konnte nicht aufgelöst werden: {error}"
+            ));
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(vault) => vault,
+        Err(error) => {
+            return ApplyImportResponse::error(format!(
+                "Vault konnte nicht initialisiert werden: {error}"
+            ));
+        }
+    };
+
+    let mut applied = Vec::new();
+    let mut skipped = Vec::new();
+
+    for item in request.items {
+        match apply_import_item(&vault, &item) {
+            Ok(()) => {
+                applied.push(item.source_path.clone());
+            }
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: item.source_path.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    ApplyImportResponse {
+        applied,
+        skipped,
         error: None,
     }
 }
@@ -570,6 +627,42 @@ impl CreateVaultResponse {
 struct SelectFolderResponse {
     path: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApplyImportRequest {
+    vault_root: Option<String>,
+    items: Vec<ApplyImportItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApplyImportItem {
+    source_path: String,
+    target_path: String,
+    sidecar_preview: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApplyImportSkipped {
+    source_path: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApplyImportResponse {
+    applied: Vec<String>,
+    skipped: Vec<ApplyImportSkipped>,
+    error: Option<String>,
+}
+
+impl ApplyImportResponse {
+    fn error(error: String) -> Self {
+        Self {
+            applied: Vec::new(),
+            skipped: Vec::new(),
+            error: Some(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1365,6 +1458,97 @@ fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
     }
 
     None
+}
+
+fn apply_import_item(vault: &Vault, item: &ApplyImportItem) -> Result<()> {
+    let source_relative = RelativePath::new(&item.source_path)?;
+    let target_relative = RelativePath::new(&item.target_path)?;
+
+    let source_absolute = vault.resolve(source_relative.as_path())?;
+    let target_absolute = vault.resolve(target_relative.as_path())?;
+
+    if !source_absolute.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Quelldatei nicht gefunden: {}",
+            source_relative
+        )));
+    }
+
+    let target_parent = target_absolute.parent().ok_or_else(|| {
+        VaultError::InvalidVaultPath(format!(
+            "Zielpfad hat keinen Elternordner: {}",
+            target_relative
+        ))
+    })?;
+    fs::create_dir_all(target_parent).map_err(VaultError::from)?;
+
+    if source_absolute != target_absolute {
+        if target_absolute.exists() {
+            return Err(VaultError::InvalidVaultPath(format!(
+                "Zieldatei existiert bereits: {}",
+                target_relative
+            )));
+        }
+        move_file_with_fallback(&source_absolute, &target_absolute)?;
+    }
+
+    let sidecar_relative = sidecar_path_for(&target_relative)?;
+    let sidecar_absolute = vault.resolve(sidecar_relative.as_path())?;
+    let sidecar_parent = sidecar_absolute.parent().ok_or_else(|| {
+        VaultError::InvalidVaultPath(format!(
+            "Sidecar-Pfad hat keinen Elternordner: {}",
+            sidecar_relative
+        ))
+    })?;
+    fs::create_dir_all(sidecar_parent).map_err(VaultError::from)?;
+    fs::write(&sidecar_absolute, item.sidecar_preview.as_bytes()).map_err(VaultError::from)?;
+
+    prune_empty_inbox_dirs(vault, source_absolute.parent());
+    Ok(())
+}
+
+fn move_file_with_fallback(source: &Path, target: &Path) -> Result<()> {
+    match fs::rename(source, target) {
+        Ok(()) => Ok(()),
+        Err(error) if is_cross_device_error(&error) => {
+            fs::copy(source, target).map_err(VaultError::from)?;
+            fs::remove_file(source).map_err(VaultError::from)?;
+            Ok(())
+        }
+        Err(error) => Err(VaultError::from(error)),
+    }
+}
+
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    const EXDEV_OS_ERROR: i32 = 18;
+    error.raw_os_error() == Some(EXDEV_OS_ERROR)
+}
+
+fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
+    let inbox_root = vault.inbox_dir();
+    let mut current = start.map(Path::to_path_buf);
+
+    while let Some(path) = current {
+        if path == inbox_root || path == vault.root() {
+            break;
+        }
+
+        let can_remove = fs::read_dir(&path)
+            .ok()
+            .and_then(|mut entries| entries.next().transpose().ok())
+            .flatten()
+            .is_none();
+
+        if !can_remove {
+            break;
+        }
+
+        let parent = path.parent().map(Path::to_path_buf);
+        if fs::remove_dir(&path).is_err() {
+            break;
+        }
+        current = parent;
+    }
 }
 
 fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {

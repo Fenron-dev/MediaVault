@@ -8,6 +8,7 @@ const recentVaultsList = document.getElementById("recent-vaults-list");
 const title = document.getElementById("view-title");
 const statusStrip = document.getElementById("status-strip");
 const demoButton = document.getElementById("run-demo");
+const applyImportButton = document.getElementById("apply-import");
 const inboxRows = document.getElementById("inbox-rows");
 const reviewRows = document.getElementById("review-rows");
 const metricInbox = document.getElementById("metric-inbox");
@@ -994,6 +995,114 @@ function projectPlan(plan) {
     cloned.summary.duplicates = cloned.items.filter((item) => item.duplicate_of).length;
   }
   return cloned;
+}
+
+function effectiveAppliedStatus(item) {
+  const status = String(item.status || "").trim().toLowerCase();
+  if (!status || status === "inbox" || status === "needs-review") {
+    return "in-library";
+  }
+  return status;
+}
+
+function isReadyForImport(item) {
+  if (!item || !item.target_path) {
+    return false;
+  }
+  if (trashedEntries[item.source_path]) {
+    return false;
+  }
+  if (item.duplicate_of || needsReviewInUi(item)) {
+    return false;
+  }
+  return !String(item.target_path).startsWith("Inbox/");
+}
+
+function buildApplyImportItem(item) {
+  const prepared = {
+    ...item,
+    status: effectiveAppliedStatus(item),
+  };
+  prepared.target_path = buildTargetPath(prepared);
+  prepared.sidecar_path = buildSidecarPath(prepared.target_path);
+  prepared.sidecar_preview = yamlOverrides[item.source_path] || buildSidecarPreview(prepared);
+  return {
+    source_path: item.source_path,
+    target_path: prepared.target_path,
+    sidecar_preview: prepared.sidecar_preview,
+  };
+}
+
+function clearAppliedLocalState(sourcePaths) {
+  sourcePaths.forEach((sourcePath) => {
+    delete corrections[sourcePath];
+    delete apiMetadata[sourcePath];
+    delete duplicateOverrides[sourcePath];
+    delete yamlOverrides[sourcePath];
+    delete trashedEntries[sourcePath];
+  });
+  saveStoredJson(correctionsKey, corrections);
+  saveStoredJson(metadataKey, apiMetadata);
+  saveStoredJson(duplicateOverridesKey, duplicateOverrides);
+  saveStoredJson(yamlOverridesKey, yamlOverrides);
+  saveStoredJson(trashKey, trashedEntries);
+}
+
+async function applyReadyImports() {
+  const readyItems = (currentPlan?.items ?? []).filter((item) => isReadyForImport(item));
+  if (!readyItems.length) {
+    if (statusStrip) {
+      statusStrip.textContent = "Keine verschiebbaren Einträge vorhanden. Prüfe Titel, Typ und Duplikate.";
+    }
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `${readyItems.length} Eintrag(e) jetzt aus der Inbox in die Vault-Struktur verschieben?`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `${readyItems.length} Eintrag(e) werden verschoben...`;
+  }
+
+  const response = await fetch("/api/apply-import", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      vault_root: getVaultRoot(),
+      items: readyItems.map((item) => buildApplyImportItem(item)),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  const applied = Array.isArray(result.applied) ? result.applied : [];
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  clearAppliedLocalState(applied);
+  updateAuditTrail(`${applied.length} Eintrag(e) in die Vault-Struktur verschoben.`);
+
+  if (statusStrip) {
+    statusStrip.textContent = skipped.length
+      ? `${applied.length} Eintrag(e) verschoben, ${skipped.length} übersprungen.`
+      : `${applied.length} Eintrag(e) erfolgreich verschoben.`;
+    if (skipped.length && skipped[0]?.reason) {
+      statusStrip.textContent += ` Erstes Problem: ${skipped[0].reason}`;
+    }
+  }
+
+  await loadPlan();
 }
 
 function buildTargetPath(item) {
@@ -3395,6 +3504,18 @@ if (demoButton) {
   });
 }
 
+if (applyImportButton) {
+  applyImportButton.addEventListener("click", async () => {
+    try {
+      await applyReadyImports();
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Import konnte nicht angewendet werden: ${error.message}`;
+      }
+    }
+  });
+}
+
 if (vaultOpenButton) {
   vaultOpenButton.addEventListener("click", async () => {
     let selected = "";
@@ -3513,7 +3634,7 @@ if (templatesSave) {
     }
     if (templatesHint) {
       templatesHint.textContent =
-        "Templates gespeichert. Zielpfade wurden neu berechnet; echte Verschiebungen werden später separat bestätigt.";
+        "Templates gespeichert. Zielpfade wurden neu berechnet und gelten beim nächsten Import anwenden.";
     }
   });
 }
