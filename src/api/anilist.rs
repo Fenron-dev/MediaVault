@@ -139,6 +139,137 @@ query ($search: String!, $isAdult: Boolean) {
 }
 "#;
 
+const ANILIST_MEDIA_SEARCH_QUERY: &str = r#"
+query ($search: String!, $isAdult: Boolean, $page: Int, $perPage: Int) {
+  Page(page: $page, perPage: $perPage) {
+    media(search: $search, type: ANIME, isAdult: $isAdult, sort: SEARCH_MATCH) {
+      id
+      idMal
+      siteUrl
+      title {
+        romaji
+        english
+        native
+      }
+      description(asHtml: false)
+      startDate {
+        year
+        month
+        day
+      }
+      endDate {
+        year
+        month
+        day
+      }
+      season
+      seasonYear
+      episodes
+      duration
+      status
+      format
+      source
+      countryOfOrigin
+      hashtag
+      genres
+      synonyms
+      averageScore
+      meanScore
+      popularity
+      favourites
+      coverImage {
+        medium
+        large
+        extraLarge
+        color
+      }
+      bannerImage
+      trailer {
+        id
+        site
+        thumbnail
+      }
+      tags {
+        name
+        rank
+        category
+        isGeneralSpoiler
+        isMediaSpoiler
+      }
+      studios {
+        nodes {
+          id
+          name
+          isAnimationStudio
+          siteUrl
+        }
+      }
+      relations {
+        edges {
+          relationType
+          node {
+            id
+            type
+            format
+            siteUrl
+            title {
+              romaji
+              english
+              native
+            }
+          }
+        }
+      }
+      characters(page: 1, perPage: 12) {
+        edges {
+          role
+          node {
+            id
+            name {
+              full
+              native
+            }
+          }
+          voiceActors(language: JAPANESE) {
+            id
+            name {
+              full
+              native
+            }
+            languageV2
+          }
+        }
+      }
+      staff(page: 1, perPage: 12) {
+        edges {
+          role
+          node {
+            id
+            name {
+              full
+              native
+            }
+          }
+        }
+      }
+      reviews(page: 1, perPage: 5) {
+        nodes {
+          id
+          summary
+          rating
+          ratingAmount
+          siteUrl
+          user {
+            name
+          }
+        }
+      }
+      isAdult
+    }
+  }
+}
+"#;
+
 /// Minimal AniList client configuration used by the foundation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AniListClient {
@@ -186,12 +317,40 @@ impl AniListClient {
         .to_string()
     }
 
+    /// Builds a JSON request body for AniList anime search suggestions.
+    pub fn build_search_results_query(search: &str, adult: bool, page: u32, per_page: u32) -> String {
+        serde_json::json!({
+            "query": ANILIST_MEDIA_SEARCH_QUERY,
+            "variables": {
+                "search": search,
+                "isAdult": adult,
+                "page": page,
+                "perPage": per_page,
+            }
+        })
+        .to_string()
+    }
+
     /// Searches AniList for an anime title and returns the best match.
     pub fn search_anime(
         &self,
         search: &str,
         adult: bool,
     ) -> Result<Option<AniListAnimeMetadata>> {
+        Ok(self
+            .search_anime_candidates(search, adult, 1)?
+            .into_iter()
+            .next())
+    }
+
+    /// Searches AniList for anime title suggestions.
+    pub fn search_anime_candidates(
+        &self,
+        search: &str,
+        adult: bool,
+        limit: usize,
+    ) -> Result<Vec<AniListAnimeMetadata>> {
+        let per_page = limit.clamp(1, 10) as u32;
         let client = Client::builder()
             .timeout(Duration::from_secs(12))
             .build()
@@ -206,7 +365,7 @@ impl AniListClient {
         }
 
         let response = request
-            .body(Self::build_search_query(search, adult))
+            .body(Self::build_search_results_query(search, adult, 1, per_page))
             .send()
             .map_err(|error| VaultError::ExternalApi(error.to_string()))?;
 
@@ -217,7 +376,7 @@ impl AniListClient {
             )));
         }
 
-        let payload: AniListGraphQlResponse = response
+        let payload: AniListGraphQlSearchResponse = response
             .json()
             .map_err(|error| VaultError::ExternalApi(error.to_string()))?;
 
@@ -230,7 +389,16 @@ impl AniListClient {
             return Err(VaultError::ExternalApi(message));
         }
 
-        Ok(payload.data.and_then(|data| data.media.map(AniListAnimeMetadata::from)))
+        Ok(payload
+            .data
+            .map(|data| {
+                data.page
+                    .media
+                    .into_iter()
+                    .map(AniListAnimeMetadata::from)
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }
 
@@ -476,6 +644,24 @@ struct AniListGraphQlResponse {
 struct AniListGraphQlData {
     #[serde(rename = "Media")]
     media: Option<AniListGraphQlMedia>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListGraphQlSearchResponse {
+    data: Option<AniListGraphQlSearchData>,
+    errors: Option<Vec<AniListGraphQlError>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListGraphQlSearchData {
+    #[serde(rename = "Page")]
+    page: AniListGraphQlSearchPage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListGraphQlSearchPage {
+    #[serde(default)]
+    media: Vec<AniListGraphQlMedia>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -123,11 +123,15 @@ fn build_anilist_search_response(query: Option<&str>) -> AniListSearchResponse {
     let adult = extract_query_value(query, "adult")
         .map(|value| value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let limit = extract_query_value(query, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8);
     let client = AniListClient::default();
 
-    match client.search_anime(&title, adult) {
-        Ok(metadata) => AniListSearchResponse {
-            metadata,
+    match client.search_anime_candidates(&title, adult, limit) {
+        Ok(results) => AniListSearchResponse {
+            metadata: results.first().cloned(),
+            results,
             error: None,
         },
         Err(error) => AniListSearchResponse::error(error.to_string()),
@@ -419,6 +423,7 @@ struct DemoSummary {
 #[derive(Debug, Clone, Serialize)]
 struct AniListSearchResponse {
     metadata: Option<AniListAnimeMetadata>,
+    results: Vec<AniListAnimeMetadata>,
     error: Option<String>,
 }
 
@@ -426,6 +431,7 @@ impl AniListSearchResponse {
     fn error(error: String) -> Self {
         Self {
             metadata: None,
+            results: Vec::new(),
             error: Some(error),
         }
     }

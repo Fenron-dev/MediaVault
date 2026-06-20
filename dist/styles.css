@@ -105,6 +105,95 @@ body:not(.is-vault-open) .app-shell {
   font-size: 2.4rem;
 }
 
+.app-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  background: rgb(8 10 12 / 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.app-modal.is-active {
+  display: grid;
+}
+
+.modal-card {
+  width: min(980px, 100%);
+  max-height: min(88vh, 980px);
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  box-shadow: var(--shadow);
+}
+
+.anilist-modal {
+  width: min(1080px, 100%);
+}
+
+.anilist-results {
+  display: grid;
+  gap: 12px;
+}
+
+.anilist-result {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+  padding: 12px;
+}
+
+.anilist-result-cover {
+  width: 72px;
+  aspect-ratio: 2 / 3;
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+
+.anilist-result-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.anilist-result-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.anilist-result-meta strong {
+  font-size: 1rem;
+}
+
+.anilist-result-meta span,
+.anilist-result-meta p {
+  color: var(--muted);
+}
+
+.anilist-result-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.anilist-empty {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  color: var(--muted);
+}
+
 .vault-gate-actions,
 .recent-vaults {
   width: 100%;

@@ -509,6 +509,35 @@
       </aside>
     </div>
 
+    <section class="app-modal" id="app-modal" hidden>
+      <section class="panel modal-card" id="trash-dialog" hidden>
+        <p class="panel-label">Papierkorb</p>
+        <h3 id="trash-dialog-title">Eintrag entfernen</h3>
+        <p class="body-copy" id="trash-dialog-body">
+          Der ausgewählte Eintrag wird erst in den App-Papierkorb verschoben.
+        </p>
+        <div class="toolbar">
+          <button class="action-button danger" id="trash-dialog-confirm">In Papierkorb verschieben</button>
+          <button class="action-button" id="trash-dialog-cancel">Abbrechen</button>
+        </div>
+      </section>
+
+      <section class="panel modal-card anilist-modal" id="anilist-dialog" hidden>
+        <p class="panel-label">AniList</p>
+        <h3 id="anilist-dialog-title">Treffer auswählen</h3>
+        <label class="field">
+          <span>Suchbegriff oder Titel</span>
+          <input id="anilist-dialog-query" type="text" />
+        </label>
+        <div class="toolbar">
+          <button class="action-button primary" id="anilist-dialog-search">Suchen</button>
+          <button class="action-button" id="anilist-dialog-cancel">Abbrechen</button>
+        </div>
+        <div class="api-feedback" id="anilist-dialog-feedback"></div>
+        <div class="anilist-results" id="anilist-dialog-results"></div>
+      </section>
+    </section>
+
     <script src="/app.js" defer></script>
   </body>
 </html>

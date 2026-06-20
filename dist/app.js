@@ -105,6 +105,19 @@ const inspectorYamlReset = document.getElementById("inspector-yaml-reset");
 const inspectorYamlHint = document.getElementById("inspector-yaml-hint");
 const inspectorYamlPanel = document.getElementById("inspector-yaml-panel");
 const auditTrailNode = document.getElementById("audit-trail");
+const appModal = document.getElementById("app-modal");
+const trashDialog = document.getElementById("trash-dialog");
+const trashDialogTitle = document.getElementById("trash-dialog-title");
+const trashDialogBody = document.getElementById("trash-dialog-body");
+const trashDialogConfirm = document.getElementById("trash-dialog-confirm");
+const trashDialogCancel = document.getElementById("trash-dialog-cancel");
+const anilistDialog = document.getElementById("anilist-dialog");
+const anilistDialogTitle = document.getElementById("anilist-dialog-title");
+const anilistDialogQuery = document.getElementById("anilist-dialog-query");
+const anilistDialogSearch = document.getElementById("anilist-dialog-search");
+const anilistDialogCancel = document.getElementById("anilist-dialog-cancel");
+const anilistDialogFeedback = document.getElementById("anilist-dialog-feedback");
+const anilistDialogResults = document.getElementById("anilist-dialog-results");
 
 const storageKey = "mediavault.vaultRoot";
 const recentVaultsKey = "mediavault.recentVaults";
@@ -177,6 +190,10 @@ let recentCollections = loadStoredJson(recentCollectionsKey, []);
 let trashedEntries = loadStoredJson(trashKey, {});
 let isMultiEdit = false;
 let multiSelectedKeys = new Set();
+let pendingTrashSelection = null;
+let pendingAniListSelection = null;
+let pendingAniListTargets = [];
+let pendingAniListFeedback = null;
 
 function setActiveTab(tab, options = {}) {
   if (tab === "collections" && options.resetCollections) {
@@ -1163,52 +1180,259 @@ function aniListSummary(metadata) {
   return parts.join(" | ");
 }
 
-async function fetchAniListForItem(item, feedbackNode = null, targetItems = [item]) {
-  const searchTitle =
-    item.series_title ||
-    item.title ||
-    detailTitle?.value.trim() ||
-    stripEpisodeMarkerText(fileStem(item.source_path));
-  if (!searchTitle) {
-    setApiFeedback(feedbackNode, `Kein Suchbegriff für ${item.source_path} vorhanden.`, "error");
-    if (statusStrip) {
-      statusStrip.textContent = "Kein Suchbegriff für AniList vorhanden.";
+function aniListDisplayTitle(metadata) {
+  return (
+    metadata.title_english ||
+    metadata.title_romaji ||
+    metadata.title_native ||
+    metadata.series_title ||
+    metadata.title ||
+    "Unbekannt"
+  );
+}
+
+function closeActionModal() {
+  pendingTrashSelection = null;
+  pendingAniListSelection = null;
+  pendingAniListTargets = [];
+  pendingAniListFeedback = null;
+
+  if (trashDialog) {
+    trashDialog.hidden = true;
+  }
+  if (anilistDialog) {
+    anilistDialog.hidden = true;
+  }
+  if (appModal) {
+    appModal.classList.remove("is-active");
+    appModal.hidden = true;
+  }
+}
+
+function selectionSearchTitle(selection) {
+  if (!selection) {
+    return "";
+  }
+
+  const item = selection.item ?? {};
+  if (selection.type === "node") {
+    const kind = collectionNodeKind(selection.node);
+    if (kind === "movie") {
+      return item.title || selection.node.label || "";
     }
+    if (kind === "series" || kind === "season") {
+      return item.series_title || deriveSeriesTitle(item) || selection.node.label || "";
+    }
+    return selection.node.label || item.series_title || item.title || "";
+  }
+
+  return item.series_title || item.title || stripEpisodeMarkerText(fileStem(item.source_path)) || "";
+}
+
+function showAniListResults(results, query) {
+  if (!anilistDialogResults) {
     return;
   }
 
-  if (statusStrip) {
-    statusStrip.textContent = `AniList-Suche läuft für: ${searchTitle}`;
+  clearNode(anilistDialogResults);
+  const list = Array.isArray(results) ? results : [];
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "anilist-empty";
+    empty.textContent = `Keine Treffer für "${query}". Titel anpassen und erneut suchen.`;
+    anilistDialogResults.appendChild(empty);
+    return;
   }
-  setApiFeedback(feedbackNode, `Suche AniList für ${item.source_path} mit "${searchTitle}"...`, "loading");
 
-  const adult = canonicalMediaType(item.media_type) === "hentai-anime";
-  const response = await fetch(`/api/anilist-search?title=${encodeURIComponent(searchTitle)}&adult=${adult ? "true" : "false"}`);
+  list.forEach((result) => {
+    const card = document.createElement("article");
+    card.className = "anilist-result";
+
+    const cover = document.createElement("div");
+    cover.className = "anilist-result-cover";
+    const coverUrl = coverUrlFor(result);
+    if (coverUrl) {
+      const image = document.createElement("img");
+      image.src = coverUrl;
+      image.alt = aniListDisplayTitle(result);
+      cover.appendChild(image);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "anilist-result-meta";
+    const title = document.createElement("strong");
+    title.textContent = aniListDisplayTitle(result);
+    const subtitle = document.createElement("span");
+    subtitle.textContent = [
+      result.format || "",
+      result.season_year || result.start_date?.year || "",
+      typeof result.episodes === "number" ? `${result.episodes} Folgen` : "",
+      typeof result.average_score === "number" ? `Score ${Math.round(result.average_score)} / 100` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    const description = document.createElement("p");
+    description.textContent = String(result.description || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+    meta.appendChild(title);
+    meta.appendChild(subtitle);
+    if (description.textContent) {
+      meta.appendChild(description);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "anilist-result-actions";
+    const applyButton = document.createElement("button");
+    applyButton.type = "button";
+    applyButton.className = "action-button primary";
+    applyButton.textContent = "Übernehmen";
+    applyButton.addEventListener("click", () => {
+      applyAniListResult(result);
+    });
+    actions.appendChild(applyButton);
+
+    card.appendChild(cover);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    anilistDialogResults.appendChild(card);
+  });
+}
+
+function openAniListDialog(selection, feedbackNode = null, targetItems = []) {
+  const resolvedSelection = normalizeSelection(selection);
+  if (!resolvedSelection || !resolvedSelection.item) {
+    return;
+  }
+
+  pendingAniListSelection = resolvedSelection;
+  pendingAniListTargets = targetItems.length ? targetItems : resolvedSelection.items;
+  pendingAniListFeedback = feedbackNode;
+
+  if (anilistDialogTitle) {
+    anilistDialogTitle.textContent = `AniList-Treffer für ${selectionTitle(resolvedSelection)}`;
+  }
+  if (anilistDialogQuery) {
+    anilistDialogQuery.value = selectionSearchTitle(resolvedSelection);
+  }
+  if (anilistDialogFeedback) {
+    anilistDialogFeedback.textContent = "";
+    anilistDialogFeedback.className = "api-feedback";
+  }
+  if (anilistDialogResults) {
+    clearNode(anilistDialogResults);
+  }
+  if (anilistDialog) {
+    anilistDialog.hidden = false;
+  }
+  if (appModal) {
+    appModal.hidden = false;
+    appModal.classList.add("is-active");
+  }
+  if (statusStrip) {
+    statusStrip.textContent = `Papierkorb für ${selectionTitle(selection)} bereit.`;
+  }
+}
+
+async function runAniListDialogSearch() {
+  if (!pendingAniListSelection) {
+    return;
+  }
+
+  const query = anilistDialogQuery?.value.trim() || "";
+  if (!query) {
+    setApiFeedback(anilistDialogFeedback, "Bitte zuerst einen Suchbegriff eintragen.", "error");
+    return;
+  }
+
+  const adult = canonicalMediaType(pendingAniListSelection.item?.media_type) === "hentai-anime";
+  if (statusStrip) {
+    statusStrip.textContent = `AniList-Suche läuft für: ${query}`;
+  }
+  setApiFeedback(anilistDialogFeedback, `Suche AniList für "${query}"...`, "loading");
+
+  const response = await fetch(
+    `/api/anilist-search?title=${encodeURIComponent(query)}&adult=${adult ? "true" : "false"}&limit=10`
+  );
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
   }
 
   const payload = await response.json();
-  if (!payload.metadata) {
+  const results = Array.isArray(payload.results) ? payload.results : payload.metadata ? [payload.metadata] : [];
+  showAniListResults(results, query);
+
+  if (!results.length) {
     setApiFeedback(
-      feedbackNode,
-      `Kein AniList-Treffer für "${searchTitle}" bei ${item.source_path}. Titel korrigieren und erneut abrufen.`,
+      anilistDialogFeedback,
+      `Keine Treffer für "${query}". Titel korrigieren und erneut suchen.`,
       "error"
     );
-    throw new Error(payload.error || "Kein AniList-Treffer");
+    return;
   }
 
-  const normalized = normalizeAniListMetadata(payload.metadata, item);
-  targetItems.forEach((target) => {
+  const countText = `${results.length} Treffer gefunden`;
+  setApiFeedback(anilistDialogFeedback, countText, "success");
+}
+
+async function fetchAniListForItem(item, feedbackNode = null, targetItems = [item], selection = null) {
+  const resolvedSelection = selection ? normalizeSelection(selection) : normalizeSelection(item);
+  if (!resolvedSelection) {
+    throw new Error("Kein gültiger Eintrag für AniList vorhanden");
+  }
+
+  openAniListDialog(resolvedSelection, feedbackNode, targetItems);
+  try {
+    await runAniListDialogSearch();
+  } catch (error) {
+    setApiFeedback(
+      anilistDialogFeedback,
+      `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut suchen.`,
+      "error"
+    );
+    if (statusStrip) {
+      statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
+    }
+    throw error;
+  }
+}
+
+function applyAniListResult(metadata) {
+  if (!pendingAniListSelection) {
+    return;
+  }
+
+  const searchTitle = anilistDialogQuery?.value.trim() || selectionSearchTitle(pendingAniListSelection);
+  applySelectionCorrection(pendingAniListSelection, {
+    titleValue: searchTitle,
+    mediaTypeValue: pendingAniListSelection.item?.media_type || mediaSelectionValue(pendingAniListSelection.item ?? {}),
+    yearValue: pendingAniListSelection.item?.year ?? null,
+    statusValue:
+      pendingAniListSelection.item?.status ||
+      (pendingAniListSelection.item?.needs_review ? "needs-review" : null),
+  });
+
+  const normalized = normalizeAniListMetadata(metadata, pendingAniListSelection.item);
+  pendingAniListTargets.forEach((target) => {
     apiMetadata[target.source_path] = normalized;
   });
   saveStoredJson(metadataKey, apiMetadata);
   currentPlan = projectPlan(sourcePlan);
-  selectedItemKey = item.source_path;
+  const firstTarget = pendingAniListTargets[0];
+  if (pendingAniListSelection.type === "node") {
+    selectedCollectionKey = pendingAniListSelection.node?.path || selectedCollectionKey;
+    selectedItemKey = "";
+    selectedCollectionItemKey = "";
+  } else if (firstTarget?.source_path) {
+    selectedItemKey = firstTarget.source_path;
+    selectedCollectionItemKey = firstTarget.source_path;
+  }
   renderPlan(currentPlan);
-  setApiFeedback(feedbackNode, `AniList übernommen: ${aniListSummary(normalized)}`, "success");
-  updateAuditTrail(`AniList-Metadaten übernommen für ${item.source_path}.`);
-  return normalized;
+  setApiFeedback(pendingAniListFeedback, `AniList übernommen: ${aniListSummary(normalized)}`, "success");
+  updateAuditTrail(`AniList-Metadaten übernommen für ${selectionTitle(pendingAniListSelection)}.`);
+  closeActionModal();
 }
 
 function updateAuditTrail(message) {
@@ -2717,18 +2941,33 @@ function upsertCorrection(item) {
 }
 
 function upsertSelectionCorrection(selection) {
+  applySelectionCorrection(selection);
+}
+
+function applySelectionCorrection(selection, overrides = {}) {
   if (!selectionEditable(selection)) {
     return;
   }
 
-  const titleValue = inspectorName?.value.trim() || null;
+  const titleValue = (typeof overrides.titleValue === "string"
+    ? overrides.titleValue.trim()
+    : inspectorName?.value.trim()) || null;
+  const mediaTypeValue = overrides.mediaTypeValue || inspectorMediaType?.value || null;
+  const yearValue =
+    Object.prototype.hasOwnProperty.call(overrides, "yearValue")
+      ? overrides.yearValue
+      : normalizeYear(inspectorYear?.value);
+  const statusValue = Object.prototype.hasOwnProperty.call(overrides, "statusValue")
+    ? overrides.statusValue
+    : inspectorStatus?.value || null;
+
   selection.items.forEach((item) => {
     const existing = corrections[item.source_path] ?? {};
     const next = {
       ...existing,
-      media_type: inspectorMediaType?.value || existing.media_type || mediaSelectionValue(item),
-      year: normalizeYear(inspectorYear?.value),
-      status: inspectorStatus?.value || existing.status || null,
+      media_type: mediaTypeValue || existing.media_type || mediaSelectionValue(item),
+      year: yearValue,
+      status: statusValue || existing.status || null,
       updated_at: new Date().toISOString(),
     };
 
@@ -2736,8 +2975,7 @@ function upsertSelectionCorrection(selection) {
       const kind = collectionNodeKind(selection.node);
       if (["series", "season"].includes(kind)) {
         next.series_title = titleValue;
-      }
-      if (collectionNodeKind(selection.node) === "movie") {
+      } else if (kind === "movie") {
         next.title = titleValue;
       }
     } else if (selection.type === "bulk") {
@@ -2766,20 +3004,33 @@ function upsertSelectionCorrection(selection) {
   saveStoredJson(correctionsKey, corrections);
 }
 
-function trashSelection(selection) {
+function openTrashDialog(selection) {
+  if (!selectionEditable(selection)) {
+    return;
+  }
+
+  pendingTrashSelection = selection;
+  if (trashDialogTitle) {
+    trashDialogTitle.textContent = `${selectionTitle(selection)} in den Papierkorb verschieben?`;
+  }
+  if (trashDialogBody) {
+    trashDialogBody.textContent = `${selection.items.length} Eintrag(e) werden zunächst nur in den App-Papierkorb verschoben.`;
+  }
+  if (trashDialog) {
+    trashDialog.hidden = false;
+  }
+  if (appModal) {
+    appModal.hidden = false;
+    appModal.classList.add("is-active");
+  }
+}
+
+function commitTrashSelection(selection) {
   if (!selectionEditable(selection)) {
     return;
   }
 
   const count = selection.items.length;
-  const label = selectionTitle(selection);
-  const confirmed = window.confirm(
-    `${label} wirklich in den MediaVault-Papierkorb verschieben?\n\nDie Dateien werden jetzt noch nicht endgültig gelöscht.`
-  );
-  if (!confirmed) {
-    return;
-  }
-
   const at = new Date().toISOString();
   selection.items.forEach((item) => {
     trashedEntries[item.source_path] = {
@@ -2802,6 +3053,11 @@ function trashSelection(selection) {
   if (statusStrip) {
     statusStrip.textContent = `${count} Eintrag(e) in den MediaVault-Papierkorb verschoben.`;
   }
+  closeActionModal();
+}
+
+function trashSelection(selection) {
+  openTrashDialog(selection);
 }
 
 function clearCorrection(item) {
@@ -3003,7 +3259,7 @@ if (detailFetchMetadata) {
         series_title: detailTitle?.value.trim() || item.series_title,
         media_type: detailMediaTypeInput?.value || item.media_type,
       };
-      await fetchAniListForItem(draft, detailApiFeedback);
+      await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(item));
     } catch (error) {
       setApiFeedback(
         detailApiFeedback,
@@ -3060,13 +3316,7 @@ if (collectionEditorFetch) {
         series_title: collectionEditorName?.value.trim() || item.series_title,
         media_type: collectionEditorMediaType?.value || item.media_type,
       };
-      await fetchAniListForItem(draft, collectionEditorApiFeedback);
-      const updated = currentPlan?.items.find((candidate) => candidate.source_path === item.source_path);
-      if (updated) {
-        selectedCollectionKey = updated.collection_path || selectedCollectionKey;
-        selectedCollectionItemKey = updated.source_path;
-      }
-      renderPlan(currentPlan);
+      await fetchAniListForItem(draft, collectionEditorApiFeedback, [item], normalizeSelection(item));
     } catch (error) {
       setApiFeedback(
         collectionEditorApiFeedback,
@@ -3158,8 +3408,12 @@ if (inspectorFetchMetadata) {
         series_title: inspectorName?.value.trim() || inspectorSelection.item.series_title,
         media_type: inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item),
       };
-      await fetchAniListForItem(draft, inspectorApiFeedback, inspectorSelection.items);
-      renderPlan(currentPlan);
+      await fetchAniListForItem(
+        draft,
+        inspectorApiFeedback,
+        inspectorSelection.items,
+        inspectorSelection
+      );
     } catch (error) {
       setApiFeedback(
         inspectorApiFeedback,
@@ -3172,7 +3426,64 @@ if (inspectorFetchMetadata) {
 
 if (inspectorTrash) {
   inspectorTrash.addEventListener("click", () => {
-    trashSelection(inspectorSelection);
+    openTrashDialog(inspectorSelection);
+  });
+}
+
+if (trashDialogConfirm) {
+  trashDialogConfirm.addEventListener("click", () => {
+    if (pendingTrashSelection) {
+      commitTrashSelection(pendingTrashSelection);
+    }
+  });
+}
+
+if (trashDialogCancel) {
+  trashDialogCancel.addEventListener("click", () => {
+    closeActionModal();
+  });
+}
+
+if (anilistDialogSearch) {
+  anilistDialogSearch.addEventListener("click", async () => {
+    try {
+      await runAniListDialogSearch();
+    } catch (error) {
+      setApiFeedback(
+        anilistDialogFeedback,
+        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut suchen.`,
+        "error"
+      );
+      if (statusStrip) {
+        statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (anilistDialogCancel) {
+  anilistDialogCancel.addEventListener("click", () => {
+    closeActionModal();
+  });
+}
+
+if (anilistDialogQuery) {
+  anilistDialogQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      anilistDialogSearch?.click();
+    }
+    if (event.key === "Escape") {
+      closeActionModal();
+    }
+  });
+}
+
+if (appModal) {
+  appModal.addEventListener("click", (event) => {
+    if (event.target === appModal) {
+      closeActionModal();
+    }
   });
 }
 
