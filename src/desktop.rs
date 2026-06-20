@@ -49,6 +49,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_anilist_search_response(request.uri().query()),
                 ),
+                "/api/select-folder" => json_response(
+                    StatusCode::OK,
+                    &build_select_folder_response(),
+                ),
                 "/api/create-vault" => json_response(
                     StatusCode::OK,
                     &build_create_vault_response(request.uri().query()),
@@ -161,6 +165,14 @@ fn build_create_vault_response(query: Option<&str>) -> CreateVaultResponse {
             error: None,
         },
         Err(error) => CreateVaultResponse::error(error.to_string()),
+    }
+}
+
+fn build_select_folder_response() -> SelectFolderResponse {
+    let selected = rfd::FileDialog::new().pick_folder();
+    SelectFolderResponse {
+        path: selected.map(|path| path.display().to_string()),
+        error: None,
     }
 }
 
@@ -520,6 +532,12 @@ impl CreateVaultResponse {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SelectFolderResponse {
+    path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DemoPlanItem {
     source_path: String,
     target_path: Option<String>,
@@ -764,6 +782,7 @@ fn derive_anime_context(
     let series_title = anilist
         .and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
         .or_else(|| series_title_hint.map(|value| value.to_string()))
+        .or_else(|| extract_series_hint_from_path(&file.source_path))
         .or_else(|| extract_anime_series_hint(&file.source_path))
         .or_else(|| Some(normalize_title_candidate(&file_name)));
     let season_number = extract_season_number(&file.source_path).or(Some(1));
@@ -945,6 +964,8 @@ fn build_anime_search_title(file: &IncomingFile) -> Option<String> {
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.title.clone())
+        .or_else(|| extract_series_hint_from_path(&file.source_path))
+        .or_else(|| extract_anime_series_hint(&file.source_path))
         .or_else(|| {
             file.source_path
                 .file_stem()
@@ -1089,6 +1110,41 @@ fn extract_anime_series_hint(relative_path: &RelativePath) -> Option<String> {
     }
 
     None
+}
+
+fn extract_series_hint_from_path(relative_path: &RelativePath) -> Option<String> {
+    let mut previous_meaningful: Option<String> = None;
+
+    for component in relative_path.as_path().components() {
+        let text = component.as_os_str().to_string_lossy();
+        let value = text.trim();
+        if value.is_empty() || is_hidden_system_entry(value) {
+            continue;
+        }
+
+        if is_season_folder(value) {
+            if let Some(previous) = previous_meaningful.as_ref() {
+                let candidate = normalize_title_candidate(previous);
+                if !candidate.is_empty() {
+                    return Some(candidate);
+                }
+            }
+            continue;
+        }
+
+        previous_meaningful = Some(value.to_string());
+    }
+
+    None
+}
+
+fn is_hidden_system_entry(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.starts_with("._")
+        || trimmed.starts_with('.')
+        || trimmed.eq_ignore_ascii_case(".ds_store")
+        || trimmed.eq_ignore_ascii_case("thumbs.db")
+        || trimmed.eq_ignore_ascii_case("desktop.ini")
 }
 
 fn extract_season_number(relative_path: &RelativePath) -> Option<u16> {
@@ -1341,6 +1397,11 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<IncomingFile>
     for entry in fs::read_dir(directory).map_err(VaultError::from)? {
         let entry = entry.map_err(VaultError::from)?;
         let path = entry.path();
+
+        if should_skip_scanned_entry(&path) {
+            continue;
+        }
+
         let metadata = entry.metadata().map_err(VaultError::from)?;
 
         if metadata.is_dir() {
@@ -1372,6 +1433,14 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<IncomingFile>
     }
 
     Ok(())
+}
+
+fn should_skip_scanned_entry(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+
+    is_hidden_system_entry(name)
 }
 
 fn detect_classification(relative_path: &RelativePath) -> Option<FileClassification> {

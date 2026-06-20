@@ -1,13 +1,8 @@
 const tabs = Array.from(document.querySelectorAll("[data-tab]"));
 const views = Array.from(document.querySelectorAll("[data-view]"));
 const vaultGate = document.getElementById("vault-gate");
-const vaultOpenPath = document.getElementById("vault-open-path");
-const vaultOpenPathDisplay = document.getElementById("vault-open-path-display");
 const vaultOpenButton = document.getElementById("vault-open-button");
 const vaultCreateName = document.getElementById("vault-create-name");
-const vaultCreatePath = document.getElementById("vault-create-path");
-const vaultCreatePathDisplay = document.getElementById("vault-create-path-display");
-const vaultCreateButton = document.getElementById("vault-create-button");
 const vaultCreateSubmit = document.getElementById("vault-create-submit");
 const recentVaultsList = document.getElementById("recent-vaults-list");
 const title = document.getElementById("view-title");
@@ -258,69 +253,20 @@ function saveStoredJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
-function setHiddenPath(input, display, value, emptyLabel = "Kein Pfad ausgewählt") {
-  const normalized = String(value || "").trim();
-  if (input) {
-    input.value = normalized;
-  }
-  if (display) {
-    display.textContent = normalized || emptyLabel;
-  }
-}
-
-function directoryFromPickedFile(file) {
-  if (!file) {
-    return "";
-  }
-  if (file.path) {
-    const normalized = String(file.path).replace(/\\/g, "/");
-    const index = normalized.lastIndexOf("/");
-    return index >= 0 ? normalized.slice(0, index) : normalized;
-  }
-  if (file.webkitRelativePath) {
-    return String(file.webkitRelativePath).split("/").filter(Boolean)[0] || "";
-  }
-  return "";
-}
-
-function pickDirectoryWithInput(input) {
-  return new Promise((resolve) => {
-    const picker = input || document.createElement("input");
-    let cleanup = () => {};
-
-    if (!input) {
-      picker.type = "file";
-      picker.webkitdirectory = true;
-      picker.directory = true;
-      picker.className = "visually-hidden";
-      picker.setAttribute("aria-hidden", "true");
-      document.body.appendChild(picker);
-      cleanup = () => {
-        picker.remove();
-      };
-    }
-
-    picker.value = "";
-    picker.onchange = () => {
-      resolve(directoryFromPickedFile(picker.files?.[0]));
-      cleanup();
-    };
-    picker.oncancel = () => {
-      resolve("");
-      cleanup();
-    };
-    picker.click();
-  });
-}
-
-async function pickDirectory(input) {
-  const dialog = window.__TAURI__?.dialog;
-  if (dialog?.open) {
-    const selected = await dialog.open({ directory: true, multiple: false });
-    return Array.isArray(selected) ? selected[0] || "" : selected || "";
+async function selectFolder() {
+  const response = await fetch("/api/select-folder");
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
   }
 
-  return pickDirectoryWithInput(input);
+  if (!response.ok || payload?.error) {
+    throw new Error(payload?.error || `HTTP ${response.status}`);
+  }
+
+  return payload?.path || "";
 }
 
 async function createVault(parent, name) {
@@ -392,7 +338,6 @@ function openVault(path, name = "") {
   if (vaultRootInput) {
     vaultRootInput.value = value;
   }
-  setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, value);
   rememberVault(value, name);
   document.body.classList.add("is-vault-open");
   syncVaultHint();
@@ -1387,6 +1332,9 @@ function openAniListDialog(selection, feedbackNode = null, targetItems = []) {
   }
   if (anilistDialogResults) {
     clearNode(anilistDialogResults);
+  }
+  if (trashDialog) {
+    trashDialog.hidden = true;
   }
   if (anilistDialog) {
     anilistDialog.hidden = false;
@@ -3075,11 +3023,17 @@ function openTrashDialog(selection) {
   }
 
   pendingTrashSelection = selection;
+  pendingAniListSelection = null;
+  pendingAniListTargets = [];
+  pendingAniListFeedback = null;
   if (trashDialogTitle) {
     trashDialogTitle.textContent = `${selectionTitle(selection)} in den Papierkorb verschieben?`;
   }
   if (trashDialogBody) {
     trashDialogBody.textContent = `${selection.items.length} Eintrag(e) werden zunächst nur in den App-Papierkorb verschoben.`;
+  }
+  if (anilistDialog) {
+    anilistDialog.hidden = true;
   }
   if (trashDialog) {
     trashDialog.hidden = false;
@@ -3207,14 +3161,21 @@ if (demoButton) {
 
 if (vaultOpenButton) {
   vaultOpenButton.addEventListener("click", async () => {
-    const selected = await pickDirectory();
+    let selected = "";
+    try {
+      selected = await selectFolder();
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Vault-Auswahl fehlgeschlagen: ${error.message}`;
+      }
+      return;
+    }
     if (!selected) {
       if (statusStrip) {
         statusStrip.textContent = "Kein Vault ausgewählt.";
       }
       return;
     }
-    setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, selected);
     if (statusStrip) {
       statusStrip.textContent = `Vault ausgewählt: ${selected}`;
     }
@@ -3222,34 +3183,9 @@ if (vaultOpenButton) {
   });
 }
 
-if (vaultCreateButton) {
-  vaultCreateButton.addEventListener("click", async () => {
-    const selected = await pickDirectory();
-    if (!selected) {
-      if (statusStrip) {
-        statusStrip.textContent = "Kein Speicherort ausgewählt.";
-      }
-      return;
-    }
-
-    setHiddenPath(vaultCreatePath, vaultCreatePathDisplay, selected, "Kein Speicherort ausgewählt");
-    if (statusStrip) {
-      statusStrip.textContent = `Speicherort ausgewählt: ${selected}. Jetzt den Vault-Namen prüfen und auf \"Vault erstellen\" klicken.`;
-    }
-  });
-}
-
 if (vaultCreateSubmit) {
   vaultCreateSubmit.addEventListener("click", async () => {
-    const parent = vaultCreatePath?.value.trim();
     const name = vaultCreateName?.value.trim();
-
-    if (!parent) {
-      if (statusStrip) {
-        statusStrip.textContent = "Bitte zuerst einen Speicherort auswählen.";
-      }
-      return;
-    }
 
     if (!name) {
       if (statusStrip) {
@@ -3260,12 +3196,23 @@ if (vaultCreateSubmit) {
 
     try {
       if (statusStrip) {
+        statusStrip.textContent = "Speicherort wählen...";
+      }
+
+      const parent = await selectFolder();
+      if (!parent) {
+        if (statusStrip) {
+          statusStrip.textContent = "Kein Speicherort ausgewählt.";
+        }
+        return;
+      }
+
+      if (statusStrip) {
         statusStrip.textContent = "Vault wird angelegt...";
       }
 
       const result = await createVault(parent, name);
       const path = result?.path || compactPath(`${parent}/${sanitizeSegment(name)}`);
-      setHiddenPath(vaultCreatePath, vaultCreatePathDisplay, parent, "Kein Speicherort ausgewählt");
       openVault(path, name);
     } catch (error) {
       if (statusStrip) {
@@ -3279,7 +3226,6 @@ if (vaultRootInput) {
   const savedRoot = localStorage.getItem(storageKey);
   if (savedRoot) {
     vaultRootInput.value = savedRoot;
-    setHiddenPath(vaultOpenPath, vaultOpenPathDisplay, savedRoot);
   }
 
   vaultRootInput.addEventListener("input", () => {
@@ -3682,6 +3628,3 @@ renderAuditTrail();
 renderRecentVaults();
 syncTemplateInputs();
 syncVaultHint();
-if (vaultOpenPath) {
-  vaultOpenPath.value = localStorage.getItem(storageKey) ?? "";
-}
