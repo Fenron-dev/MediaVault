@@ -263,7 +263,7 @@ body:not(.is-vault-open) .app-shell {
 .recent-vault-row {
   width: 100%;
   display: grid;
-  gap: 4px;
+  gap: 3px;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
   background: transparent;
@@ -278,9 +278,17 @@ body:not(.is-vault-open) .app-shell {
   background: var(--panel);
 }
 
+.recent-vault-row strong {
+  line-height: 1.3;
+  overflow-wrap: break-word;
+}
+
 .recent-vault-row span {
   color: var(--muted);
-  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .sidebar,
@@ -446,12 +454,26 @@ h3 {
   min-width: 0;
   font-size: 0.92rem;
   line-height: 1.3;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .collection-nav-item span {
   color: var(--muted);
   font-size: 0.82rem;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.collection-nav-item.is-recent {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  align-items: start;
+}
+
+.collection-nav-item.is-recent span {
+  font-size: 0.78rem;
+  line-height: 1.3;
 }
 
 .topbar {
@@ -1301,8 +1323,8 @@ h3 {
 .property-list {
   display: grid;
   gap: 0;
-  max-height: 38vh;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   margin-top: 14px;
   padding-right: 2px;
 }
@@ -1385,27 +1407,32 @@ h3 {
 
 .property-row {
   display: grid;
-  grid-template-columns: minmax(90px, 0.45fr) minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(120px, 0.42fr) minmax(84px, 0.18fr) minmax(0, 1fr);
+  gap: 10px 12px;
   align-items: start;
 }
 
 .property-row strong {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   color: var(--muted);
   font-weight: 500;
 }
 
 .property-row span {
-  display: none;
+  display: block;
+  color: var(--accent-strong);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1.35;
 }
 
 .property-row p,
 .property-empty {
   color: var(--text);
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
 }
 
 .property-empty {
@@ -1414,12 +1441,6 @@ h3 {
 
 .property-row p::after {
   content: "";
-}
-
-.property-row span {
-  font-size: 0.74rem;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .folder-template-table {

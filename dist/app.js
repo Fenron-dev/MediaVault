@@ -276,6 +276,38 @@ async function selectFolder() {
   return payload?.path || "";
 }
 
+async function loadVaultRootState() {
+  const response = await fetch("/api/vault-root");
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || payload?.error) {
+    throw new Error(payload?.error || `HTTP ${response.status}`);
+  }
+
+  return payload?.root || "";
+}
+
+async function persistVaultRootState(path) {
+  const response = await fetch(`/api/vault-root?root=${encodeURIComponent(String(path || "").trim())}`);
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || payload?.error) {
+    throw new Error(payload?.error || `HTTP ${response.status}`);
+  }
+
+  return payload?.root || "";
+}
+
 async function createVault(parent, name) {
   const response = await fetch(
     `/api/create-vault?parent=${encodeURIComponent(parent)}&name=${encodeURIComponent(name)}`
@@ -332,7 +364,7 @@ function rememberVault(path, name = "") {
   renderRecentVaults();
 }
 
-function openVault(path, name = "") {
+async function openVault(path, name = "") {
   const value = String(path || "").trim();
   if (!value) {
     if (statusStrip) {
@@ -342,6 +374,11 @@ function openVault(path, name = "") {
   }
 
   localStorage.setItem(storageKey, value);
+  try {
+    await persistVaultRootState(value);
+  } catch {
+    // Best effort persistence only.
+  }
   if (vaultRootInput) {
     vaultRootInput.value = value;
   }
@@ -349,6 +386,30 @@ function openVault(path, name = "") {
   document.body.classList.add("is-vault-open");
   syncVaultHint();
   loadPlan();
+}
+
+async function bootstrapVault() {
+  const localRoot = String(localStorage.getItem(storageKey) ?? "").trim();
+  let persistedRoot = "";
+
+  try {
+    persistedRoot = String(await loadVaultRootState()).trim();
+  } catch {
+    persistedRoot = "";
+  }
+
+  const root = localRoot || persistedRoot;
+  if (root) {
+    localStorage.setItem(storageKey, root);
+    if (vaultRootInput) {
+      vaultRootInput.value = root;
+    }
+    await openVault(root);
+    return;
+  }
+
+  renderRecentVaults();
+  syncVaultHint();
 }
 
 function rememberCollection(node) {
@@ -2253,6 +2314,7 @@ function renderCollectionNavigation(root, node) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "collection-nav-item";
+      button.classList.add("is-recent");
       button.addEventListener("click", () => {
         selectedCollectionKey = entry.path;
         selectedCollectionItemKey = "";
@@ -2817,12 +2879,26 @@ function renderCollections(items) {
   renderCollectionBreadcrumb(selected);
   renderCollectionMeta(selected);
   renderCollectionProfile(selected);
+  const hideSeasonContent = collectionNodeKind(selected) === "series";
+  if (collectionRows) {
+    collectionRows.hidden = hideSeasonContent;
+  }
+  if (collectionEditor) {
+    collectionEditor.hidden = hideSeasonContent;
+  }
   renderCollectionRows(selected);
   renderCollectionCards(selected);
   syncCollectionViewMode();
 
   const selectedItem = selected.directItems.find((item) => item.source_path === selectedCollectionItemKey);
-  renderCollectionEditor(selectedItem ?? null);
+  if (hideSeasonContent) {
+    renderCollectionEditor(null);
+    if (collectionEditor) {
+      collectionEditor.hidden = true;
+    }
+  } else {
+    renderCollectionEditor(selectedItem ?? null);
+  }
   if (isMultiEdit && currentActiveTab() === "collections") {
     renderBulkInspector();
   } else if (!selectedItem && currentActiveTab() === "collections") {
@@ -2835,7 +2911,8 @@ function renderCollectionEditor(item) {
     return;
   }
 
-  collectionEditor.classList.remove("is-active");
+  collectionEditor.hidden = false;
+  collectionEditor.classList.toggle("is-active", Boolean(item));
 
   if (!item) {
     if (collectionEditorTitle) collectionEditorTitle.textContent = "Eintrag auswählen";
@@ -3306,13 +3383,15 @@ if (vaultRootSave) {
 
     const value = vaultRootInput.value.trim();
     if (value) {
-      localStorage.setItem(storageKey, value);
+      openVault(value).catch(() => {});
     } else {
       localStorage.removeItem(storageKey);
+      persistVaultRootState("").catch(() => {});
+      document.body.classList.remove("is-vault-open");
+      renderRecentVaults();
     }
 
     syncVaultHint();
-    loadPlan();
   });
 }
 
@@ -3323,8 +3402,10 @@ if (vaultRootClear) {
     }
 
     localStorage.removeItem(storageKey);
+    persistVaultRootState("").catch(() => {});
+    document.body.classList.remove("is-vault-open");
     syncVaultHint();
-    loadPlan();
+    renderRecentVaults();
   });
 }
 
@@ -3720,6 +3801,8 @@ if (collectionBackDashboard) {
 
 populateSelectors();
 renderAuditTrail();
-renderRecentVaults();
 syncTemplateInputs();
-syncVaultHint();
+bootstrapVault().catch(() => {
+  renderRecentVaults();
+  syncVaultHint();
+});

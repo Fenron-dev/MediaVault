@@ -16,7 +16,7 @@ use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
 
 const PROTOCOL_SCHEME: &str = "mediavault";
@@ -56,6 +56,10 @@ pub(crate) fn run() -> Result<()> {
                 "/api/create-vault" => json_response(
                     StatusCode::OK,
                     &build_create_vault_response(request.uri().query()),
+                ),
+                "/api/vault-root" => json_response(
+                    StatusCode::OK,
+                    &build_vault_root_response(request.uri().query()),
                 ),
                 _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
             }
@@ -165,6 +169,37 @@ fn build_create_vault_response(query: Option<&str>) -> CreateVaultResponse {
             error: None,
         },
         Err(error) => CreateVaultResponse::error(error.to_string()),
+    }
+}
+
+fn build_vault_root_response(query: Option<&str>) -> VaultRootResponse {
+    let mut state = load_app_state().unwrap_or_default();
+
+    if let Some(query) = query {
+        if let Some(root) = extract_query_value(query, "root") {
+            let normalized = root.trim();
+            if normalized.is_empty() {
+                state.vault_root = None;
+            } else {
+                match resolve_existing_root(PathBuf::from(normalized)) {
+                    Ok(resolved) => {
+                        state.vault_root = Some(resolved.display().to_string());
+                    }
+                    Err(error) => {
+                        return VaultRootResponse::error(error.to_string());
+                    }
+                }
+            }
+
+            if let Err(error) = save_app_state(&state) {
+                return VaultRootResponse::error(error.to_string());
+            }
+        }
+    }
+
+    VaultRootResponse {
+        root: state.vault_root,
+        error: None,
     }
 }
 
@@ -1331,6 +1366,10 @@ fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {
         }
     }
 
+    if let Ok(Some(root)) = load_saved_vault_root() {
+        return Ok(Some(resolve_existing_root(root)?));
+    }
+
     for candidate in auto_detect_vault_roots() {
         if looks_like_vault_root(&candidate) {
             return Ok(Some(resolve_existing_root(candidate)?));
@@ -1349,6 +1388,10 @@ fn normalized_override(root_override: Option<&str>) -> Option<PathBuf> {
     Some(PathBuf::from(root))
 }
 
+fn load_saved_vault_root() -> Result<Option<PathBuf>> {
+    Ok(load_app_state()?.vault_root.map(PathBuf::from))
+}
+
 fn resolve_existing_root(root: PathBuf) -> Result<PathBuf> {
     if !root.exists() {
         return Err(VaultError::InvalidVaultPath(format!(
@@ -1358,6 +1401,35 @@ fn resolve_existing_root(root: PathBuf) -> Result<PathBuf> {
     }
 
     fs::canonicalize(&root).map_err(VaultError::from)
+}
+
+fn app_state_path() -> Result<PathBuf> {
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .ok_or_else(|| VaultError::Io("home directory not available".to_string()))?;
+
+    Ok(PathBuf::from(home).join(".mediavault").join("state.json"))
+}
+
+fn load_app_state() -> Result<AppState> {
+    let path = app_state_path()?;
+    if !path.exists() {
+        return Ok(AppState::default());
+    }
+
+    let raw = fs::read_to_string(&path).map_err(VaultError::from)?;
+    serde_json::from_str(&raw).map_err(|error| VaultError::Serialization(error.to_string()))
+}
+
+fn save_app_state(state: &AppState) -> Result<()> {
+    let path = app_state_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(VaultError::from)?;
+    }
+
+    let body = serde_json::to_string_pretty(state)
+        .map_err(|error| VaultError::Serialization(error.to_string()))?;
+    fs::write(path, body).map_err(VaultError::from)
 }
 
 fn auto_detect_vault_roots() -> Vec<PathBuf> {
@@ -1380,6 +1452,26 @@ fn auto_detect_vault_roots() -> Vec<PathBuf> {
 
 fn looks_like_vault_root(path: &Path) -> bool {
     path.join("Inbox").is_dir() || path.join(".mediashelf").is_dir()
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+struct AppState {
+    vault_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct VaultRootResponse {
+    root: Option<String>,
+    error: Option<String>,
+}
+
+impl VaultRootResponse {
+    fn error(error: String) -> Self {
+        Self {
+            root: None,
+            error: Some(error),
+        }
+    }
 }
 
 fn scan_inbox_files(vault: &Vault) -> Result<Vec<IncomingFile>> {
