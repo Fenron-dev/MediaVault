@@ -79,6 +79,7 @@ const inspectorTitle = document.getElementById("inspector-title");
 const inspectorProperties = document.getElementById("inspector-properties");
 const inspectorEditToggle = document.getElementById("inspector-edit-toggle");
 const inspectorFetchMetadata = document.getElementById("inspector-fetch-metadata");
+const inspectorNotDuplicate = document.getElementById("inspector-not-duplicate");
 const inspectorTrash = document.getElementById("inspector-trash");
 const inspectorEdit = document.getElementById("inspector-edit");
 const inspectorName = document.getElementById("inspector-name");
@@ -118,6 +119,7 @@ const recentVaultsKey = "mediavault.recentVaults";
 const pathTemplatesKey = "mediavault.pathTemplates";
 const correctionsKey = "mediavault.reviewCorrections";
 const metadataKey = "mediavault.apiMetadata";
+const duplicateOverridesKey = "mediavault.duplicateOverrides";
 const yamlOverridesKey = "mediavault.yamlOverrides";
 const auditTrailKey = "mediavault.auditTrail";
 const collectionViewKey = "mediavault.collectionView";
@@ -174,6 +176,7 @@ let selectedCollectionKey = "";
 let selectedCollectionItemKey = "";
 let corrections = loadStoredJson(correctionsKey, {});
 let apiMetadata = loadStoredJson(metadataKey, {});
+let duplicateOverrides = loadStoredJson(duplicateOverridesKey, {});
 let yamlOverrides = loadStoredJson(yamlOverridesKey, {});
 let pathTemplates = normalizeTemplateConfig(loadStoredJson(pathTemplatesKey, defaultPathTemplates()));
 let auditTrail = loadStoredJson(auditTrailKey, []);
@@ -251,6 +254,10 @@ function loadStoredJson(key, fallback) {
 
 function saveStoredJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
+}
+
+function saveDuplicateOverrides() {
+  saveStoredJson(duplicateOverridesKey, duplicateOverrides);
 }
 
 async function selectFolder() {
@@ -865,6 +872,9 @@ function projectItem(item) {
   }
 
   effective.has_correction = Boolean(correction.updated_at);
+  if (duplicateOverrides[item.source_path]) {
+    effective.duplicate_of = null;
+  }
   effective.folder_segment = correction.media_type
     ? folderSegmentFor(canonicalMediaType(correction.media_type))
     : effective.folder_segment ?? folderSegmentFor(effective.media_type);
@@ -1821,6 +1831,13 @@ function renderInspector(value) {
   if (inspectorFetchMetadata) {
     inspectorFetchMetadata.disabled = !metadataAllowed;
   }
+  if (inspectorNotDuplicate) {
+    const duplicateRelevant = selectionHasDuplicateFlag(selection) || selectionHasDuplicateOverride(selection);
+    inspectorNotDuplicate.disabled = !editable || !duplicateRelevant;
+    inspectorNotDuplicate.textContent = selectionHasDuplicateOverride(selection)
+      ? "Duplikat-Rücksetzung"
+      : "Kein Duplikat";
+  }
   [inspectorApply, inspectorTrash].forEach((control) => {
     if (control) {
       control.disabled = !editable;
@@ -2024,6 +2041,54 @@ function selectionEditable(selection) {
 
 function selectionSupportsMetadata(selection) {
   return Boolean(selectionEditable(selection) && selection.type !== "bulk");
+}
+
+function selectionHasDuplicateFlag(selection) {
+  return Boolean(selection && selection.items.some((item) => item.duplicate_of));
+}
+
+function selectionHasDuplicateOverride(selection) {
+  return Boolean(selection && selection.items.some((item) => duplicateOverrides[item.source_path]));
+}
+
+function applyDuplicateOverride(selection) {
+  if (!selectionEditable(selection)) {
+    return false;
+  }
+
+  let changed = false;
+  selection.items.forEach((item) => {
+    if (!duplicateOverrides[item.source_path]) {
+      duplicateOverrides[item.source_path] = true;
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    saveDuplicateOverrides();
+  }
+
+  return changed;
+}
+
+function clearDuplicateOverride(selection) {
+  if (!selectionEditable(selection)) {
+    return false;
+  }
+
+  let changed = false;
+  selection.items.forEach((item) => {
+    if (duplicateOverrides[item.source_path]) {
+      delete duplicateOverrides[item.source_path];
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    saveDuplicateOverrides();
+  }
+
+  return changed;
 }
 
 function selectionTitle(selection) {
@@ -3488,6 +3553,36 @@ if (inspectorFetchMetadata) {
         `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
         "error"
       );
+    }
+  });
+}
+
+if (inspectorNotDuplicate) {
+  inspectorNotDuplicate.addEventListener("click", () => {
+    if (!selectionEditable(inspectorSelection)) {
+      return;
+    }
+
+    const currentlyOverridden = selectionHasDuplicateOverride(inspectorSelection);
+    const changed = currentlyOverridden
+      ? clearDuplicateOverride(inspectorSelection)
+      : applyDuplicateOverride(inspectorSelection);
+
+    if (!changed) {
+      return;
+    }
+
+    currentPlan = projectPlan(sourcePlan);
+    renderPlan(currentPlan);
+    renderInspector(inspectorSelection);
+
+    const count = inspectorSelection.items.length;
+    const message = currentlyOverridden
+      ? `${count} Eintrag(e) werden wieder als Duplikat behandelt.`
+      : `${count} Eintrag(e) werden nicht mehr als Duplikat behandelt.`;
+    updateAuditTrail(message);
+    if (statusStrip) {
+      statusStrip.textContent = message;
     }
   });
 }
