@@ -7,6 +7,39 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <section class="vault-gate" id="vault-gate" aria-label="Vault öffnen">
+      <div class="vault-gate-inner">
+        <div class="vault-mark">MV</div>
+        <h1>MediaVault</h1>
+        <p class="body-copy">Lokale Medienverwaltung mit portablem Vault.</p>
+
+        <div class="vault-gate-actions">
+          <label class="field">
+            <span>Bestehenden Vault öffnen</span>
+            <input id="vault-open-path" type="text" placeholder="/Pfad/zum/Vault" />
+          </label>
+          <button class="action-button primary" id="vault-open-button">Vault öffnen</button>
+
+          <div class="vault-create-grid">
+            <label class="field">
+              <span>Neuer Vault</span>
+              <input id="vault-create-name" type="text" placeholder="Mein MediaVault" />
+            </label>
+            <label class="field">
+              <span>Speicherort</span>
+              <input id="vault-create-path" type="text" placeholder="/Pfad/zum/neuen/Vault" />
+            </label>
+          </div>
+          <button class="action-button" id="vault-create-button">Neuen Vault erstellen</button>
+        </div>
+
+        <section class="recent-vaults">
+          <h2>Zuletzt geöffnet</h2>
+          <div id="recent-vaults-list"></div>
+        </section>
+      </div>
+    </section>
+
     <div class="app-shell">
       <aside class="sidebar">
         <div>
@@ -355,12 +388,36 @@
               </div>
             </section>
             <section class="panel">
-              <p class="panel-label">Nächster Schritt</p>
-              <h3>Importer und Review-Dialog</h3>
+              <p class="panel-label">Ordnerstruktur</p>
+              <h3>Zielpfade pro Medientyp</h3>
               <p class="body-copy">
-                Als Nächstes lohnt sich der erste echte Importlauf mit
-                Dry-Run, Duplikaterkennung und einer Review-Maske.
+                Platzhalter: {title}, {series}, {season}, {year}, {filename}.
               </p>
+              <div class="stack">
+                <label class="field">
+                  <span>Anime Serien</span>
+                  <input id="template-anime-tv" type="text" />
+                </label>
+                <label class="field">
+                  <span>Anime Filme</span>
+                  <input id="template-anime-movie" type="text" />
+                </label>
+                <label class="field">
+                  <span>Serien</span>
+                  <input id="template-series" type="text" />
+                </label>
+                <label class="field">
+                  <span>Filme</span>
+                  <input id="template-film" type="text" />
+                </label>
+                <div class="toolbar">
+                  <button class="action-button primary" id="templates-save">Templates speichern</button>
+                  <button class="action-button" id="templates-reset">Standard</button>
+                </div>
+                <p class="field-hint" id="templates-hint">
+                  Änderungen wirken zunächst auf die geplanten Zielpfade. Echte Verschiebungen werden später separat bestätigt.
+                </p>
+              </div>
             </section>
           </div>
         </section>
@@ -374,7 +431,33 @@
         <section class="panel tight inspector-panel">
           <p class="panel-label">Properties</p>
           <h3 id="inspector-title">Kein Eintrag ausgewählt</h3>
-          <div class="property-add">
+          <div class="inspector-actions">
+            <button class="action-button" id="inspector-edit-toggle">Bearbeiten</button>
+            <button class="action-button" id="inspector-fetch-metadata">AniList abrufen</button>
+          </div>
+          <div class="inspector-edit" id="inspector-edit">
+            <label class="property-edit-row">
+              <span>Titel</span>
+              <input id="inspector-name" type="text" />
+            </label>
+            <label class="property-edit-row">
+              <span>Medientyp</span>
+              <select id="inspector-media-type"></select>
+            </label>
+            <label class="property-edit-row">
+              <span>Jahr</span>
+              <input id="inspector-year" type="number" min="1900" max="2100" />
+            </label>
+            <label class="property-edit-row">
+              <span>Status</span>
+              <select id="inspector-status"></select>
+            </label>
+            <button class="action-button primary" id="inspector-apply">Änderungen übernehmen</button>
+          </div>
+          <div class="api-feedback" id="inspector-api-feedback"></div>
+          <div class="property-list" id="inspector-properties"></div>
+          <button class="property-add-button" id="inspector-property-add-toggle">+ Eigenschaft hinzufügen</button>
+          <div class="property-add" id="inspector-property-add-form">
             <input id="inspector-property-key" type="text" placeholder="property_name" />
             <select id="inspector-property-type">
               <option value="text">Text</option>
@@ -388,10 +471,9 @@
             <input id="inspector-property-value" type="text" placeholder="Wert" />
             <button class="action-button" id="inspector-property-add">Property hinzufügen</button>
           </div>
-          <div class="property-list" id="inspector-properties"></div>
         </section>
 
-        <section class="panel tight inspector-panel">
+        <section class="panel tight inspector-panel yaml-panel" id="inspector-yaml-panel">
           <p class="panel-label">YAML</p>
           <textarea class="yaml-editor" id="inspector-yaml" spellcheck="false"></textarea>
           <div class="toolbar">

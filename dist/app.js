@@ -1,5 +1,12 @@
 const tabs = Array.from(document.querySelectorAll("[data-tab]"));
 const views = Array.from(document.querySelectorAll("[data-view]"));
+const vaultGate = document.getElementById("vault-gate");
+const vaultOpenPath = document.getElementById("vault-open-path");
+const vaultOpenButton = document.getElementById("vault-open-button");
+const vaultCreateName = document.getElementById("vault-create-name");
+const vaultCreatePath = document.getElementById("vault-create-path");
+const vaultCreateButton = document.getElementById("vault-create-button");
+const recentVaultsList = document.getElementById("recent-vaults-list");
 const title = document.getElementById("view-title");
 const statusStrip = document.getElementById("status-strip");
 const demoButton = document.getElementById("run-demo");
@@ -39,6 +46,13 @@ const vaultRootInput = document.getElementById("vault-root-input");
 const vaultRootSave = document.getElementById("vault-root-save");
 const vaultRootClear = document.getElementById("vault-root-clear");
 const vaultRootHint = document.getElementById("vault-root-hint");
+const templateAnimeTv = document.getElementById("template-anime-tv");
+const templateAnimeMovie = document.getElementById("template-anime-movie");
+const templateSeries = document.getElementById("template-series");
+const templateFilm = document.getElementById("template-film");
+const templatesSave = document.getElementById("templates-save");
+const templatesReset = document.getElementById("templates-reset");
+const templatesHint = document.getElementById("templates-hint");
 const detailHeading = document.getElementById("detail-heading");
 const detailSubtitle = document.getElementById("detail-subtitle");
 const detailSourcePath = document.getElementById("detail-source-path");
@@ -63,6 +77,17 @@ const detailApiFeedback = document.getElementById("detail-api-feedback");
 const inspectorToggle = document.getElementById("inspector-toggle");
 const inspectorTitle = document.getElementById("inspector-title");
 const inspectorProperties = document.getElementById("inspector-properties");
+const inspectorEditToggle = document.getElementById("inspector-edit-toggle");
+const inspectorFetchMetadata = document.getElementById("inspector-fetch-metadata");
+const inspectorEdit = document.getElementById("inspector-edit");
+const inspectorName = document.getElementById("inspector-name");
+const inspectorMediaType = document.getElementById("inspector-media-type");
+const inspectorYear = document.getElementById("inspector-year");
+const inspectorStatus = document.getElementById("inspector-status");
+const inspectorApply = document.getElementById("inspector-apply");
+const inspectorApiFeedback = document.getElementById("inspector-api-feedback");
+const inspectorPropertyAddToggle = document.getElementById("inspector-property-add-toggle");
+const inspectorPropertyAddForm = document.getElementById("inspector-property-add-form");
 const inspectorPropertyKey = document.getElementById("inspector-property-key");
 const inspectorPropertyType = document.getElementById("inspector-property-type");
 const inspectorPropertyValue = document.getElementById("inspector-property-value");
@@ -71,9 +96,12 @@ const inspectorYaml = document.getElementById("inspector-yaml");
 const inspectorYamlSave = document.getElementById("inspector-yaml-save");
 const inspectorYamlReset = document.getElementById("inspector-yaml-reset");
 const inspectorYamlHint = document.getElementById("inspector-yaml-hint");
+const inspectorYamlPanel = document.getElementById("inspector-yaml-panel");
 const auditTrailNode = document.getElementById("audit-trail");
 
 const storageKey = "mediavault.vaultRoot";
+const recentVaultsKey = "mediavault.recentVaults";
+const pathTemplatesKey = "mediavault.pathTemplates";
 const correctionsKey = "mediavault.reviewCorrections";
 const metadataKey = "mediavault.apiMetadata";
 const yamlOverridesKey = "mediavault.yamlOverrides";
@@ -130,8 +158,10 @@ let selectedCollectionItemKey = "";
 let corrections = loadStoredJson(correctionsKey, {});
 let apiMetadata = loadStoredJson(metadataKey, {});
 let yamlOverrides = loadStoredJson(yamlOverridesKey, {});
+let pathTemplates = normalizeTemplateConfig(loadStoredJson(pathTemplatesKey, defaultPathTemplates()));
 let auditTrail = loadStoredJson(auditTrailKey, []);
 let inspectorItemKey = "";
+let inspectorSelection = null;
 
 function setActiveTab(tab) {
   tabs.forEach((button) => {
@@ -190,8 +220,90 @@ function saveStoredJson(key, value) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+function defaultPathTemplates() {
+  return {
+    animeTv: "Anime/Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}",
+    animeMovie: "Anime/Filme/{title} ({year})/{title} ({year}).{ext}",
+    series: "Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}",
+    film: "Filme/{title} ({year})/{title} ({year}).{ext}",
+  };
+}
+
+function normalizeTemplateConfig(value) {
+  return {
+    ...defaultPathTemplates(),
+    ...(value && typeof value === "object" ? value : {}),
+  };
+}
+
 function currentActiveTab() {
   return tabs.find((button) => button.classList.contains("is-active"))?.dataset.tab ?? "overview";
+}
+
+function recentVaults() {
+  return loadStoredJson(recentVaultsKey, []);
+}
+
+function rememberVault(path, name = "") {
+  const value = String(path || "").trim();
+  if (!value) {
+    return;
+  }
+  const next = [
+    { path: value, name: name || basename(value) || "MediaVault" },
+    ...recentVaults().filter((vault) => vault.path !== value),
+  ].slice(0, 6);
+  saveStoredJson(recentVaultsKey, next);
+  renderRecentVaults();
+}
+
+function openVault(path, name = "") {
+  const value = String(path || "").trim();
+  if (!value) {
+    if (statusStrip) {
+      statusStrip.textContent = "Bitte einen Vault-Pfad eintragen.";
+    }
+    return;
+  }
+
+  localStorage.setItem(storageKey, value);
+  if (vaultRootInput) {
+    vaultRootInput.value = value;
+  }
+  rememberVault(value, name);
+  document.body.classList.add("is-vault-open");
+  syncVaultHint();
+  loadPlan();
+}
+
+function renderRecentVaults() {
+  if (!recentVaultsList) {
+    return;
+  }
+  clearNode(recentVaultsList);
+  const vaults = recentVaults();
+  if (!vaults.length) {
+    const empty = document.createElement("p");
+    empty.className = "field-hint";
+    empty.textContent = "Noch keine zuletzt geöffneten Vaults.";
+    recentVaultsList.appendChild(empty);
+    return;
+  }
+
+  vaults.forEach((vault) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "recent-vault-row";
+    row.addEventListener("click", () => openVault(vault.path, vault.name));
+
+    const titleNode = document.createElement("strong");
+    titleNode.textContent = vault.name || basename(vault.path);
+    const pathNode = document.createElement("span");
+    pathNode.textContent = vault.path;
+    row.appendChild(titleNode);
+    row.appendChild(pathNode);
+    recentVaultsList.appendChild(row);
+  });
 }
 
 function sanitizeSegment(value) {
@@ -442,30 +554,73 @@ function isAnimeSeries(item) {
   return item.media_type === "anime" && !isAnimeMovie(item);
 }
 
-function collectionPathFor(item) {
-  const title = sanitizeSegment(item.title || fileStem(item.source_path) || "Unbenannt");
+function pathWithoutFilename(path) {
+  const value = String(path || "");
+  const index = value.lastIndexOf("/");
+  return index >= 0 ? value.slice(0, index) : value;
+}
 
+function compactPath(path) {
+  return String(path)
+    .replace(/\/+/g, "/")
+    .replace(/\(\)/g, "")
+    .replace(/\s+\./g, ".")
+    .replace(/\/\./g, "/")
+    .replace(/\.$/, "")
+    .replace(/\/$/, "");
+}
+
+function templateContextFor(item) {
+  const title = sanitizeSegment(item.title || fileStem(item.source_path) || "untitled");
+  const series = sanitizeSegment(deriveSeriesTitle(item));
+  const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
+  const season = item.season_number || marker.season || 1;
+  const ext = extensionOf(item.source_path);
+  const year = item.year || "";
+  return {
+    title,
+    series,
+    season,
+    year,
+    ext,
+    filename: basename(item.source_path),
+    episode_label: episodeFileLabel(item),
+  };
+}
+
+function renderPathTemplate(template, item) {
+  const context = templateContextFor(item);
+  return compactPath(
+    String(template || "")
+      .replace(/\{title}/g, context.title)
+      .replace(/\{series}/g, context.series)
+      .replace(/\{season}/g, context.season)
+      .replace(/\{year}/g, context.year)
+      .replace(/\{ext}/g, context.ext)
+      .replace(/\{filename}/g, context.filename)
+      .replace(/\{episode_label}/g, context.episode_label)
+  );
+}
+
+function collectionPathFor(item) {
   if (isAnimeMovie(item)) {
-    return `Anime/Filme/${title}`;
+    return pathWithoutFilename(renderPathTemplate(pathTemplates.animeMovie, item));
   }
 
   if (isAnimeSeries(item)) {
-    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
-    const season = item.season_number || marker.season || 1;
-    return `Anime/Serien/${sanitizeSegment(deriveSeriesTitle(item))}/Staffel ${season}`;
+    return pathWithoutFilename(renderPathTemplate(pathTemplates.animeTv, item));
   }
 
   if (item.media_type === "series" || hasEpisodeMarker(item)) {
-    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
-    const season = item.season_number || marker.season || 1;
-    return `Serien/${sanitizeSegment(deriveSeriesTitle(item))}/Staffel ${season}`;
+    return pathWithoutFilename(renderPathTemplate(pathTemplates.series, item));
   }
 
   if (item.media_type === "film") {
-    return `Filme/${title}`;
+    return pathWithoutFilename(renderPathTemplate(pathTemplates.film, item));
   }
 
   const folder = item.folder_segment ?? folderSegmentFor(item.media_type);
+  const title = sanitizeSegment(item.title || fileStem(item.source_path) || "Unbenannt");
   return title ? `${folder}/${title}` : folder;
 }
 
@@ -555,6 +710,9 @@ function projectItem(item) {
   if (typeof correction.title === "string") {
     effective.title = correction.title;
   }
+  if (typeof correction.series_title === "string") {
+    effective.series_title = correction.series_title;
+  }
   if (typeof correction.media_type === "string") {
     effective.media_type = canonicalMediaType(correction.media_type);
     const selectedFormat = formatForMediaSelection(correction.media_type);
@@ -608,31 +766,19 @@ function buildTargetPath(item) {
   const extension = extensionOf(item.source_path);
 
   if (isAnimeMovie(item)) {
-    const filename = extension ? `${title}${yearSuffix}.${extension}` : `${title}${yearSuffix}`;
-    return `Anime/Filme/${title}${yearSuffix}/${filename}`;
+    return renderPathTemplate(pathTemplates.animeMovie, item);
   }
 
   if (isAnimeSeries(item)) {
-    const series = sanitizeSegment(deriveSeriesTitle(item));
-    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
-    const season = item.season_number || marker.season || 1;
-    const label = episodeFileLabel(item);
-    const filename = extension ? `${series} - ${label}.${extension}` : `${series} - ${label}`;
-    return `Anime/Serien/${series}/Staffel ${season}/${filename}`;
+    return renderPathTemplate(pathTemplates.animeTv, item);
   }
 
   if (mediaType === "series" || hasEpisodeMarker(item)) {
-    const series = sanitizeSegment(deriveSeriesTitle(item));
-    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
-    const season = item.season_number || marker.season || 1;
-    const label = episodeFileLabel(item);
-    const filename = extension ? `${series} - ${label}.${extension}` : `${series} - ${label}`;
-    return `Serien/${series}/Staffel ${season}/${filename}`;
+    return renderPathTemplate(pathTemplates.series, item);
   }
 
   if (mediaType === "film") {
-    const filename = extension ? `${title}${yearSuffix}.${extension}` : `${title}${yearSuffix}`;
-    return `Filme/${title}${yearSuffix}/${filename}`;
+    return renderPathTemplate(pathTemplates.film, item);
   }
 
   const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
@@ -899,7 +1045,7 @@ function aniListSummary(metadata) {
   return parts.join(" | ");
 }
 
-async function fetchAniListForItem(item, feedbackNode = null) {
+async function fetchAniListForItem(item, feedbackNode = null, targetItems = [item]) {
   const searchTitle =
     item.series_title ||
     item.title ||
@@ -935,7 +1081,9 @@ async function fetchAniListForItem(item, feedbackNode = null) {
   }
 
   const normalized = normalizeAniListMetadata(payload.metadata, item);
-  apiMetadata[item.source_path] = normalized;
+  targetItems.forEach((target) => {
+    apiMetadata[target.source_path] = normalized;
+  });
   saveStoredJson(metadataKey, apiMetadata);
   currentPlan = projectPlan(sourcePlan);
   selectedItemKey = item.source_path;
@@ -1183,12 +1331,27 @@ function propertyDisplayValue(value) {
   return value === null || typeof value === "undefined" || value === "" ? "-" : String(value);
 }
 
-function propertyEntriesFor(item) {
-  if (!item) {
+function propertyEntriesFor(value) {
+  const selection = normalizeSelection(value);
+  if (!selection) {
     return [];
   }
+  const item = selection.item ?? {};
+  const baseEntries = selection.type === "node"
+    ? [
+        ["object_type", nodeTypeLabel(selection.node)],
+        ["collection_path", selection.node.path || "Sammlungen"],
+        ["items", selection.items.length],
+        ["folders", sortedChildren(selection.node).length],
+      ]
+    : [
+        ["source_path", item.source_path],
+        ["target_path", item.target_path],
+        ["sidecar_path", item.sidecar_path],
+      ];
 
   return [
+    ...baseEntries,
     ["media_type", mediaTypeLabel(mediaSelectionValue(item))],
     ["format", item.format],
     ["title", item.title],
@@ -1197,9 +1360,7 @@ function propertyEntriesFor(item) {
     ["episode_start", item.episode_start],
     ["episode_end", item.episode_end],
     ["year", item.year],
-    ["status", statusLabel(item.status || (item.needs_review ? "needs-review" : "inbox"))],
-    ["collection_path", item.collection_path],
-    ["target_path", item.target_path],
+    ["status", item.status ? statusLabel(item.status) : item.needs_review ? "Prüfung nötig" : null],
     ["anilist_id", item.anilist_id],
     ["anilist_url", item.anilist_url],
     ["mal_id", item.mal_id],
@@ -1216,26 +1377,39 @@ function propertyEntriesFor(item) {
     ["reviews", item.reviews],
     ["cover_image_extra_large", item.cover_image_extra_large],
     ["banner_image", item.banner_image],
-  ].filter(([, value]) => {
-    if (Array.isArray(value)) {
-      return value.length;
+  ].filter(([, entryValue]) => {
+    if (Array.isArray(entryValue)) {
+      return entryValue.length;
     }
-    return value !== null && typeof value !== "undefined" && value !== "";
+    return entryValue !== null && typeof entryValue !== "undefined" && entryValue !== "";
   });
 }
 
-function renderInspector(item) {
-  inspectorItemKey = item?.source_path ?? "";
+function renderInspector(value) {
+  const selection = normalizeSelection(value);
+  inspectorSelection = selection;
+  inspectorItemKey = selection?.key ?? "";
+  const item = selection?.item ?? null;
 
   if (inspectorTitle) {
-    inspectorTitle.textContent = item
-      ? item.title || fileStem(item.source_path) || "Unbenannt"
-      : "Kein Eintrag ausgewählt";
+    inspectorTitle.textContent = selectionTitle(selection);
+  }
+  if (inspectorName) {
+    inspectorName.value = selection ? selectionTitle(selection) : "";
+  }
+  if (inspectorMediaType) {
+    inspectorMediaType.value = item ? mediaSelectionValue(item) : "unclassified";
+  }
+  if (inspectorYear) {
+    inspectorYear.value = item?.year ?? "";
+  }
+  if (inspectorStatus) {
+    inspectorStatus.value = item?.status ?? (item?.needs_review ? "needs-review" : "inbox");
   }
 
   if (inspectorProperties) {
     clearNode(inspectorProperties);
-    const entries = propertyEntriesFor(item);
+    const entries = propertyEntriesFor(selection);
     if (!entries.length) {
       const empty = document.createElement("div");
       empty.className = "property-empty";
@@ -1262,24 +1436,33 @@ function renderInspector(item) {
   }
 
   if (inspectorYaml) {
-    inspectorYaml.value = item ? item.sidecar_preview ?? "" : "";
-    inspectorYaml.disabled = !item;
+    inspectorYaml.value = selectionYamlPreview(selection);
+    inspectorYaml.disabled = !selection;
   }
   if (inspectorYamlSave) {
-    inspectorYamlSave.disabled = !item;
+    inspectorYamlSave.disabled = !selection;
   }
   if (inspectorYamlReset) {
-    inspectorYamlReset.disabled = !item || !yamlOverrides[item.source_path];
+    inspectorYamlReset.disabled = !selection || !yamlOverrides[selection.key];
   }
-  [inspectorPropertyKey, inspectorPropertyType, inspectorPropertyValue, inspectorPropertyAdd].forEach((control) => {
+  [
+    inspectorEditToggle,
+    inspectorFetchMetadata,
+    inspectorApply,
+    inspectorPropertyAddToggle,
+    inspectorPropertyKey,
+    inspectorPropertyType,
+    inspectorPropertyValue,
+    inspectorPropertyAdd,
+  ].forEach((control) => {
     if (control) {
-      control.disabled = !item;
+      control.disabled = !selection;
     }
   });
   if (inspectorYamlHint) {
-    inspectorYamlHint.textContent = item
-      ? `Lokale YAML-Fassung für ${item.source_path}.`
-      : "Wähle eine Datei aus, um YAML zu bearbeiten.";
+    inspectorYamlHint.textContent = selection
+      ? `Lokale YAML-Fassung für ${selection.key}.`
+      : "Wähle eine Datei oder Sammlung aus, um YAML zu bearbeiten.";
   }
 }
 
@@ -1404,6 +1587,78 @@ function representativeItem(node) {
   return node.items.find((item) => item.anilist_id || item.series_title) ?? node.items[0] ?? null;
 }
 
+function normalizeSelection(value) {
+  if (!value) {
+    return null;
+  }
+  if (value.source_path) {
+    return {
+      type: "file",
+      key: value.source_path,
+      item: value,
+      items: [value],
+      node: null,
+    };
+  }
+  if (value.type === "node" && value.node) {
+    return {
+      type: "node",
+      key: `node:${value.node.path || "root"}`,
+      item: representativeItem(value.node),
+      items: value.node.items,
+      node: value.node,
+    };
+  }
+  return null;
+}
+
+function selectionTitle(selection) {
+  if (!selection) {
+    return "Kein Eintrag ausgewählt";
+  }
+  if (selection.type === "node") {
+    const primary = selection.item;
+    const kind = collectionNodeKind(selection.node);
+    if (kind === "series") {
+      return primary?.series_title || selection.node.label;
+    }
+    return selection.node.label || primary?.title || "Sammlung";
+  }
+  return selection.item?.title || fileStem(selection.item?.source_path) || "Unbenannt";
+}
+
+function selectionYamlPreview(selection) {
+  if (!selection) {
+    return "";
+  }
+  if (yamlOverrides[selection.key]) {
+    return yamlOverrides[selection.key];
+  }
+  if (selection.type === "file") {
+    return selection.item?.sidecar_preview ?? "";
+  }
+
+  const primary = selection.item ?? {};
+  const lines = [
+    "---",
+    `id: ${yamlScalar(selection.key)}`,
+    `object_type: ${yamlScalar(nodeTypeLabel(selection.node).toLowerCase())}`,
+    `collection_path: ${yamlScalar(selection.node.path || "Sammlungen")}`,
+    `title: ${yamlScalar(selectionTitle(selection))}`,
+    `media_type: ${yamlScalar(primary.media_type ?? "collection")}`,
+  ];
+  appendYamlValue(lines, "format", primary.format);
+  appendYamlValue(lines, "year", primary.year);
+  appendYamlValue(lines, "anilist_id", primary.anilist_id);
+  appendYamlValue(lines, "anilist_url", primary.anilist_url);
+  appendYamlValue(lines, "genres", primary.genres);
+  appendYamlValue(lines, "tags", primary.tags);
+  appendYamlValue(lines, "cover_image_extra_large", primary.cover_image_extra_large);
+  appendYamlValue(lines, "banner_image", primary.banner_image);
+  lines.push("---");
+  return lines.join("\n");
+}
+
 function collectionDescriptionFor(node) {
   const kind = collectionNodeKind(node);
   if (kind === "root") {
@@ -1462,6 +1717,7 @@ function renderCollectionNavigation(root, node) {
     up.className = "collection-nav-item";
     up.addEventListener("click", () => {
       selectedCollectionKey = parentPath(node.path);
+      selectedCollectionItemKey = "";
       renderCollections(currentPlan?.items ?? []);
     });
 
@@ -1554,6 +1810,22 @@ function renderCollectionProfile(node) {
 
   const profile = document.createElement("section");
   profile.className = "collection-profile-card";
+  if (primary.banner_image) {
+    profile.style.setProperty("--media-banner", `url("${primary.banner_image}")`);
+    profile.classList.add("has-banner");
+  }
+
+  const cover = document.createElement("div");
+  cover.className = "collection-cover";
+  const coverUrl = primary.cover_image_extra_large || primary.cover_image_large || primary.cover_image_medium;
+  if (coverUrl) {
+    const image = document.createElement("img");
+    image.src = coverUrl;
+    image.alt = primary.series_title || primary.title || node.label;
+    cover.appendChild(image);
+  } else {
+    cover.textContent = "MV";
+  }
 
   const heading = document.createElement("div");
   heading.className = "collection-profile-heading";
@@ -1573,9 +1845,29 @@ function renderCollectionProfile(node) {
   ].filter(Boolean);
   meta.textContent = parts.join(" · ") || "Noch keine externen Metadaten vorhanden.";
 
+  const description = document.createElement("p");
+  description.className = "collection-profile-description";
+  description.textContent =
+    primary.description?.replace(/<[^>]*>/g, "") ||
+    "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.";
+
+  const tagBar = document.createElement("div");
+  tagBar.className = "media-tagbar";
+  (primary.genres || []).slice(0, 8).forEach((genre) => {
+    const tag = document.createElement("span");
+    tag.textContent = genre;
+    tagBar.appendChild(tag);
+  });
+
   heading.appendChild(label);
   heading.appendChild(name);
   heading.appendChild(meta);
+  heading.appendChild(description);
+  if (tagBar.childNodes.length) {
+    heading.appendChild(tagBar);
+  }
+
+  profile.appendChild(cover);
   profile.appendChild(heading);
 
   if (primary.anilist_url) {
@@ -1622,6 +1914,7 @@ function createCollectionItemRow(item) {
     selectedItemKey = item.source_path;
     selectedCollectionItemKey = item.source_path;
     renderCollectionEditor(item);
+    renderInspector(item);
     renderCollectionRows(findCollectionNode(buildCollectionTree(currentPlan?.items ?? []), selectedCollectionKey));
     if (statusStrip) {
       statusStrip.textContent = `Eintrag ausgewählt: ${item.source_path}`;
@@ -1710,6 +2003,9 @@ function renderCollections(items) {
 
   const selectedItem = selected.directItems.find((item) => item.source_path === selectedCollectionItemKey);
   renderCollectionEditor(selectedItem ?? null);
+  if (!selectedItem && currentActiveTab() === "collections") {
+    renderInspector({ type: "node", node: selected });
+  }
 }
 
 function renderCollectionEditor(item) {
@@ -1717,7 +2013,7 @@ function renderCollectionEditor(item) {
     return;
   }
 
-  collectionEditor.classList.toggle("is-active", Boolean(item));
+  collectionEditor.classList.remove("is-active");
 
   if (!item) {
     if (collectionEditorTitle) collectionEditorTitle.textContent = "Eintrag auswählen";
@@ -1736,9 +2032,6 @@ function renderCollectionEditor(item) {
     if (collectionEditorNotes) collectionEditorNotes.value = "";
     if (collectionEditorSidecarPreview) {
       collectionEditorSidecarPreview.textContent = "Wähle einen Eintrag aus.";
-    }
-    if (currentActiveTab() === "collections") {
-      renderInspector(null);
     }
     return;
   }
@@ -1832,8 +2125,25 @@ function syncVaultHint() {
     : "Leer lassen, dann versucht MediaVault den Vault automatisch zu finden.";
 }
 
+function syncTemplateInputs() {
+  pathTemplates = normalizeTemplateConfig(pathTemplates);
+  if (templateAnimeTv) templateAnimeTv.value = pathTemplates.animeTv;
+  if (templateAnimeMovie) templateAnimeMovie.value = pathTemplates.animeMovie;
+  if (templateSeries) templateSeries.value = pathTemplates.series;
+  if (templateFilm) templateFilm.value = pathTemplates.film;
+}
+
+function readTemplateInputs() {
+  return normalizeTemplateConfig({
+    animeTv: templateAnimeTv?.value.trim(),
+    animeMovie: templateAnimeMovie?.value.trim(),
+    series: templateSeries?.value.trim(),
+    film: templateFilm?.value.trim(),
+  });
+}
+
 function populateSelectors() {
-  [detailMediaTypeInput, collectionEditorMediaType].forEach((select) => {
+  [detailMediaTypeInput, collectionEditorMediaType, inspectorMediaType].forEach((select) => {
     if (!select) {
       return;
     }
@@ -1846,7 +2156,7 @@ function populateSelectors() {
     });
   });
 
-  [detailStatus, collectionEditorStatus].forEach((select) => {
+  [detailStatus, collectionEditorStatus, inspectorStatus].forEach((select) => {
     if (!select) {
       return;
     }
@@ -1882,6 +2192,49 @@ function upsertCorrection(item) {
   if (!corrections[item.source_path].notes) {
     delete corrections[item.source_path].notes;
   }
+
+  saveStoredJson(correctionsKey, corrections);
+}
+
+function upsertSelectionCorrection(selection) {
+  if (!selection) {
+    return;
+  }
+
+  const titleValue = inspectorName?.value.trim() || null;
+  selection.items.forEach((item) => {
+    const existing = corrections[item.source_path] ?? {};
+    const next = {
+      ...existing,
+      media_type: inspectorMediaType?.value || existing.media_type || mediaSelectionValue(item),
+      year: normalizeYear(inspectorYear?.value),
+      status: inspectorStatus?.value || existing.status || null,
+      updated_at: new Date().toISOString(),
+    };
+
+    if (selection.type === "node") {
+      next.series_title = titleValue;
+      if (collectionNodeKind(selection.node) === "movie") {
+        next.title = titleValue;
+      }
+    } else {
+      next.title = titleValue;
+    }
+
+    if (!next.title) {
+      delete next.title;
+    }
+    if (!next.series_title) {
+      delete next.series_title;
+    }
+    if (next.year === null) {
+      delete next.year;
+    }
+    if (!next.status) {
+      delete next.status;
+    }
+    corrections[item.source_path] = next;
+  });
 
   saveStoredJson(correctionsKey, corrections);
 }
@@ -1931,7 +2284,25 @@ tabs.forEach((button) => {
 if (demoButton) {
   demoButton.addEventListener("click", () => {
     setActiveTab("review");
-    loadPlan();
+    if (!document.body.classList.contains("is-vault-open")) {
+      openVault(getVaultRoot());
+    } else {
+      loadPlan();
+    }
+  });
+}
+
+if (vaultOpenButton) {
+  vaultOpenButton.addEventListener("click", () => {
+    openVault(vaultOpenPath?.value || getVaultRoot());
+  });
+}
+
+if (vaultCreateButton) {
+  vaultCreateButton.addEventListener("click", () => {
+    const path = vaultCreatePath?.value.trim();
+    const name = vaultCreateName?.value.trim() || basename(path || "");
+    openVault(path, name);
   });
 }
 
@@ -1973,6 +2344,33 @@ if (vaultRootClear) {
     localStorage.removeItem(storageKey);
     syncVaultHint();
     loadPlan();
+  });
+}
+
+if (templatesSave) {
+  templatesSave.addEventListener("click", () => {
+    pathTemplates = readTemplateInputs();
+    saveStoredJson(pathTemplatesKey, pathTemplates);
+    currentPlan = sourcePlan ? projectPlan(sourcePlan) : currentPlan;
+    if (currentPlan) {
+      renderPlan(currentPlan);
+    }
+    if (templatesHint) {
+      templatesHint.textContent =
+        "Templates gespeichert. Zielpfade wurden neu berechnet; echte Verschiebungen werden später separat bestätigt.";
+    }
+  });
+}
+
+if (templatesReset) {
+  templatesReset.addEventListener("click", () => {
+    pathTemplates = defaultPathTemplates();
+    saveStoredJson(pathTemplatesKey, pathTemplates);
+    syncTemplateInputs();
+    currentPlan = sourcePlan ? projectPlan(sourcePlan) : currentPlan;
+    if (currentPlan) {
+      renderPlan(currentPlan);
+    }
   });
 }
 
@@ -2105,6 +2503,71 @@ if (inspectorToggle) {
   });
 }
 
+if (inspectorEditToggle) {
+  inspectorEditToggle.addEventListener("click", () => {
+    document.body.classList.toggle("inspector-editing");
+    inspectorEditToggle.textContent = document.body.classList.contains("inspector-editing")
+      ? "Edit schließen"
+      : "Bearbeiten";
+  });
+}
+
+if (inspectorPropertyAddToggle) {
+  inspectorPropertyAddToggle.addEventListener("click", () => {
+    document.body.classList.toggle("property-add-open");
+  });
+}
+
+if (inspectorApply) {
+  inspectorApply.addEventListener("click", () => {
+    if (!inspectorSelection) {
+      return;
+    }
+
+    upsertSelectionCorrection(inspectorSelection);
+    currentPlan = projectPlan(sourcePlan);
+    if (inspectorSelection.type === "node") {
+      const titleValue = inspectorName?.value.trim();
+      if (titleValue) {
+        const updated = currentPlan.items.find((item) => {
+          return item.series_title === titleValue || item.title === titleValue;
+        });
+        selectedCollectionKey = updated?.collection_path || selectedCollectionKey;
+      }
+    } else {
+      selectedItemKey = inspectorSelection.item.source_path;
+    }
+    renderPlan(currentPlan);
+    updateAuditTrail(`Inspector-Korrektur übernommen für ${inspectorSelection.key}.`);
+  });
+}
+
+if (inspectorFetchMetadata) {
+  inspectorFetchMetadata.addEventListener("click", async () => {
+    if (!inspectorSelection || !inspectorSelection.item) {
+      return;
+    }
+
+    try {
+      upsertSelectionCorrection(inspectorSelection);
+      const draft = {
+        ...inspectorSelection.item,
+        title: inspectorName?.value.trim() || inspectorSelection.item.title,
+        series_title: inspectorName?.value.trim() || inspectorSelection.item.series_title,
+        media_type: inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item),
+      };
+      await fetchAniListForItem(draft, inspectorApiFeedback, inspectorSelection.items);
+      renderPlan(currentPlan);
+    } catch (error) {
+      setApiFeedback(
+        inspectorApiFeedback,
+        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        "error"
+      );
+    }
+  });
+}
+
 if (inspectorYamlSave) {
   inspectorYamlSave.addEventListener("click", () => {
     if (!inspectorItemKey || !inspectorYaml) {
@@ -2173,5 +2636,9 @@ if (collectionBackDashboard) {
 
 populateSelectors();
 renderAuditTrail();
+renderRecentVaults();
+syncTemplateInputs();
 syncVaultHint();
-loadPlan();
+if (vaultOpenPath) {
+  vaultOpenPath.value = localStorage.getItem(storageKey) ?? "";
+}
