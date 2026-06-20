@@ -25,6 +25,14 @@
           <button class="nav-item" data-tab="settings">Einstellungen</button>
         </nav>
 
+        <section class="collection-sidebar" id="collection-sidebar" aria-label="Sammlungen">
+          <button class="action-button collection-back" id="collection-back-dashboard">
+            Zurück zum Dashboard
+          </button>
+          <p class="panel-label">Sammlungen</p>
+          <div class="collection-sidebar-list" id="collection-sidebar-list"></div>
+        </section>
+
         <section class="sidebar-meta">
           <div class="meta-row">
             <span>Vault</span>
@@ -199,6 +207,7 @@
                     <textarea id="detail-notes" rows="3"></textarea>
                   </label>
                   <div class="toolbar">
+                    <button class="action-button" id="detail-fetch-metadata">AniList abrufen</button>
                     <button class="action-button primary" id="detail-apply">Korrektur übernehmen</button>
                     <button class="action-button" id="detail-reset">Zurücksetzen</button>
                   </div>
@@ -226,45 +235,29 @@
 
         <section class="view" data-view="collections">
           <div class="collections-layout">
-            <div class="collections-top">
-              <section class="panel">
-                <p class="panel-label">Smart Collections</p>
-                <h3>Regeln statt starre Ordner</h3>
-                <p class="body-copy">
-                  Sammlungen sind erstmal nur Regeln auf den aktuellen Scan. Damit kann man
-                  später sauber in Ordner, Playlists oder Exporte überführen.
-                </p>
-                <div class="collection-chipbar" id="collection-cards"></div>
-              </section>
-
-              <section class="panel">
-                <p class="panel-label">Auswahl</p>
-                <h3 id="collection-title">Alle Dateien</h3>
-                <p class="body-copy" id="collection-description">
-                  Alle gefundenen Einträge im aktuellen Vault-Scan.
-                </p>
+            <section class="panel collection-detail">
+              <div class="collection-hero">
+                <div>
+                  <p class="panel-label">Sammlung</p>
+                  <h3 id="collection-title">Alle Dateien</h3>
+                  <p class="body-copy" id="collection-description">
+                    Alle gefundenen Einträge im aktuellen Vault-Scan.
+                  </p>
+                </div>
 
                 <div class="collection-meta" id="collection-meta"></div>
+              </div>
 
-                <div class="table">
-                  <div class="table-row table-head">
-                    <span>Datei</span>
-                    <span>Typ</span>
-                    <span>Ziel / Status</span>
-                  </div>
-                  <div id="collection-rows"></div>
+              <div class="collection-profile" id="collection-profile"></div>
+
+              <div class="table collection-table">
+                <div class="table-row table-head">
+                  <span>Datei</span>
+                  <span>Typ</span>
+                  <span>Ziel / Status</span>
                 </div>
-              </section>
-            </div>
-
-            <section class="panel collections-footer">
-              <p class="panel-label">Nächster Schritt</p>
-              <h3>Regeln verfeinern, dann exportieren</h3>
-              <p class="body-copy">
-                Später können diese Regeln als echte Sammlungen gespeichert und daraus
-                Ordnerstrukturen oder Playlisten erzeugt werden. Im Moment ist es ein
-                schneller Weg, den Vault nach Inhalt zu sortieren.
-              </p>
+                <div id="collection-rows"></div>
+              </div>
             </section>
           </div>
         </section>

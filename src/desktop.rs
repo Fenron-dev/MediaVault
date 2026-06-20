@@ -1,18 +1,18 @@
 //! Desktop shell bootstrap for MediaVault.
 
-use std::env;
 use std::collections::HashSet;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
-use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
 };
+use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
@@ -35,11 +35,19 @@ pub(crate) fn run() -> Result<()> {
                 "/" | "/index.html" => {
                     response(StatusCode::OK, "text/html; charset=utf-8", INDEX_HTML)
                 }
-                "/app.js" => response(StatusCode::OK, "application/javascript; charset=utf-8", APP_JS),
+                "/app.js" => response(
+                    StatusCode::OK,
+                    "application/javascript; charset=utf-8",
+                    APP_JS,
+                ),
                 "/styles.css" => response(StatusCode::OK, "text/css; charset=utf-8", STYLES_CSS),
                 "/api/vault-plan" => json_response(
                     StatusCode::OK,
                     &build_plan_response(request.uri().query()),
+                ),
+                "/api/anilist-search" => json_response(
+                    StatusCode::OK,
+                    &build_anilist_search_response(request.uri().query()),
                 ),
                 _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
             }
@@ -72,7 +80,7 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8
 }
 
 fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
-    let root_override = query.and_then(extract_query_root);
+    let root_override = query.and_then(|query| extract_query_value(query, "root"));
 
     if let Some(root_override) = root_override {
         match build_vault_plan(Some(&root_override)) {
@@ -94,11 +102,35 @@ fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
                 None,
             ),
         },
-        Ok(None) => build_demo_plan(Some("Kein Vault gefunden, daher Demo-Daten angezeigt.".to_string())),
+        Ok(None) => build_demo_plan(Some(
+            "Kein Vault gefunden, daher Demo-Daten angezeigt.".to_string(),
+        )),
         Err(error) => build_error_plan(
             format!("Vault-Erkennung fehlgeschlagen: {error}"),
             None,
         ),
+    }
+}
+
+fn build_anilist_search_response(query: Option<&str>) -> AniListSearchResponse {
+    let Some(query) = query else {
+        return AniListSearchResponse::error("missing query".to_string());
+    };
+    let Some(title) = extract_query_value(query, "title") else {
+        return AniListSearchResponse::error("missing title".to_string());
+    };
+
+    let adult = extract_query_value(query, "adult")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let client = AniListClient::default();
+
+    match client.search_anime(&title, adult) {
+        Ok(metadata) => AniListSearchResponse {
+            metadata,
+            error: None,
+        },
+        Err(error) => AniListSearchResponse::error(error.to_string()),
     }
 }
 
@@ -385,6 +417,21 @@ struct DemoSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct AniListSearchResponse {
+    metadata: Option<AniListAnimeMetadata>,
+    error: Option<String>,
+}
+
+impl AniListSearchResponse {
+    fn error(error: String) -> Self {
+        Self {
+            metadata: None,
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct DemoPlanItem {
     source_path: String,
     target_path: Option<String>,
@@ -429,13 +476,19 @@ impl DemoPlanItem {
         let needs_review = requires_review(item);
         let title = build_display_title(file, anilist, media_type);
         let anime_context = derive_anime_context(file, item, anilist, title.as_deref());
-        let collection_path = build_collection_path(media_type, title.as_deref(), anime_context.as_ref());
+        let collection_path = build_collection_path(
+            media_type,
+            title.as_deref(),
+            anime_context.as_ref(),
+            anilist,
+        );
         let target_path = build_target_path_preview(
             file,
             item,
             media_type,
             title.as_deref(),
             anime_context.as_ref(),
+            anilist,
         );
         let preview_path = target_path
             .as_ref()
@@ -481,7 +534,13 @@ impl DemoPlanItem {
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
             sidecar_path: sidecar_path_for(&preview_path).ok().map(|path| path.to_string()),
-            sidecar_preview: render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref()),
+            sidecar_preview: render_sidecar_preview(
+                file,
+                item,
+                media_type,
+                anilist,
+                anime_context.as_ref(),
+            ),
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
         }
     }
@@ -526,16 +585,21 @@ fn render_sidecar_preview(
     entry.properties.title = build_display_title(file, anilist, media_type);
     entry.properties.title_original = anilist.and_then(|metadata| metadata.title_native.clone());
     entry.properties.description = anilist.and_then(|metadata| metadata.description.clone());
-    entry.properties.year = anilist.and_then(|metadata| metadata.season_year).or(file.metadata.as_ref().and_then(|metadata| metadata.year));
+    entry.properties.year = anilist
+        .and_then(|metadata| metadata.season_year)
+        .or(file.metadata.as_ref().and_then(|metadata| metadata.year));
     entry.properties.anilist_id = anilist.map(|metadata| metadata.anilist_id);
     entry.properties.anilist_url = anilist.and_then(|metadata| metadata.anilist_url.clone());
     entry.properties.series_title = anime_context
         .and_then(|context| context.series_title.clone())
-        .or_else(|| anilist.and_then(|metadata| metadata.display_title().map(|value| value.to_string())));
+        .or_else(|| {
+            anilist.and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
+        });
     entry.properties.season_number = anime_context.and_then(|context| context.season_number);
     entry.properties.episode_start = anime_context.and_then(|context| context.episode_start);
     entry.properties.episode_end = anime_context.and_then(|context| context.episode_end);
-    entry.properties.episode_title = anime_context.and_then(|context| context.episode_title.clone());
+    entry.properties.episode_title =
+        anime_context.and_then(|context| context.episode_title.clone());
     entry.properties.episode_count = anilist.and_then(|metadata| metadata.episodes);
     entry.properties.runtime_minutes = anilist.and_then(|metadata| metadata.duration);
     entry.properties.average_score = anilist.and_then(|metadata| metadata.average_score);
@@ -631,9 +695,17 @@ fn build_collection_path(
     media_type: MediaType,
     title: Option<&str>,
     anime_context: Option<&AnimeEpisodeContext>,
+    anilist: Option<&AniListAnimeMetadata>,
 ) -> String {
     match media_type {
         MediaType::Anime | MediaType::HentaiAnime => {
+            if is_anilist_movie(anilist) {
+                return format!(
+                    "Anime/Filme/{}",
+                    sanitize_path_segment(title.unwrap_or("Unbenannt"))
+                );
+            }
+
             let series = anime_context
                 .and_then(|context| context.series_title.as_deref())
                 .or(title)
@@ -672,9 +744,27 @@ fn build_target_path_preview(
     media_type: MediaType,
     title: Option<&str>,
     anime_context: Option<&AnimeEpisodeContext>,
+    anilist: Option<&AniListAnimeMetadata>,
 ) -> Option<String> {
     if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
         return item.target_path.as_ref().map(|path| path.to_string());
+    }
+
+    if is_anilist_movie(anilist) {
+        let movie_title = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+        let extension = file
+            .source_path
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_string());
+        let mut path = PathBuf::from("Anime");
+        path.push("Filme");
+        path.push(&movie_title);
+        let file_name = match extension {
+            Some(extension) if !extension.is_empty() => format!("{movie_title}.{extension}"),
+            _ => movie_title,
+        };
+        path.push(file_name.as_str());
+        return Some(path.display().to_string());
     }
 
     let series_title = anime_context
@@ -717,6 +807,13 @@ fn build_target_path_preview(
     };
     path.push(file_name);
     Some(path.display().to_string())
+}
+
+fn is_anilist_movie(anilist: Option<&AniListAnimeMetadata>) -> bool {
+    anilist
+        .and_then(|metadata| metadata.format.as_deref())
+        .map(|format| format.eq_ignore_ascii_case("MOVIE"))
+        .unwrap_or(false)
 }
 
 fn format_episode_label(context: &AnimeEpisodeContext) -> Option<String> {
@@ -810,7 +907,11 @@ fn looks_like_episode_fragment(value: &str) -> bool {
     }
 
     lower.chars().all(|character| {
-        character.is_ascii_digit() || matches!(character, '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.')
+        character.is_ascii_digit()
+            || matches!(
+                character,
+                '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.'
+            )
     }) || lower.contains("episode")
         || lower.contains("ep")
 }
@@ -1028,7 +1129,12 @@ fn requires_review(item: &ImportPlanItem) -> bool {
         || item
             .steps
             .iter()
-            .any(|step| matches!(step, PlannedImportStep::QueueReview { .. } | PlannedImportStep::AskUser { .. }))
+            .any(|step| {
+                matches!(
+                    step,
+                    PlannedImportStep::QueueReview { .. } | PlannedImportStep::AskUser { .. }
+                )
+            })
 }
 
 fn format_plan_step(step: PlannedImportStep) -> String {
@@ -1049,10 +1155,12 @@ fn format_plan_step(step: PlannedImportStep) -> String {
     }
 }
 
-fn extract_query_root(query: &str) -> Option<String> {
+fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
     for pair in query.split('&') {
-        let (key, value) = pair.split_once('=')?;
-        if key == "root" {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key == wanted_key {
             return urlencoding::decode(value).ok().map(|value| value.into_owned());
         }
     }
@@ -1184,6 +1292,12 @@ fn detect_classification(relative_path: &RelativePath) -> Option<FileClassificat
                     confidence: 0.94,
                     source: ClassificationSource::Folder,
                 })
+            } else if has_season_episode_marker(&path) {
+                Some(FileClassification {
+                    media_type: MediaType::Series,
+                    confidence: 0.91,
+                    source: ClassificationSource::Filename,
+                })
             } else if path.contains("series") {
                 Some(FileClassification {
                     media_type: MediaType::Series,
@@ -1272,4 +1386,18 @@ const IMAGE_HINTS: [&str; 7] = [
 
 fn contains_any(value: &str, hints: &[&str]) -> bool {
     hints.iter().any(|hint| value.contains(hint))
+}
+
+fn has_season_episode_marker(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    let bytes = lower.as_bytes();
+
+    bytes.windows(6).any(|window| {
+        window[0] == b's'
+            && window[1].is_ascii_digit()
+            && window[2].is_ascii_digit()
+            && window[3] == b'e'
+            && window[4].is_ascii_digit()
+            && window[5].is_ascii_digit()
+    })
 }

@@ -9,10 +9,13 @@ const metricInbox = document.getElementById("metric-inbox");
 const metricReview = document.getElementById("metric-review");
 const metricDuplicates = document.getElementById("metric-duplicates");
 const metricCollections = document.getElementById("metric-collections");
-const collectionCards = document.getElementById("collection-cards");
+const collectionSidebar = document.getElementById("collection-sidebar");
+const collectionSidebarList = document.getElementById("collection-sidebar-list");
+const collectionBackDashboard = document.getElementById("collection-back-dashboard");
 const collectionTitle = document.getElementById("collection-title");
 const collectionDescription = document.getElementById("collection-description");
 const collectionMeta = document.getElementById("collection-meta");
+const collectionProfile = document.getElementById("collection-profile");
 const collectionRows = document.getElementById("collection-rows");
 const vaultRootInput = document.getElementById("vault-root-input");
 const vaultRootSave = document.getElementById("vault-root-save");
@@ -34,6 +37,7 @@ const detailMediaTypeInput = document.getElementById("detail-media-type-input");
 const detailYear = document.getElementById("detail-year");
 const detailStatus = document.getElementById("detail-status");
 const detailNotes = document.getElementById("detail-notes");
+const detailFetchMetadata = document.getElementById("detail-fetch-metadata");
 const detailApply = document.getElementById("detail-apply");
 const detailReset = document.getElementById("detail-reset");
 const detailSidecarPreview = document.getElementById("detail-sidecar-preview");
@@ -41,6 +45,7 @@ const auditTrailNode = document.getElementById("audit-trail");
 
 const storageKey = "mediavault.vaultRoot";
 const correctionsKey = "mediavault.reviewCorrections";
+const metadataKey = "mediavault.apiMetadata";
 const auditTrailKey = "mediavault.auditTrail";
 
 const labels = {
@@ -76,7 +81,7 @@ const mediaTypeOptions = [
 const statusOptions = [
   ["inbox", "Inbox"],
   ["needs-review", "Prüfung nötig"],
-  ["in-library", "Bibliothek"],
+  ["in-library", "Sammlung"],
   ["wishlist", "Wunschliste"],
   ["completed", "Abgeschlossen"],
   ["on-hold", "Pausiert"],
@@ -89,6 +94,7 @@ let currentPlan = null;
 let selectedItemKey = "";
 let selectedCollectionKey = "all";
 let corrections = loadStoredJson(correctionsKey, {});
+let apiMetadata = loadStoredJson(metadataKey, {});
 let auditTrail = loadStoredJson(auditTrailKey, []);
 
 function setActiveTab(tab) {
@@ -102,6 +108,10 @@ function setActiveTab(tab) {
 
   if (title) {
     title.textContent = labels[tab] ?? "MediaVault";
+  }
+
+  if (collectionSidebar) {
+    collectionSidebar.classList.toggle("is-active", tab === "collections");
   }
 
   if (statusStrip) {
@@ -278,9 +288,163 @@ function normalizeYear(value) {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+function cleanTitleText(value) {
+  return String(value ?? "")
+    .replace(/\[[^\]]*]/g, " ")
+    .replace(/\([^)]*\)/g, " ")
+    .replace(/[._]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function episodeMarker(value) {
+  const match = String(value ?? "").match(/\bS(\d{1,2})E(\d{1,3})(?:\s*(?:[-+]|E)\s*(\d{1,3}))?\b/i);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    season: Number.parseInt(match[1], 10),
+    episodeStart: Number.parseInt(match[2], 10),
+    episodeEnd: match[3] ? Number.parseInt(match[3], 10) : Number.parseInt(match[2], 10),
+    raw: match[0],
+  };
+}
+
+function hasEpisodeMarker(item) {
+  return Boolean(
+    episodeMarker(item.source_path) ||
+      episodeMarker(item.title) ||
+      episodeMarker(item.series_title)
+  );
+}
+
+function candidateText(item) {
+  return cleanTitleText(
+    [item.series_title, item.title, fileStem(item.source_path)].filter(Boolean).join(" ")
+  );
+}
+
+function stripEpisodeMarkerText(value) {
+  return cleanTitleText(String(value ?? "").replace(/\bS\d{1,2}E\d{1,3}(?:\s*(?:[-+]|E)\s*\d{1,3})?\b/gi, " "));
+}
+
+function deriveSeriesTitle(item) {
+  if (item.series_title && !episodeMarker(item.series_title)) {
+    return cleanTitleText(item.series_title);
+  }
+
+  if (item.title && !episodeMarker(item.title)) {
+    return cleanTitleText(item.title);
+  }
+
+  const pathParts = String(item.source_path ?? "").split("/").map(cleanTitleText).filter(Boolean);
+  const animeIndex = pathParts.findIndex((part) => part.toLowerCase() === "anime");
+  if (animeIndex >= 0 && pathParts[animeIndex + 1]) {
+    const candidate = pathParts[animeIndex + 1];
+    if (!/^staffel|^season|^s\d+/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  const stripped = stripEpisodeMarkerText(fileStem(item.source_path));
+  return stripped || "Unbekannte Serie";
+}
+
+function deriveEpisodeTitle(item) {
+  const stem = cleanTitleText(fileStem(item.source_path));
+  const marker = episodeMarker(stem);
+  if (!marker) {
+    return item.episode_title || "";
+  }
+
+  const afterMarker = cleanTitleText(stem.slice(stem.toLowerCase().indexOf(marker.raw.toLowerCase()) + marker.raw.length));
+  return item.episode_title || afterMarker;
+}
+
+function isAnimeMovie(item) {
+  return item.media_type === "anime" && String(item.format ?? "").toUpperCase() === "MOVIE";
+}
+
+function isAnimeSeries(item) {
+  return item.media_type === "anime" && !isAnimeMovie(item);
+}
+
+function collectionPathFor(item) {
+  const title = sanitizeSegment(item.title || fileStem(item.source_path) || "Unbenannt");
+
+  if (isAnimeMovie(item)) {
+    return `Anime/Filme/${title}`;
+  }
+
+  if (isAnimeSeries(item)) {
+    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
+    const season = item.season_number || marker.season || 1;
+    return `Anime/Serien/${sanitizeSegment(deriveSeriesTitle(item))}/Staffel ${season}`;
+  }
+
+  if (item.media_type === "series" || hasEpisodeMarker(item)) {
+    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
+    const season = item.season_number || marker.season || 1;
+    return `Serien/${sanitizeSegment(deriveSeriesTitle(item))}/Staffel ${season}`;
+  }
+
+  if (item.media_type === "film") {
+    return `Filme/${title}`;
+  }
+
+  const folder = item.folder_segment ?? folderSegmentFor(item.media_type);
+  return title ? `${folder}/${title}` : folder;
+}
+
+function episodeFileLabel(item) {
+  const marker = episodeMarker(item.source_path) || episodeMarker(item.title);
+  if (!marker) {
+    return sanitizeSegment(item.title || fileStem(item.source_path) || "Episode");
+  }
+
+  const start = String(marker.episodeStart).padStart(2, "0");
+  const end = marker.episodeEnd && marker.episodeEnd !== marker.episodeStart
+    ? `-${String(marker.episodeEnd).padStart(2, "0")}`
+    : "";
+  const episodeTitle = deriveEpisodeTitle(item);
+  return episodeTitle ? `E${start}${end} - ${sanitizeSegment(episodeTitle)}` : `E${start}${end}`;
+}
+
 function projectItem(item) {
   const correction = corrections[item.source_path] ?? {};
+  const metadata = apiMetadata[item.source_path] ?? {};
   const effective = { ...item };
+
+  [
+    "title",
+    "title_original",
+    "series_title",
+    "description",
+    "format",
+    "airing_season",
+    "anilist_url",
+    "episode_title",
+  ].forEach((field) => {
+    if (typeof metadata[field] === "string") {
+      effective[field] = metadata[field];
+    }
+  });
+
+  [
+    "year",
+    "season_number",
+    "episode_start",
+    "episode_end",
+    "episode_count",
+    "runtime_minutes",
+    "average_score",
+    "anilist_id",
+  ].forEach((field) => {
+    if (typeof metadata[field] === "number") {
+      effective[field] = metadata[field];
+    }
+  });
 
   if (typeof correction.title === "string") {
     effective.title = correction.title;
@@ -302,6 +466,19 @@ function projectItem(item) {
   effective.folder_segment = correction.media_type
     ? folderSegmentFor(correction.media_type)
     : effective.folder_segment ?? folderSegmentFor(effective.media_type);
+  const marker = episodeMarker(effective.source_path) || episodeMarker(effective.title);
+  if (marker) {
+    effective.season_number = effective.season_number || marker.season;
+    effective.episode_start = effective.episode_start || marker.episodeStart;
+    effective.episode_end = effective.episode_end || marker.episodeEnd;
+    if (effective.media_type === "film") {
+      effective.media_type = candidateText(effective).toLowerCase().includes("anime")
+        ? "anime"
+        : "series";
+      effective.folder_segment = folderSegmentFor(effective.media_type);
+    }
+  }
+  effective.collection_path = collectionPathFor(effective);
   effective.target_path = buildTargetPath(effective);
   effective.sidecar_path = buildSidecarPath(effective.target_path);
   effective.sidecar_preview = buildSidecarPreview(effective);
@@ -316,10 +493,39 @@ function projectPlan(plan) {
 
 function buildTargetPath(item) {
   const mediaType = item.media_type ?? "unclassified";
-  const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
   const title = sanitizeSegment(item.title || fileStem(item.source_path) || "untitled");
   const yearSuffix = item.year ? ` (${item.year})` : "";
   const extension = extensionOf(item.source_path);
+
+  if (isAnimeMovie(item)) {
+    const filename = extension ? `${title}${yearSuffix}.${extension}` : `${title}${yearSuffix}`;
+    return `Anime/Filme/${title}${yearSuffix}/${filename}`;
+  }
+
+  if (isAnimeSeries(item)) {
+    const series = sanitizeSegment(deriveSeriesTitle(item));
+    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
+    const season = item.season_number || marker.season || 1;
+    const label = episodeFileLabel(item);
+    const filename = extension ? `${series} - ${label}.${extension}` : `${series} - ${label}`;
+    return `Anime/Serien/${series}/Staffel ${season}/${filename}`;
+  }
+
+  if (mediaType === "series" || hasEpisodeMarker(item)) {
+    const series = sanitizeSegment(deriveSeriesTitle(item));
+    const marker = episodeMarker(item.source_path) || episodeMarker(item.title) || {};
+    const season = item.season_number || marker.season || 1;
+    const label = episodeFileLabel(item);
+    const filename = extension ? `${series} - ${label}.${extension}` : `${series} - ${label}`;
+    return `Serien/${series}/Staffel ${season}/${filename}`;
+  }
+
+  if (mediaType === "film") {
+    const filename = extension ? `${title}${yearSuffix}.${extension}` : `${title}${yearSuffix}`;
+    return `Filme/${title}${yearSuffix}/${filename}`;
+  }
+
+  const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
   const filename = extension ? `${title}${yearSuffix}.${extension}` : `${title}${yearSuffix}`;
   return `${folderSegment}/${title}${yearSuffix}/${filename}`;
 }
@@ -403,6 +609,72 @@ function buildSidecarPreview(item) {
 
   lines.push("---");
   return lines.join("\n");
+}
+
+function normalizeAniListMetadata(metadata, item) {
+  const title = metadata.title_english || metadata.title_romaji || metadata.title_native;
+  const marker = episodeMarker(item.source_path) || episodeMarker(item.title);
+  const normalized = {
+    title: title || item.title,
+    title_original: metadata.title_native || null,
+    series_title: title || item.series_title || item.title,
+    description: metadata.description || null,
+    year: metadata.season_year ?? item.year ?? null,
+    episode_count: metadata.episodes ?? null,
+    runtime_minutes: metadata.duration ?? null,
+    average_score: metadata.average_score ?? null,
+    format: metadata.format || null,
+    airing_season: metadata.season || null,
+    anilist_id: metadata.anilist_id ?? null,
+    anilist_url: metadata.anilist_url || null,
+  };
+
+  if (marker) {
+    normalized.season_number = marker.season;
+    normalized.episode_start = marker.episodeStart;
+    normalized.episode_end = marker.episodeEnd;
+    normalized.episode_title = deriveEpisodeTitle(item);
+  }
+
+  Object.keys(normalized).forEach((key) => {
+    if (normalized[key] === null || normalized[key] === "") {
+      delete normalized[key];
+    }
+  });
+
+  return normalized;
+}
+
+async function fetchAniListForItem(item) {
+  const searchTitle = detailTitle?.value.trim() || item.series_title || item.title || stripEpisodeMarkerText(fileStem(item.source_path));
+  if (!searchTitle) {
+    if (statusStrip) {
+      statusStrip.textContent = "Kein Suchbegriff für AniList vorhanden.";
+    }
+    return;
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `AniList-Suche läuft für: ${searchTitle}`;
+  }
+
+  const adult = item.media_type === "hentai-anime";
+  const response = await fetch(`/api/anilist-search?title=${encodeURIComponent(searchTitle)}&adult=${adult ? "true" : "false"}`);
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (!payload.metadata) {
+    throw new Error(payload.error || "Kein AniList-Treffer");
+  }
+
+  apiMetadata[item.source_path] = normalizeAniListMetadata(payload.metadata, item);
+  saveStoredJson(metadataKey, apiMetadata);
+  currentPlan = projectPlan(sourcePlan);
+  selectedItemKey = item.source_path;
+  renderPlan(currentPlan);
+  updateAuditTrail(`AniList-Metadaten übernommen für ${item.source_path}.`);
 }
 
 function updateAuditTrail(message) {
@@ -713,6 +985,7 @@ function buildCollectionCatalog(items) {
       label: path.split("/").join(" > "),
       description: "Pfadbasierte Sammlung aus AniList- und Vault-Metadaten.",
       rule: path,
+      type: path.includes("/Staffel ") ? "series-season" : path.includes("/Filme/") ? "movie-folder" : "folder",
       items: items.filter((item) => item.collection_path === path),
     }));
 
@@ -746,17 +1019,17 @@ function renderCollectionMeta(collection) {
   });
 }
 
-function renderCollectionCards(collections) {
-  if (!collectionCards) {
+function renderCollectionNavigation(collections) {
+  if (!collectionSidebarList) {
     return;
   }
 
-  clearNode(collectionCards);
+  clearNode(collectionSidebarList);
 
   collections.forEach((collection) => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "collection-chip";
+    button.className = "collection-nav-item";
     button.classList.toggle("is-active", collection.key === selectedCollectionKey);
     button.addEventListener("click", () => {
       selectedCollectionKey = collection.key;
@@ -770,8 +1043,83 @@ function renderCollectionCards(collections) {
 
     button.appendChild(label);
     button.appendChild(count);
-    collectionCards.appendChild(button);
+    collectionSidebarList.appendChild(button);
   });
+}
+
+function renderCollectionProfile(collection) {
+  if (!collectionProfile) {
+    return;
+  }
+
+  clearNode(collectionProfile);
+
+  const primary = collection.items[0];
+  if (!primary || !collection.key.startsWith("path:")) {
+    return;
+  }
+
+  const profile = document.createElement("section");
+  profile.className = "collection-profile-card";
+
+  const heading = document.createElement("div");
+  heading.className = "collection-profile-heading";
+
+  const label = document.createElement("span");
+  label.textContent = primary.media_type === "anime" ? "Anime" : mediaTypeLabel(primary.media_type);
+  const name = document.createElement("strong");
+  name.textContent = primary.series_title || primary.title || collection.label;
+  const meta = document.createElement("p");
+  const parts = [
+    primary.format,
+    primary.airing_season,
+    primary.year,
+    typeof primary.episode_count === "number" ? `${primary.episode_count} Folgen` : "",
+    typeof primary.runtime_minutes === "number" ? `${primary.runtime_minutes} Min.` : "",
+    typeof primary.average_score === "number" ? `${Math.round(primary.average_score)} / 100` : "",
+  ].filter(Boolean);
+  meta.textContent = parts.join(" · ") || "Noch keine externen Metadaten vorhanden.";
+
+  heading.appendChild(label);
+  heading.appendChild(name);
+  heading.appendChild(meta);
+  profile.appendChild(heading);
+
+  if (primary.anilist_url) {
+    const link = document.createElement("a");
+    link.className = "collection-profile-link";
+    link.href = primary.anilist_url;
+    link.textContent = "AniList öffnen";
+    profile.appendChild(link);
+  }
+
+  collectionProfile.appendChild(profile);
+}
+
+function createCollectionItemRow(item) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "table-row table-row-button";
+  row.dataset.sourcePath = item.source_path;
+  row.addEventListener("click", () => {
+    selectedItemKey = item.source_path;
+    renderDetail(item);
+    if (statusStrip) {
+      statusStrip.textContent = `Eintrag ausgewählt: ${item.source_path}`;
+    }
+  });
+
+  [
+    item.source_path,
+    mediaTypeLabel(item.media_type),
+    item.target_path || statusLabel(item.status || "inbox"),
+  ].forEach((cell) => {
+    const span = document.createElement("span");
+    span.textContent = cell;
+    row.appendChild(span);
+  });
+
+  return row;
 }
 
 function renderCollectionRows(collection) {
@@ -782,10 +1130,7 @@ function renderCollectionRows(collection) {
   clearNode(collectionRows);
 
   collection.items.forEach((item) => {
-    const target = item.target_path || statusLabel(item.status || "inbox");
-    collectionRows.appendChild(
-      createRow(item, [item.source_path, mediaTypeLabel(item.media_type), target], false)
-    );
+    collectionRows.appendChild(createCollectionItemRow(item));
   });
 
   if (!collection.items.length) {
@@ -831,8 +1176,9 @@ function renderCollections(items) {
     metricCollections.textContent = `${collections.length} smart`;
   }
 
-  renderCollectionCards(collections);
+  renderCollectionNavigation(collections);
   renderCollectionMeta(selected);
+  renderCollectionProfile(selected);
   renderCollectionRows(selected);
 }
 
@@ -1008,6 +1354,29 @@ if (detailApply) {
   });
 }
 
+if (detailFetchMetadata) {
+  detailFetchMetadata.addEventListener("click", async () => {
+    const item = getSelectedItem();
+    if (!item) {
+      return;
+    }
+
+    try {
+      upsertCorrection(item);
+      const draft = {
+        ...item,
+        title: detailTitle?.value.trim() || item.title,
+        media_type: detailMediaTypeInput?.value || item.media_type,
+      };
+      await fetchAniListForItem(draft);
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
+      }
+    }
+  });
+}
+
 if (detailReset) {
   detailReset.addEventListener("click", () => {
     const item = getSelectedItem();
@@ -1020,6 +1389,13 @@ if (detailReset) {
     selectedItemKey = item.source_path;
     renderPlan(currentPlan);
     updateAuditTrail(`Lokale Korrektur zurückgesetzt für ${item.source_path}.`);
+  });
+}
+
+if (collectionBackDashboard) {
+  collectionBackDashboard.addEventListener("click", () => {
+    selectedCollectionKey = "all";
+    setActiveTab("overview");
   });
 }
 

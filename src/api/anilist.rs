@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use reqwest::blocking::Client;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaultError};
 use crate::media::{MediaProperties, MediaType};
@@ -135,7 +135,7 @@ impl AniListClient {
 }
 
 /// A normalized AniList anime result.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AniListAnimeMetadata {
     /// AniList media ID.
     pub anilist_id: u32,
