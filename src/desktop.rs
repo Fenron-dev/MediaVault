@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
@@ -114,12 +115,15 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
         duplicate_policy: DuplicatePolicy::AskUser,
         ..ImportConfig::default()
     });
+    let anilist_client = AniListClient::default();
 
     let mut items = Vec::with_capacity(files.len());
+    let mut anilist_results = Vec::with_capacity(files.len());
     let mut seen_fingerprints = HashSet::new();
 
     for file in &files {
         let mut item = planner.plan_file(file)?;
+        anilist_results.push(resolve_anilist_metadata(&anilist_client, file, &item));
         if let Some(fingerprint) = item.fingerprint.as_ref() {
             let is_duplicate = !seen_fingerprints.insert(fingerprint.hash.clone());
             if is_duplicate {
@@ -169,7 +173,10 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
         items: files
             .iter()
             .zip(items.iter())
-            .map(|(file, item)| DemoPlanItem::from_scanned(file, item))
+            .zip(anilist_results.iter())
+            .map(|((file, item), anilist_metadata)| {
+                DemoPlanItem::from_scanned(file, item, anilist_metadata.as_ref())
+            })
             .collect(),
     })
 }
@@ -179,6 +186,7 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
         duplicate_policy: DuplicatePolicy::AskUser,
         ..ImportConfig::default()
     });
+    let anilist_client = AniListClient::default();
 
     let files = vec![
         IncomingFile {
@@ -237,12 +245,14 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     ];
 
     let mut items = Vec::with_capacity(files.len());
+    let mut anilist_results = Vec::with_capacity(files.len());
     let mut seen_fingerprints = HashSet::new();
 
     for file in &files {
         let mut item = planner
             .plan_file(file)
             .expect("demo planning should succeed");
+        anilist_results.push(resolve_anilist_metadata(&anilist_client, file, &item));
 
         if let Some(fingerprint) = item.fingerprint.as_ref() {
             let is_duplicate = !seen_fingerprints.insert(fingerprint.hash.clone());
@@ -289,7 +299,10 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
         items: files
             .iter()
             .zip(items.iter())
-            .map(|(file, item)| DemoPlanItem::from_scanned(file, item))
+            .zip(anilist_results.iter())
+            .map(|((file, item), anilist_metadata)| {
+                DemoPlanItem::from_scanned(file, item, anilist_metadata.as_ref())
+            })
             .collect(),
     }
 }
@@ -383,6 +396,19 @@ struct DemoPlanItem {
     confidence: Option<f32>,
     title: Option<String>,
     year: Option<u16>,
+    series_title: Option<String>,
+    season_number: Option<u16>,
+    episode_start: Option<u16>,
+    episode_end: Option<u16>,
+    episode_title: Option<String>,
+    episode_count: Option<u16>,
+    runtime_minutes: Option<u16>,
+    average_score: Option<f32>,
+    format: Option<String>,
+    airing_season: Option<String>,
+    anilist_id: Option<u32>,
+    anilist_url: Option<String>,
+    collection_path: String,
     size_bytes: u64,
     folder_segment: String,
     sidecar_path: Option<String>,
@@ -391,16 +417,30 @@ struct DemoPlanItem {
 }
 
 impl DemoPlanItem {
-    fn from_scanned(file: &IncomingFile, item: &ImportPlanItem) -> Self {
+    fn from_scanned(
+        file: &IncomingFile,
+        item: &ImportPlanItem,
+        anilist: Option<&AniListAnimeMetadata>,
+    ) -> Self {
         let classification = item.classification.as_ref().or(file.classification.as_ref());
         let media_type = classification
             .map(|classification| classification.media_type)
             .unwrap_or(MediaType::Unclassified);
         let needs_review = requires_review(item);
-        let target_path = item.target_path.as_ref().map(|path| path.to_string());
-        let preview_path = item
-            .target_path
-            .clone()
+        let title = build_display_title(file, anilist, media_type);
+        let anime_context = derive_anime_context(file, item, anilist, title.as_deref());
+        let collection_path = build_collection_path(media_type, title.as_deref(), anime_context.as_ref());
+        let target_path = build_target_path_preview(
+            file,
+            item,
+            media_type,
+            title.as_deref(),
+            anime_context.as_ref(),
+        );
+        let preview_path = target_path
+            .as_ref()
+            .and_then(|path| RelativePath::new(path).ok())
+            .or_else(|| item.target_path.clone())
             .unwrap_or_else(|| file.source_path.clone());
 
         Self {
@@ -413,15 +453,35 @@ impl DemoPlanItem {
             classification_source: classification
                 .map(|classification| classification_source_label(&classification.source)),
             confidence: classification.map(|classification| classification.confidence),
-            title: file
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.title.clone()),
+            title,
             year: file.metadata.as_ref().and_then(|metadata| metadata.year),
+            series_title: anime_context
+                .as_ref()
+                .and_then(|context| context.series_title.clone()),
+            season_number: anime_context
+                .as_ref()
+                .and_then(|context| context.season_number),
+            episode_start: anime_context
+                .as_ref()
+                .and_then(|context| context.episode_start),
+            episode_end: anime_context
+                .as_ref()
+                .and_then(|context| context.episode_end),
+            episode_title: anime_context
+                .as_ref()
+                .and_then(|context| context.episode_title.clone()),
+            episode_count: anilist.and_then(|metadata| metadata.episodes),
+            runtime_minutes: anilist.and_then(|metadata| metadata.duration),
+            average_score: anilist.and_then(|metadata| metadata.average_score),
+            format: anilist.and_then(|metadata| metadata.format.clone()),
+            airing_season: anilist.and_then(|metadata| metadata.season.clone()),
+            anilist_id: anilist.map(|metadata| metadata.anilist_id),
+            anilist_url: anilist.and_then(|metadata| metadata.anilist_url.clone()),
+            collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
             sidecar_path: sidecar_path_for(&preview_path).ok().map(|path| path.to_string()),
-            sidecar_preview: render_sidecar_preview(file, item, media_type),
+            sidecar_preview: render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref()),
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
         }
     }
@@ -431,6 +491,8 @@ fn render_sidecar_preview(
     file: &IncomingFile,
     item: &ImportPlanItem,
     media_type: MediaType,
+    anilist: Option<&AniListAnimeMetadata>,
+    anime_context: Option<&AnimeEpisodeContext>,
 ) -> String {
     let relative_path = item
         .target_path
@@ -461,8 +523,32 @@ fn render_sidecar_preview(
     } else {
         MediaStatus::Inbox
     });
-    entry.properties.title = file.metadata.as_ref().and_then(|metadata| metadata.title.clone());
-    entry.properties.year = file.metadata.as_ref().and_then(|metadata| metadata.year);
+    entry.properties.title = build_display_title(file, anilist, media_type);
+    entry.properties.title_original = anilist.and_then(|metadata| metadata.title_native.clone());
+    entry.properties.description = anilist.and_then(|metadata| metadata.description.clone());
+    entry.properties.year = anilist.and_then(|metadata| metadata.season_year).or(file.metadata.as_ref().and_then(|metadata| metadata.year));
+    entry.properties.anilist_id = anilist.map(|metadata| metadata.anilist_id);
+    entry.properties.anilist_url = anilist.and_then(|metadata| metadata.anilist_url.clone());
+    entry.properties.series_title = anime_context
+        .and_then(|context| context.series_title.clone())
+        .or_else(|| anilist.and_then(|metadata| metadata.display_title().map(|value| value.to_string())));
+    entry.properties.season_number = anime_context.and_then(|context| context.season_number);
+    entry.properties.episode_start = anime_context.and_then(|context| context.episode_start);
+    entry.properties.episode_end = anime_context.and_then(|context| context.episode_end);
+    entry.properties.episode_title = anime_context.and_then(|context| context.episode_title.clone());
+    entry.properties.episode_count = anilist.and_then(|metadata| metadata.episodes);
+    entry.properties.runtime_minutes = anilist.and_then(|metadata| metadata.duration);
+    entry.properties.average_score = anilist.and_then(|metadata| metadata.average_score);
+    entry.properties.format = anilist.and_then(|metadata| metadata.format.clone());
+    entry.properties.airing_season = anilist.and_then(|metadata| metadata.season.clone());
+    entry.properties.rating_external = anilist.and_then(|metadata| metadata.average_score);
+    entry.properties.genres = anilist
+        .map(|metadata| metadata.genres.clone())
+        .unwrap_or_default();
+    entry.properties.categories = anilist
+        .and_then(|metadata| metadata.format.clone())
+        .map(|format| vec![format])
+        .unwrap_or_default();
     entry.properties.notes = Some(if item.manual_review {
         "Manuelle Prüfung erforderlich".to_string()
     } else if item.duplicate_of.is_some() {
@@ -473,6 +559,455 @@ fn render_sidecar_preview(
     render_sidecar_yaml(&entry).unwrap_or_else(|error| {
         format!("---\nerror: {error}\n---\n")
     })
+}
+
+#[derive(Debug, Clone, Default)]
+struct AnimeEpisodeContext {
+    series_title: Option<String>,
+    season_number: Option<u16>,
+    episode_start: Option<u16>,
+    episode_end: Option<u16>,
+    episode_title: Option<String>,
+}
+
+fn build_display_title(
+    file: &IncomingFile,
+    anilist: Option<&AniListAnimeMetadata>,
+    media_type: MediaType,
+) -> Option<String> {
+    if matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+        if let Some(anilist_title) = anilist.and_then(|metadata| metadata.display_title()) {
+            return Some(anilist_title.to_string());
+        }
+    }
+
+    file.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.title.clone())
+        .or_else(|| {
+            file.source_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })
+        .map(|value| normalize_title_candidate(&value))
+        .filter(|value| !value.is_empty())
+}
+
+fn derive_anime_context(
+    file: &IncomingFile,
+    _item: &ImportPlanItem,
+    anilist: Option<&AniListAnimeMetadata>,
+    series_title_hint: Option<&str>,
+) -> Option<AnimeEpisodeContext> {
+    let media_type = file.classification.as_ref()?.media_type;
+    if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+        return None;
+    }
+
+    let file_name = file
+        .source_path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| file.source_path.to_string());
+    let series_title = anilist
+        .and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
+        .or_else(|| series_title_hint.map(|value| value.to_string()))
+        .or_else(|| extract_anime_series_hint(&file.source_path))
+        .or_else(|| Some(normalize_title_candidate(&file_name)));
+    let season_number = extract_season_number(&file.source_path).or(Some(1));
+    let (episode_start, episode_end) = parse_episode_range(&file_name);
+    let episode_title = parse_episode_title(&file_name, series_title.as_deref());
+
+    Some(AnimeEpisodeContext {
+        series_title,
+        season_number,
+        episode_start,
+        episode_end,
+        episode_title,
+    })
+}
+
+fn build_collection_path(
+    media_type: MediaType,
+    title: Option<&str>,
+    anime_context: Option<&AnimeEpisodeContext>,
+) -> String {
+    match media_type {
+        MediaType::Anime | MediaType::HentaiAnime => {
+            let series = anime_context
+                .and_then(|context| context.series_title.as_deref())
+                .or(title)
+                .unwrap_or("Unbenannt");
+            let season_number = anime_context
+                .and_then(|context| context.season_number)
+                .unwrap_or(1);
+            format!(
+                "Anime/Serien/{}/Staffel {}",
+                sanitize_path_segment(series),
+                season_number
+            )
+        }
+        MediaType::Series => format!(
+            "Series/{}",
+            sanitize_path_segment(title.unwrap_or("Unbenannt"))
+        ),
+        MediaType::Film => format!(
+            "Movies/{}",
+            sanitize_path_segment(title.unwrap_or("Unbenannt"))
+        ),
+        _ => {
+            let folder = media_type.folder_segment();
+            if let Some(title) = title {
+                format!("{folder}/{}", sanitize_path_segment(title))
+            } else {
+                folder.to_string()
+            }
+        }
+    }
+}
+
+fn build_target_path_preview(
+    file: &IncomingFile,
+    item: &ImportPlanItem,
+    media_type: MediaType,
+    title: Option<&str>,
+    anime_context: Option<&AnimeEpisodeContext>,
+) -> Option<String> {
+    if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+        return item.target_path.as_ref().map(|path| path.to_string());
+    }
+
+    let series_title = anime_context
+        .and_then(|context| context.series_title.as_deref())
+        .or(title)
+        .unwrap_or("Unbenannt");
+    let season_number = anime_context
+        .and_then(|context| context.season_number)
+        .unwrap_or(1);
+    let episode_label = anime_context
+        .and_then(|context| format_episode_label(context))
+        .unwrap_or_else(|| {
+            file.source_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_else(|| "episode".to_string())
+        });
+    let extension = file
+        .source_path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_string());
+    let mut path = PathBuf::from("Anime");
+    path.push("Serien");
+    path.push(sanitize_path_segment(series_title));
+    path.push(format!("Staffel {season_number}"));
+    let file_name = match extension {
+        Some(extension) if !extension.is_empty() => {
+            format!(
+                "{} - {}.{}",
+                sanitize_path_segment(series_title),
+                sanitize_path_segment(&episode_label),
+                extension
+            )
+        }
+        _ => format!(
+            "{} - {}",
+            sanitize_path_segment(series_title),
+            sanitize_path_segment(&episode_label)
+        ),
+    };
+    path.push(file_name);
+    Some(path.display().to_string())
+}
+
+fn format_episode_label(context: &AnimeEpisodeContext) -> Option<String> {
+    match (context.episode_start, context.episode_end) {
+        (Some(start), Some(end)) if start != end => Some(format!("{start:02}-{end:02}")),
+        (Some(start), _) => Some(format!("{start:02}")),
+        _ => context.episode_title.clone(),
+    }
+}
+
+fn resolve_anilist_metadata(
+    client: &AniListClient,
+    file: &IncomingFile,
+    item: &ImportPlanItem,
+) -> Option<AniListAnimeMetadata> {
+    let classification = item.classification.as_ref().or(file.classification.as_ref())?;
+    if !matches!(
+        classification.media_type,
+        MediaType::Anime | MediaType::HentaiAnime
+    ) {
+        return None;
+    }
+
+    let search_title = build_anime_search_title(file)?;
+    client
+        .search_anime(&search_title, AniListClient::adult_flag_for(classification.media_type))
+        .ok()
+        .flatten()
+}
+
+fn build_anime_search_title(file: &IncomingFile) -> Option<String> {
+    let raw = file
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.title.clone())
+        .or_else(|| {
+            file.source_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+        })?;
+
+    let cleaned = normalize_title_candidate(&raw);
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+fn normalize_title_candidate(value: &str) -> String {
+    let mut normalized = value.replace(['_', '.'], " ");
+    normalized = strip_bracketed_sections(&normalized);
+    normalized = normalized.replace("  ", " ");
+
+    if let Some((head, tail)) = normalized.rsplit_once(" - ") {
+        if looks_like_episode_fragment(tail) {
+            normalized = head.to_string();
+        }
+    }
+
+    normalized
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_bracketed_sections(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut square_depth = 0usize;
+    let mut round_depth = 0usize;
+
+    for character in value.chars() {
+        match character {
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => round_depth += 1,
+            ')' => round_depth = round_depth.saturating_sub(1),
+            _ if square_depth == 0 && round_depth == 0 => result.push(character),
+            _ => {}
+        }
+    }
+
+    result
+}
+
+fn looks_like_episode_fragment(value: &str) -> bool {
+    let lower = value.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+
+    lower.chars().all(|character| {
+        character.is_ascii_digit() || matches!(character, '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.')
+    }) || lower.contains("episode")
+        || lower.contains("ep")
+}
+
+fn parse_episode_range(value: &str) -> (Option<u16>, Option<u16>) {
+    let lower = value.to_lowercase();
+    if let Some((start, end)) = lower.split_once('+') {
+        return (parse_leading_number(start), parse_leading_number(end));
+    }
+
+    if let Some((start, end)) = lower.split_once('-') {
+        let start_number = parse_leading_number(start);
+        let end_number = parse_leading_number(end);
+        if start_number.is_some() && end_number.is_some() {
+            return (start_number, end_number);
+        }
+    }
+
+    if let Some(number) = extract_number_after_marker(&lower, "episode") {
+        return (Some(number), Some(number));
+    }
+
+    if let Some(number) = extract_number_after_marker(&lower, "ep") {
+        return (Some(number), Some(number));
+    }
+
+    if let Some(number) = extract_short_marker_number(&lower, 'e') {
+        return (Some(number), Some(number));
+    }
+
+    if let Some(number) = trailing_number(&lower) {
+        return (Some(number), Some(number));
+    }
+
+    (None, None)
+}
+
+fn parse_episode_title(value: &str, series_title: Option<&str>) -> Option<String> {
+    let cleaned = normalize_title_candidate(value);
+    if cleaned.is_empty() {
+        return None;
+    }
+
+    if let Some(series_title) = series_title {
+        let lower_cleaned = cleaned.to_lowercase();
+        let lower_series = series_title.to_lowercase();
+        if lower_cleaned == lower_series {
+            return None;
+        }
+        if lower_cleaned.starts_with(&lower_series) {
+            if let Some(rest) = cleaned.get(series_title.len()..) {
+                let rest = rest.trim_start_matches(['-', ':', ' ']).trim();
+                if !rest.is_empty() {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+
+    Some(cleaned)
+}
+
+fn extract_anime_series_hint(relative_path: &RelativePath) -> Option<String> {
+    let mut components = relative_path.as_path().components();
+    while let Some(component) = components.next() {
+        let text = component.as_os_str().to_string_lossy();
+        if text.eq_ignore_ascii_case("anime") {
+            let mut series_candidate = None;
+            for next in components {
+                let candidate = next.as_os_str().to_string_lossy().to_string();
+                if is_season_folder(&candidate) {
+                    continue;
+                }
+                series_candidate = Some(candidate);
+                break;
+            }
+            return series_candidate.map(|value| normalize_title_candidate(&value));
+        }
+    }
+
+    None
+}
+
+fn extract_season_number(relative_path: &RelativePath) -> Option<u16> {
+    let path = relative_path.to_string().to_lowercase();
+    if let Some(number) = extract_number_after_marker(&path, "season ") {
+        return Some(number);
+    }
+    if let Some(number) = extract_number_after_marker(&path, "staffel ") {
+        return Some(number);
+    }
+    if let Some(number) = extract_number_after_marker(&path, "season") {
+        return Some(number);
+    }
+    if let Some(number) = extract_number_after_marker(&path, "staffel") {
+        return Some(number);
+    }
+    if let Some(number) = extract_short_marker_number(&path, 's') {
+        return Some(number);
+    }
+
+    None
+}
+
+fn is_season_folder(value: &str) -> bool {
+    let lower = value.trim().to_lowercase();
+    lower.starts_with("season ")
+        || lower.starts_with("season_")
+        || lower.starts_with("season-")
+        || lower.starts_with("season")
+        || lower.starts_with("staffel ")
+        || lower.starts_with("staffel_")
+        || lower.starts_with("staffel-")
+        || lower.starts_with("staffel")
+        || extract_short_marker_number(&lower, 's').is_some()
+}
+
+fn extract_number_after_marker(value: &str, marker: &str) -> Option<u16> {
+    let index = value.find(marker)?;
+    let tail = &value[index + marker.len()..];
+    parse_leading_number(tail)
+}
+
+fn extract_short_marker_number(value: &str, marker: char) -> Option<u16> {
+    for (index, character) in value.char_indices() {
+        if character != marker {
+            continue;
+        }
+
+        let before_is_boundary = value[..index]
+            .chars()
+            .next_back()
+            .map(|previous| !previous.is_ascii_alphanumeric())
+            .unwrap_or(true);
+        let after_is_digit = value[index + character.len_utf8()..]
+            .chars()
+            .next()
+            .map(|next| next.is_ascii_digit())
+            .unwrap_or(false);
+
+        if before_is_boundary && after_is_digit {
+            return parse_leading_number(&value[index + character.len_utf8()..]);
+        }
+    }
+
+    None
+}
+
+fn parse_leading_number(value: &str) -> Option<u16> {
+    let digits: String = value
+        .chars()
+        .skip_while(|character| !character.is_ascii_digit())
+        .take_while(|character| character.is_ascii_digit())
+        .collect();
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    digits.parse().ok()
+}
+
+fn trailing_number(value: &str) -> Option<u16> {
+    let digits: String = value
+        .chars()
+        .rev()
+        .skip_while(|character| !character.is_ascii_digit())
+        .take_while(|character| character.is_ascii_digit())
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+
+    if digits.is_empty() {
+        return None;
+    }
+
+    digits.parse().ok()
+}
+
+fn sanitize_path_segment(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+
+    for character in value.chars() {
+        let replacement = match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => ' ',
+            control if control.is_control() => ' ',
+            other => other,
+        };
+        sanitized.push(replacement);
+    }
+
+    sanitized
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn classification_source_label(source: &ClassificationSource) -> String {

@@ -28,6 +28,7 @@ const detailConfidence = document.getElementById("detail-confidence");
 const detailSize = document.getElementById("detail-size");
 const detailStatusLabel = document.getElementById("detail-status-label");
 const detailSidecarPath = document.getElementById("detail-sidecar-path");
+const detailEpisodeInfo = document.getElementById("detail-episode-info");
 const detailTitle = document.getElementById("detail-title");
 const detailMediaTypeInput = document.getElementById("detail-media-type-input");
 const detailYear = document.getElementById("detail-year");
@@ -354,6 +355,45 @@ function buildSidecarPreview(item) {
   if (item.year) {
     lines.push(`year: ${item.year}`);
   }
+  if (item.series_title) {
+    lines.push(`series_title: ${yamlScalar(item.series_title)}`);
+  }
+  if (typeof item.season_number === "number") {
+    lines.push(`season_number: ${item.season_number}`);
+  }
+  if (typeof item.episode_start === "number") {
+    lines.push(`episode_start: ${item.episode_start}`);
+  }
+  if (typeof item.episode_end === "number") {
+    lines.push(`episode_end: ${item.episode_end}`);
+  }
+  if (item.episode_title) {
+    lines.push(`episode_title: ${yamlScalar(item.episode_title)}`);
+  }
+  if (typeof item.episode_count === "number") {
+    lines.push(`episode_count: ${item.episode_count}`);
+  }
+  if (typeof item.runtime_minutes === "number") {
+    lines.push(`runtime_minutes: ${item.runtime_minutes}`);
+  }
+  if (typeof item.average_score === "number") {
+    lines.push(`average_score: ${item.average_score}`);
+  }
+  if (item.format) {
+    lines.push(`format: ${yamlScalar(item.format)}`);
+  }
+  if (item.airing_season) {
+    lines.push(`airing_season: ${yamlScalar(item.airing_season)}`);
+  }
+  if (typeof item.anilist_id === "number") {
+    lines.push(`anilist_id: ${item.anilist_id}`);
+  }
+  if (item.anilist_url) {
+    lines.push(`anilist_url: ${yamlScalar(item.anilist_url)}`);
+  }
+  if (item.collection_path) {
+    lines.push(`collection_path: ${yamlScalar(item.collection_path)}`);
+  }
 
   lines.push(`status: ${yamlScalar(status)}`);
 
@@ -505,6 +545,7 @@ function renderDetail(item) {
     if (detailSize) detailSize.textContent = "-";
     if (detailStatusLabel) detailStatusLabel.textContent = "-";
     if (detailSidecarPath) detailSidecarPath.textContent = "-";
+    if (detailEpisodeInfo) detailEpisodeInfo.textContent = "";
     if (detailTitle) detailTitle.value = "";
     if (detailMediaTypeInput) detailMediaTypeInput.value = "unclassified";
     if (detailYear) detailYear.value = "";
@@ -529,6 +570,19 @@ function renderDetail(item) {
   if (detailSize) detailSize.textContent = formatBytes(item.size_bytes);
   if (detailStatusLabel) detailStatusLabel.textContent = statusLabel(item.status || (item.needs_review ? "needs-review" : "inbox"));
   if (detailSidecarPath) detailSidecarPath.textContent = item.sidecar_path ?? "-";
+  if (detailEpisodeInfo) {
+    const series = item.series_title || item.title || "Unbekannt";
+    const season = typeof item.season_number === "number" ? `Staffel ${item.season_number}` : "Staffel -";
+    const episodeStart = typeof item.episode_start === "number" ? `Folge ${item.episode_start}` : "Folge -";
+    const episodeEnd =
+      typeof item.episode_end === "number" && item.episode_end !== item.episode_start
+        ? ` bis ${item.episode_end}`
+        : "";
+    const runtime = typeof item.runtime_minutes === "number" ? `${item.runtime_minutes} Min.` : "-";
+    const score = typeof item.average_score === "number" ? `${Math.round(item.average_score)} / 100` : "-";
+    const url = item.anilist_url ? `AniList: ${item.anilist_url}` : "AniList: -";
+    detailEpisodeInfo.textContent = `${series} | ${season} | ${episodeStart}${episodeEnd} | Laufzeit ${runtime} | Score ${score} | ${url}`;
+  }
 
   if (detailTitle) detailTitle.value = item.title ?? "";
   if (detailMediaTypeInput) detailMediaTypeInput.value = item.media_type ?? "unclassified";
@@ -559,7 +613,7 @@ function renderPlan(plan) {
 }
 
 function buildCollectionCatalog(items) {
-  const collections = [
+  const staticCollections = [
     {
       key: "all",
       label: "Alle Dateien",
@@ -645,7 +699,24 @@ function buildCollectionCatalog(items) {
     },
   ];
 
-  return collections;
+  const pathCollections = Array.from(
+    new Map(
+      items
+        .map((item) => item.collection_path)
+        .filter((value) => typeof value === "string" && value.length > 0)
+        .map((value) => [value, value])
+    ).values()
+  )
+    .sort((left, right) => left.localeCompare(right))
+    .map((path) => ({
+      key: `path:${path}`,
+      label: path.split("/").join(" > "),
+      description: "Pfadbasierte Sammlung aus AniList- und Vault-Metadaten.",
+      rule: path,
+      items: items.filter((item) => item.collection_path === path),
+    }));
+
+  return [...staticCollections, ...pathCollections];
 }
 
 function renderCollectionMeta(collection) {

@@ -22,6 +22,8 @@ pub enum VaultError {
     AppStartup(String),
     /// Metadata serialization failed.
     Serialization(String),
+    /// An external metadata API failed.
+    ExternalApi(String),
     /// Duplicate detection could not be performed.
     DuplicateDetectionUnavailable,
     /// The code could not determine a file name.
@@ -42,6 +44,7 @@ impl Display for VaultError {
             Self::Planning(message) => write!(f, "import planning failed: {message}"),
             Self::AppStartup(message) => write!(f, "app startup failed: {message}"),
             Self::Serialization(message) => write!(f, "serialization failed: {message}"),
+            Self::ExternalApi(message) => write!(f, "external api failure: {message}"),
             Self::DuplicateDetectionUnavailable => write!(f, "duplicate detection unavailable"),
             Self::MissingFileName => write!(f, "missing file name"),
             Self::Io(message) => write!(f, "i/o failure: {message}"),

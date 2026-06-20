@@ -290,6 +290,32 @@ pub struct MediaProperties {
     pub rating: Option<f32>,
     /// Provider rating.
     pub rating_external: Option<f32>,
+    /// AniList identifier when available.
+    pub anilist_id: Option<u32>,
+    /// AniList detail URL.
+    pub anilist_url: Option<String>,
+    /// Canonical series title for episodic content.
+    pub series_title: Option<String>,
+    /// Number of the current season when known.
+    pub season_number: Option<u16>,
+    /// Season label or arc title when known.
+    pub season_name: Option<String>,
+    /// Start episode number for the file.
+    pub episode_start: Option<u16>,
+    /// End episode number for the file.
+    pub episode_end: Option<u16>,
+    /// Optional episode title.
+    pub episode_title: Option<String>,
+    /// Total episode count in the source series.
+    pub episode_count: Option<u16>,
+    /// Episode or runtime length in minutes.
+    pub runtime_minutes: Option<u16>,
+    /// Average community score from the provider.
+    pub average_score: Option<f32>,
+    /// Provider format, for example TV or Movie.
+    pub format: Option<String>,
+    /// Seasonal airing label.
+    pub airing_season: Option<String>,
     /// Relative path to the assigned cover image.
     pub cover_path: Option<RelativePath>,
     /// Relative path to the generated thumbnail image.
@@ -319,6 +345,19 @@ impl Default for MediaProperties {
             status: Some(MediaStatus::Inbox),
             rating: None,
             rating_external: None,
+            anilist_id: None,
+            anilist_url: None,
+            series_title: None,
+            season_number: None,
+            season_name: None,
+            episode_start: None,
+            episode_end: None,
+            episode_title: None,
+            episode_count: None,
+            runtime_minutes: None,
+            average_score: None,
+            format: None,
+            airing_season: None,
             cover_path: None,
             thumbnail_path: None,
             notes: None,
