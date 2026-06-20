@@ -38,7 +38,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 280px;
+  grid-template-columns: 260px minmax(0, 1fr) 340px;
   min-height: 100vh;
 }
 
@@ -635,6 +635,35 @@ h3 {
   font-size: 0.84rem;
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+.table-sort {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+
+.table-sort.is-active {
+  color: var(--text);
+}
+
+.table-sort::after {
+  content: "";
+}
+
+.table-sort.is-active[data-direction="asc"]::after {
+  content: "  ^";
+}
+
+.table-sort.is-active[data-direction="desc"]::after {
+  content: "  v";
 }
 
 .chips {
@@ -1272,6 +1301,19 @@ h3 {
   display: none;
 }
 
+.collection-series-view .collection-viewbar,
+.collection-series-view .collection-table {
+  display: none;
+}
+
+.collection-force-list .collection-card-grid {
+  display: none;
+}
+
+.collection-force-list .collection-table {
+  display: block;
+}
+
 .collection-table {
   margin-top: 18px;
 }
@@ -1320,6 +1362,29 @@ h3 {
   min-width: 0;
 }
 
+.inspector-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.icon-button {
+  width: 42px;
+  min-width: 42px;
+  min-height: 42px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  text-align: center;
+  font-size: 1.1rem;
+}
+
+.icon-button.is-active {
+  background: rgba(122, 168, 116, 0.18);
+  border-color: rgba(122, 168, 116, 0.46);
+}
+
 .property-list {
   display: grid;
   gap: 0;
@@ -1330,10 +1395,14 @@ h3 {
 }
 
 .inspector-actions {
-  display: grid;
+  display: none;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 12px;
+}
+
+.inspector-editing .inspector-actions {
+  display: grid;
 }
 
 .inspector-actions .danger {
@@ -1407,9 +1476,15 @@ h3 {
 
 .property-row {
   display: grid;
-  grid-template-columns: minmax(120px, 0.42fr) minmax(84px, 0.18fr) minmax(0, 1fr);
-  gap: 10px 12px;
+  grid-template-columns: minmax(120px, 0.65fr) minmax(0, 1fr);
+  gap: 10px 14px;
   align-items: start;
+}
+
+.property-row-meta {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
 .property-row strong {
@@ -1433,6 +1508,7 @@ h3 {
   color: var(--text);
   line-height: 1.4;
   overflow-wrap: break-word;
+  margin: 0;
 }
 
 .property-empty {

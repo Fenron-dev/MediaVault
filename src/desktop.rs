@@ -934,18 +934,9 @@ fn build_target_path_preview(
     path.push(format!("Staffel {season_number}"));
     let file_name = match extension {
         Some(extension) if !extension.is_empty() => {
-            format!(
-                "{} - {}.{}",
-                sanitize_path_segment(series_title),
-                sanitize_path_segment(&episode_label),
-                extension
-            )
+            format!("{}.{}", sanitize_path_segment(&episode_label), extension)
         }
-        _ => format!(
-            "{} - {}",
-            sanitize_path_segment(series_title),
-            sanitize_path_segment(&episode_label)
-        ),
+        _ => sanitize_path_segment(&episode_label),
     };
     path.push(file_name);
     Some(path.display().to_string())
@@ -959,10 +950,31 @@ fn is_anilist_movie(anilist: Option<&AniListAnimeMetadata>) -> bool {
 }
 
 fn format_episode_label(context: &AnimeEpisodeContext) -> Option<String> {
+    let season = context.season_number.unwrap_or(1);
     match (context.episode_start, context.episode_end) {
-        (Some(start), Some(end)) if start != end => Some(format!("{start:02}-{end:02}")),
-        (Some(start), _) => Some(format!("{start:02}")),
-        _ => context.episode_title.clone(),
+        (Some(start), Some(end)) if start != end => {
+            let label = format!("S{season:02}E{start:02}-E{end:02}");
+            Some(match context.episode_title.as_deref() {
+                Some(title) if !title.trim().is_empty() => {
+                    format!("{label} - {}", sanitize_path_segment(title))
+                }
+                _ => label,
+            })
+        }
+        (Some(start), _) => {
+            let label = format!("S{season:02}E{start:02}");
+            Some(match context.episode_title.as_deref() {
+                Some(title) if !title.trim().is_empty() => {
+                    format!("{label} - {}", sanitize_path_segment(title))
+                }
+                _ => label,
+            })
+        }
+        _ => context
+            .episode_title
+            .as_deref()
+            .map(sanitize_path_segment)
+            .filter(|title| !title.is_empty()),
     }
 }
 

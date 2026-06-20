@@ -272,11 +272,11 @@
 
               <div class="collection-profile" id="collection-profile"></div>
 
-              <div class="collection-viewbar">
+              <div class="collection-viewbar" id="collection-viewbar">
                 <p class="panel-label">Inhalt</p>
                 <div class="collection-view-actions">
                   <button class="action-button compact" id="collection-multi-toggle">Mehrfachauswahl</button>
-                  <div class="segmented-control" aria-label="Ansicht wechseln">
+                  <div class="segmented-control" id="collection-view-toggle" aria-label="Ansicht wechseln">
                     <button class="is-active" data-collection-view="cover">Cover</button>
                     <button data-collection-view="list">Liste</button>
                   </div>
@@ -287,9 +287,9 @@
 
               <div class="table collection-table">
                 <div class="table-row table-head">
-                  <span>Name</span>
-                  <span>Typ</span>
-                  <span>Inhalt</span>
+                  <button type="button" class="table-sort is-active" id="collection-sort-name">Name</button>
+                  <button type="button" class="table-sort" id="collection-sort-type">Typ</button>
+                  <button type="button" class="table-sort" id="collection-sort-target">Inhalt</button>
                 </div>
                 <div id="collection-rows"></div>
               </div>
@@ -432,10 +432,14 @@
         </button>
 
         <section class="panel tight inspector-panel">
-          <p class="panel-label">Properties</p>
-          <h3 id="inspector-title">Kein Eintrag ausgewählt</h3>
+          <div class="inspector-header">
+            <div>
+              <p class="panel-label">Properties</p>
+              <h3 id="inspector-title">Kein Eintrag ausgewählt</h3>
+            </div>
+            <button class="action-button icon-button" id="inspector-edit-toggle" aria-label="Bearbeiten">✎</button>
+          </div>
           <div class="inspector-actions">
-            <button class="action-button" id="inspector-edit-toggle">Titel & Typ bearbeiten</button>
             <button class="action-button" id="inspector-fetch-metadata">AniList abrufen</button>
             <button class="action-button" id="inspector-not-duplicate">Kein Duplikat</button>
             <button class="action-button danger" id="inspector-trash">In Papierkorb</button>

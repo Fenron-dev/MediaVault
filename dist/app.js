@@ -25,6 +25,11 @@ const collectionProfile = document.getElementById("collection-profile");
 const collectionCards = document.getElementById("collection-cards");
 const collectionRows = document.getElementById("collection-rows");
 const collectionMultiToggle = document.getElementById("collection-multi-toggle");
+const collectionViewBar = document.getElementById("collection-viewbar");
+const collectionViewToggle = document.getElementById("collection-view-toggle");
+const collectionSortName = document.getElementById("collection-sort-name");
+const collectionSortType = document.getElementById("collection-sort-type");
+const collectionSortTarget = document.getElementById("collection-sort-target");
 const collectionEditor = document.getElementById("collection-editor");
 const collectionEditorTitle = document.getElementById("collection-editor-title");
 const collectionEditorSubtitle = document.getElementById("collection-editor-subtitle");
@@ -181,6 +186,8 @@ let yamlOverrides = loadStoredJson(yamlOverridesKey, {});
 let pathTemplates = normalizeTemplateConfig(loadStoredJson(pathTemplatesKey, defaultPathTemplates()));
 let auditTrail = loadStoredJson(auditTrailKey, []);
 let collectionView = localStorage.getItem(collectionViewKey) || "cover";
+let collectionSortKey = "name";
+let collectionSortDirection = "asc";
 let inspectorItemKey = "";
 let inspectorSelection = null;
 let recentCollections = loadStoredJson(recentCollectionsKey, []);
@@ -193,6 +200,8 @@ let pendingAniListTargets = [];
 let pendingAniListFeedback = null;
 
 function setActiveTab(tab, options = {}) {
+  document.body.classList.remove("inspector-editing", "property-add-open");
+
   if (tab === "collections" && options.resetCollections) {
     selectedCollectionKey = "";
     selectedCollectionItemKey = "";
@@ -329,17 +338,27 @@ async function createVault(parent, name) {
 
 function defaultPathTemplates() {
   return {
-    animeTv: "Anime/Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}",
+    animeTv: "Anime/Serien/{series}/Staffel {season}/{episode_label}.{ext}",
     animeMovie: "Anime/Filme/{title} ({year})/{title} ({year}).{ext}",
-    series: "Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}",
+    series: "Serien/{series}/Staffel {season}/{episode_label}.{ext}",
     film: "Filme/{title} ({year})/{title} ({year}).{ext}",
   };
 }
 
 function normalizeTemplateConfig(value) {
+  const config = value && typeof value === "object" ? value : {};
+  const defaults = defaultPathTemplates();
   return {
-    ...defaultPathTemplates(),
-    ...(value && typeof value === "object" ? value : {}),
+    ...defaults,
+    ...config,
+    animeTv:
+      config.animeTv === "Anime/Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}"
+        ? defaults.animeTv
+        : config.animeTv || defaults.animeTv,
+    series:
+      config.series === "Serien/{series}/Staffel {season}/{series} - {episode_label}.{ext}"
+        ? defaults.series
+        : config.series || defaults.series,
   };
 }
 
@@ -832,12 +851,18 @@ function episodeFileLabel(item) {
     return sanitizeSegment(item.title || fileStem(item.source_path) || "Episode");
   }
 
+  const season = String(item.season_number || marker.season || 1).padStart(2, "0");
   const start = String(marker.episodeStart).padStart(2, "0");
   const end = marker.episodeEnd && marker.episodeEnd !== marker.episodeStart
-    ? `-${String(marker.episodeEnd).padStart(2, "0")}`
+    ? `-E${String(marker.episodeEnd).padStart(2, "0")}`
     : "";
   const episodeTitle = deriveEpisodeTitle(item);
-  return episodeTitle ? `E${start}${end} - ${sanitizeSegment(episodeTitle)}` : `E${start}${end}`;
+  const label = `S${season}E${start}${end}`;
+  return episodeTitle ? `${label} - ${sanitizeSegment(episodeTitle)}` : label;
+}
+
+function needsReviewInUi(item) {
+  return Boolean((item.needs_review || item.duplicate_of) && !item.has_correction);
 }
 
 function projectItem(item) {
@@ -965,7 +990,7 @@ function projectPlan(plan) {
     .map((item) => projectItem(item));
   if (cloned.summary) {
     cloned.summary.total_files = cloned.items.length;
-    cloned.summary.items_needing_review = cloned.items.filter((item) => item.needs_review).length;
+    cloned.summary.items_needing_review = cloned.items.filter((item) => needsReviewInUi(item)).length;
     cloned.summary.duplicates = cloned.items.filter((item) => item.duplicate_of).length;
   }
   return cloned;
@@ -1608,7 +1633,7 @@ function renderInboxRows(items) {
   items.forEach((item) => {
     const status = item.duplicate_of
       ? "Duplikat"
-      : item.needs_review
+      : needsReviewInUi(item)
       ? "Review"
       : "klar";
     const target = item.duplicate_of || item.needs_review
@@ -1625,7 +1650,7 @@ function renderReviewRows(items) {
 
   clearNode(reviewRows);
 
-  const reviewItems = items.filter((item) => item.needs_review || item.duplicate_of);
+  const reviewItems = items.filter((item) => needsReviewInUi(item));
 
   reviewItems.forEach((item) => {
     const status = item.duplicate_of
@@ -1644,6 +1669,20 @@ function renderReviewRows(items) {
   if (!selectedItemKey && reviewItems.length) {
     selectedItemKey = reviewItems[0].source_path;
   }
+}
+
+function syncCollectionSortButtons() {
+  [
+    [collectionSortName, "name"],
+    [collectionSortType, "type"],
+    [collectionSortTarget, "target"],
+  ].forEach(([button, key]) => {
+    if (!button) {
+      return;
+    }
+    button.classList.toggle("is-active", collectionSortKey === key);
+    button.dataset.direction = collectionSortKey === key ? collectionSortDirection : "";
+  });
 }
 
 function renderDetail(item) {
@@ -1689,7 +1728,7 @@ function renderDetail(item) {
   }
   if (detailConfidence) detailConfidence.textContent = formatConfidence(item.confidence);
   if (detailSize) detailSize.textContent = formatBytes(item.size_bytes);
-  if (detailStatusLabel) detailStatusLabel.textContent = statusLabel(item.status || (item.needs_review ? "needs-review" : "inbox"));
+  if (detailStatusLabel) detailStatusLabel.textContent = statusLabel(item.status || (needsReviewInUi(item) ? "needs-review" : "inbox"));
   if (detailSidecarPath) detailSidecarPath.textContent = item.sidecar_path ?? "-";
   if (detailEpisodeInfo) {
     const series = item.series_title || item.title || "Unbekannt";
@@ -1708,7 +1747,7 @@ function renderDetail(item) {
   if (detailTitle) detailTitle.value = item.title ?? "";
   if (detailMediaTypeInput) detailMediaTypeInput.value = mediaSelectionValue(item);
   if (detailYear) detailYear.value = item.year ?? "";
-  if (detailStatus) detailStatus.value = item.status ?? (item.needs_review ? "needs-review" : "inbox");
+  if (detailStatus) detailStatus.value = item.status ?? (needsReviewInUi(item) ? "needs-review" : "inbox");
   if (detailNotes) detailNotes.value = item.notes ?? "";
   if (detailSidecarPreview) detailSidecarPreview.textContent = item.sidecar_preview;
   if (currentActiveTab() !== "collections") {
@@ -1795,7 +1834,7 @@ function propertyEntriesFor(value) {
     ["episode_start", item.episode_start],
     ["episode_end", item.episode_end],
     ["year", item.year],
-    ["status", item.status ? statusLabel(item.status) : item.needs_review ? "Prüfung nötig" : null],
+    ["status", item.status ? statusLabel(item.status) : needsReviewInUi(item) ? "Prüfung nötig" : null],
     ["anilist_id", item.anilist_id],
     ["anilist_url", item.anilist_url],
     ["mal_id", item.mal_id],
@@ -1821,9 +1860,13 @@ function propertyEntriesFor(value) {
 }
 
 function renderInspector(value) {
+  const previousInspectorKey = inspectorItemKey;
   const selection = normalizeSelection(value);
   inspectorSelection = selection;
   inspectorItemKey = selection?.key ?? "";
+  if (previousInspectorKey && previousInspectorKey !== inspectorItemKey) {
+    document.body.classList.remove("inspector-editing", "property-add-open");
+  }
   const item = selection?.item ?? null;
   const editable = selectionEditable(selection);
   const metadataAllowed = selectionSupportsMetadata(selection);
@@ -1842,7 +1885,7 @@ function renderInspector(value) {
     inspectorYear.value = item?.year ?? "";
   }
   if (inspectorStatus) {
-    inspectorStatus.value = item?.status ?? (item?.needs_review ? "needs-review" : "inbox");
+    inspectorStatus.value = item?.status ?? (item && needsReviewInUi(item) ? "needs-review" : "inbox");
   }
 
   if (inspectorProperties) {
@@ -1858,6 +1901,8 @@ function renderInspector(value) {
         const row = document.createElement("div");
         row.className = "property-row";
 
+        const meta = document.createElement("div");
+        meta.className = "property-row-meta";
         const name = document.createElement("strong");
         name.textContent = key;
         const type = document.createElement("span");
@@ -1865,8 +1910,9 @@ function renderInspector(value) {
         const body = document.createElement("p");
         body.textContent = propertyDisplayValue(value);
 
-        row.appendChild(name);
-        row.appendChild(type);
+        meta.appendChild(name);
+        meta.appendChild(type);
+        row.appendChild(meta);
         row.appendChild(body);
         inspectorProperties.appendChild(row);
       });
@@ -1885,9 +1931,8 @@ function renderInspector(value) {
   }
   if (inspectorEditToggle) {
     inspectorEditToggle.disabled = !editable;
-    inspectorEditToggle.textContent = document.body.classList.contains("inspector-editing")
-      ? "Edit schließen"
-      : "Titel & Typ bearbeiten";
+    inspectorEditToggle.classList.toggle("is-active", document.body.classList.contains("inspector-editing"));
+    inspectorEditToggle.textContent = "✎";
   }
   if (inspectorFetchMetadata) {
     inspectorFetchMetadata.disabled = !metadataAllowed;
@@ -1991,9 +2036,14 @@ function findCollectionNode(root, path) {
 }
 
 function sortedChildren(node) {
-  return Array.from(node.children.values()).sort((left, right) =>
-    left.label.localeCompare(right.label, "de")
-  );
+  return Array.from(node.children.values()).sort((left, right) => {
+    const leftSeason = left.label.match(/^Staffel\s+(\d+)$/i);
+    const rightSeason = right.label.match(/^Staffel\s+(\d+)$/i);
+    if (leftSeason && rightSeason) {
+      return Number.parseInt(leftSeason[1], 10) - Number.parseInt(rightSeason[1], 10);
+    }
+    return left.label.localeCompare(right.label, "de");
+  });
 }
 
 function parentPath(path) {
@@ -2235,7 +2285,7 @@ function renderCollectionMeta(node) {
 
   const children = sortedChildren(node);
   const totalBytes = node.items.reduce((sum, item) => sum + (item.size_bytes || 0), 0);
-  const reviewCount = node.items.filter((item) => item.needs_review).length;
+  const reviewCount = node.items.filter((item) => needsReviewInUi(item)).length;
 
   [
     ["Ordner", `${children.length}`],
@@ -2447,37 +2497,6 @@ function renderCollectionProfile(node) {
     heading.appendChild(tagBar);
   }
 
-  const actions = document.createElement("div");
-  actions.className = "media-actionbar";
-  const editButton = document.createElement("button");
-  editButton.type = "button";
-  editButton.className = "action-button";
-  editButton.textContent = "Titel bearbeiten";
-  editButton.addEventListener("click", () => {
-    renderInspector({ type: "node", node });
-    document.body.classList.add("inspector-editing");
-    inspectorName?.focus();
-  });
-  const metadataButton = document.createElement("button");
-  metadataButton.type = "button";
-  metadataButton.className = "action-button";
-  metadataButton.textContent = "AniList abrufen";
-  metadataButton.addEventListener("click", () => {
-    renderInspector({ type: "node", node });
-    inspectorFetchMetadata?.click();
-  });
-  const trashButton = document.createElement("button");
-  trashButton.type = "button";
-  trashButton.className = "action-button danger";
-  trashButton.textContent = "In Papierkorb";
-  trashButton.addEventListener("click", () => {
-    trashSelection(normalizeSelection({ type: "node", node }));
-  });
-  actions.appendChild(editButton);
-  actions.appendChild(metadataButton);
-  actions.appendChild(trashButton);
-  heading.appendChild(actions);
-
   profile.appendChild(cover);
   profile.appendChild(heading);
 
@@ -2491,11 +2510,11 @@ function renderCollectionProfile(node) {
 
   collectionProfile.appendChild(profile);
 
-  const stack = document.createElement("div");
-  stack.className = "media-section-stack";
-
+  const kind = collectionNodeKind(node);
   const children = sortedChildren(node);
   if (children.length) {
+    const stack = document.createElement("div");
+    stack.className = "media-section-stack";
     const seasons = createMediaSection("Staffeln", `${children.length} Einträge in dieser Serie`);
     const cards = document.createElement("div");
     cards.className = "season-card-row";
@@ -2504,42 +2523,77 @@ function renderCollectionProfile(node) {
     });
     seasons.appendChild(cards);
     stack.appendChild(seasons);
+    if (kind !== "series") {
+      const synopsis = createMediaSection("Synopsis");
+      const synopsisText = document.createElement("p");
+      synopsisText.className = "media-synopsis";
+      synopsisText.textContent = description.textContent;
+      synopsis.appendChild(synopsisText);
+      stack.appendChild(synopsis);
+
+      const details = createMediaSection("Details");
+      details.appendChild(createDetailsGrid(primary));
+      stack.appendChild(details);
+
+      if (Array.isArray(primary.relations) && primary.relations.length) {
+        const relations = createMediaSection("Relations");
+        const relationGrid = document.createElement("div");
+        relationGrid.className = "relation-grid";
+        primary.relations.slice(0, 6).forEach((relation) => {
+          const card = document.createElement("div");
+          card.className = "relation-card";
+          const relationType = document.createElement("span");
+          relationType.textContent = relation.relation_type || "Verknüpft";
+          const title = document.createElement("strong");
+          title.textContent = relation.title || "Unbekannt";
+          const meta = document.createElement("p");
+          meta.textContent = [relation.media_type, relation.format].filter(Boolean).join(" · ");
+          card.appendChild(relationType);
+          card.appendChild(title);
+          card.appendChild(meta);
+          relationGrid.appendChild(card);
+        });
+        relations.appendChild(relationGrid);
+        stack.appendChild(relations);
+      }
+    }
+    collectionProfile.appendChild(stack);
+  } else if (kind !== "series") {
+    const stack = document.createElement("div");
+    stack.className = "media-section-stack";
+    const synopsis = createMediaSection("Synopsis");
+    const synopsisText = document.createElement("p");
+    synopsisText.className = "media-synopsis";
+    synopsisText.textContent = description.textContent;
+    synopsis.appendChild(synopsisText);
+    stack.appendChild(synopsis);
+
+    const details = createMediaSection("Details");
+    details.appendChild(createDetailsGrid(primary));
+    stack.appendChild(details);
+    if (Array.isArray(primary.relations) && primary.relations.length) {
+      const relations = createMediaSection("Relations");
+      const relationGrid = document.createElement("div");
+      relationGrid.className = "relation-grid";
+      primary.relations.slice(0, 6).forEach((relation) => {
+        const card = document.createElement("div");
+        card.className = "relation-card";
+        const relationType = document.createElement("span");
+        relationType.textContent = relation.relation_type || "Verknüpft";
+        const title = document.createElement("strong");
+        title.textContent = relation.title || "Unbekannt";
+        const meta = document.createElement("p");
+        meta.textContent = [relation.media_type, relation.format].filter(Boolean).join(" · ");
+        card.appendChild(relationType);
+        card.appendChild(title);
+        card.appendChild(meta);
+        relationGrid.appendChild(card);
+      });
+      relations.appendChild(relationGrid);
+      stack.appendChild(relations);
+    }
+    collectionProfile.appendChild(stack);
   }
-
-  const synopsis = createMediaSection("Synopsis");
-  const synopsisText = document.createElement("p");
-  synopsisText.className = "media-synopsis";
-  synopsisText.textContent = description.textContent;
-  synopsis.appendChild(synopsisText);
-  stack.appendChild(synopsis);
-
-  const details = createMediaSection("Details");
-  details.appendChild(createDetailsGrid(primary));
-  stack.appendChild(details);
-
-  if (Array.isArray(primary.relations) && primary.relations.length) {
-    const relations = createMediaSection("Relations");
-    const relationGrid = document.createElement("div");
-    relationGrid.className = "relation-grid";
-    primary.relations.slice(0, 6).forEach((relation) => {
-      const card = document.createElement("div");
-      card.className = "relation-card";
-      const relationType = document.createElement("span");
-      relationType.textContent = relation.relation_type || "Verknüpft";
-      const title = document.createElement("strong");
-      title.textContent = relation.title || "Unbekannt";
-      const meta = document.createElement("p");
-      meta.textContent = [relation.media_type, relation.format].filter(Boolean).join(" · ");
-      card.appendChild(relationType);
-      card.appendChild(title);
-      card.appendChild(meta);
-      relationGrid.appendChild(card);
-    });
-    relations.appendChild(relationGrid);
-    stack.appendChild(relations);
-  }
-
-  collectionProfile.appendChild(stack);
 }
 
 function createMediaSection(title, subtitle = "") {
@@ -2746,7 +2800,6 @@ function createCollectionItemRow(item) {
     }
     selectedItemKey = item.source_path;
     selectedCollectionItemKey = item.source_path;
-    renderCollectionEditor(item);
     renderInspector(item);
     renderCollectionRows(findCollectionNode(buildCollectionTree(currentPlan?.items ?? []), selectedCollectionKey));
     if (statusStrip) {
@@ -2779,7 +2832,7 @@ function renderCollectionRows(node) {
   });
 
   if (!sortedChildren(node).length) {
-    node.directItems.forEach((item) => {
+    sortedCollectionItems(node.directItems).forEach((item) => {
       collectionRows.appendChild(createCollectionItemRow(item));
     });
   }
@@ -2814,9 +2867,46 @@ function renderCollectionCards(node) {
   }
 }
 
-function syncCollectionViewMode() {
-  document.body.classList.toggle("collection-list-view", collectionView === "list");
-  document.body.classList.toggle("collection-cover-view", collectionView !== "list");
+function compareCollectionItem(left, right) {
+  if (collectionSortKey === "type") {
+    return mediaTypeLabel(mediaSelectionValue(left)).localeCompare(mediaTypeLabel(mediaSelectionValue(right)), "de");
+  }
+
+  if (collectionSortKey === "target") {
+    return String(left.target_path || left.status || "")
+      .localeCompare(String(right.target_path || right.status || ""), "de");
+  }
+
+  const leftSeason = left.season_number || episodeMarker(left.source_path)?.season || 1;
+  const rightSeason = right.season_number || episodeMarker(right.source_path)?.season || 1;
+  const leftEpisode = left.episode_start || episodeMarker(left.source_path)?.episodeStart || 0;
+  const rightEpisode = right.episode_start || episodeMarker(right.source_path)?.episodeStart || 0;
+
+  if (leftSeason !== rightSeason) {
+    return leftSeason - rightSeason;
+  }
+  if (leftEpisode !== rightEpisode) {
+    return leftEpisode - rightEpisode;
+  }
+
+  return String(left.title || left.source_path).localeCompare(String(right.title || right.source_path), "de");
+}
+
+function sortedCollectionItems(items) {
+  const sorted = [...items].sort(compareCollectionItem);
+  return collectionSortDirection === "desc" ? sorted.reverse() : sorted;
+}
+
+function syncCollectionViewMode(node = null) {
+  const kind = node ? collectionNodeKind(node) : null;
+  const forceList = kind === "season" || kind === "movie";
+  const hideContent = kind === "series";
+  const effectiveView = forceList ? "list" : collectionView;
+
+  document.body.classList.toggle("collection-list-view", effectiveView === "list");
+  document.body.classList.toggle("collection-cover-view", effectiveView !== "list");
+  document.body.classList.toggle("collection-force-list", forceList);
+  document.body.classList.toggle("collection-series-view", hideContent);
   document.body.classList.toggle("collection-bulk-mode", isMultiEdit);
   if (collectionMultiToggle) {
     collectionMultiToggle.classList.toggle("is-active", isMultiEdit);
@@ -2824,9 +2914,16 @@ function syncCollectionViewMode() {
       ? `Auswahl beenden (${multiSelectedKeys.size})`
       : "Mehrfachauswahl";
   }
+  if (collectionViewBar) {
+    collectionViewBar.hidden = hideContent;
+  }
+  if (collectionViewToggle) {
+    collectionViewToggle.hidden = forceList || hideContent;
+  }
   document.querySelectorAll("[data-collection-view]").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.collectionView === collectionView);
+    button.classList.toggle("is-active", button.dataset.collectionView === effectiveView);
   });
+  syncCollectionSortButtons();
 }
 
 function renderCollections(items) {
@@ -2855,7 +2952,9 @@ function renderCollections(items) {
     if (collectionCards) {
       clearNode(collectionCards);
     }
-    renderCollectionEditor(null);
+    if (collectionEditor) {
+      collectionEditor.hidden = true;
+    }
     renderInspector(null);
     return;
   }
@@ -2879,30 +2978,25 @@ function renderCollections(items) {
   renderCollectionBreadcrumb(selected);
   renderCollectionMeta(selected);
   renderCollectionProfile(selected);
-  const hideSeasonContent = collectionNodeKind(selected) === "series";
+  const selectedKind = collectionNodeKind(selected);
+  const hideSeasonContent = selectedKind === "series";
   if (collectionRows) {
     collectionRows.hidden = hideSeasonContent;
   }
   if (collectionEditor) {
-    collectionEditor.hidden = hideSeasonContent;
+    collectionEditor.hidden = true;
   }
   renderCollectionRows(selected);
   renderCollectionCards(selected);
-  syncCollectionViewMode();
+  syncCollectionViewMode(selected);
 
   const selectedItem = selected.directItems.find((item) => item.source_path === selectedCollectionItemKey);
-  if (hideSeasonContent) {
-    renderCollectionEditor(null);
-    if (collectionEditor) {
-      collectionEditor.hidden = true;
-    }
-  } else {
-    renderCollectionEditor(selectedItem ?? null);
-  }
   if (isMultiEdit && currentActiveTab() === "collections") {
     renderBulkInspector();
   } else if (!selectedItem && currentActiveTab() === "collections") {
     renderInspector({ type: "node", node: selected });
+  } else if (selectedItem && currentActiveTab() === "collections") {
+    renderInspector(selectedItem);
   }
 }
 
@@ -3565,11 +3659,31 @@ if (inspectorEditToggle) {
       return;
     }
     document.body.classList.toggle("inspector-editing");
-    inspectorEditToggle.textContent = document.body.classList.contains("inspector-editing")
-      ? "Edit schließen"
-      : "Titel & Typ bearbeiten";
+    inspectorEditToggle.classList.toggle("is-active", document.body.classList.contains("inspector-editing"));
   });
 }
+
+[
+  [collectionSortName, "name"],
+  [collectionSortType, "type"],
+  [collectionSortTarget, "target"],
+].forEach(([button, key]) => {
+  if (!button) {
+    return;
+  }
+
+  button.addEventListener("click", () => {
+    if (collectionSortKey === key) {
+      collectionSortDirection = collectionSortDirection === "asc" ? "desc" : "asc";
+    } else {
+      collectionSortKey = key;
+      collectionSortDirection = key === "name" ? "asc" : "desc";
+    }
+
+    syncCollectionSortButtons();
+    renderCollections(currentPlan?.items ?? []);
+  });
+});
 
 if (inspectorPropertyAddToggle) {
   inspectorPropertyAddToggle.addEventListener("click", () => {
