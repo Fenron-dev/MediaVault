@@ -7,13 +7,14 @@ use std::path::{Path, PathBuf};
 
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
+use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
 };
 use crate::core::vault::{RelativePath, Vault};
-use crate::media::MediaType;
 use crate::error::{Result, VaultError};
+use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
 use serde::Serialize;
 use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
 
@@ -165,7 +166,11 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
             None
         },
         summary,
-        items: items.into_iter().map(DemoPlanItem::from).collect(),
+        items: files
+            .iter()
+            .zip(items.iter())
+            .map(|(file, item)| DemoPlanItem::from_scanned(file, item))
+            .collect(),
     })
 }
 
@@ -281,7 +286,11 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
         vault_root: None,
         note,
         summary,
-        items: items.into_iter().map(DemoPlanItem::from).collect(),
+        items: files
+            .iter()
+            .zip(items.iter())
+            .map(|(file, item)| DemoPlanItem::from_scanned(file, item))
+            .collect(),
     }
 }
 
@@ -369,20 +378,111 @@ struct DemoPlanItem {
     manual_review: bool,
     needs_review: bool,
     duplicate_of: Option<String>,
+    media_type: String,
+    classification_source: Option<String>,
+    confidence: Option<f32>,
+    title: Option<String>,
+    year: Option<u16>,
+    size_bytes: u64,
+    folder_segment: String,
+    sidecar_path: Option<String>,
+    sidecar_preview: String,
     steps: Vec<String>,
 }
 
-impl From<ImportPlanItem> for DemoPlanItem {
-    fn from(item: ImportPlanItem) -> Self {
-        let needs_review = requires_review(&item);
+impl DemoPlanItem {
+    fn from_scanned(file: &IncomingFile, item: &ImportPlanItem) -> Self {
+        let classification = item.classification.as_ref().or(file.classification.as_ref());
+        let media_type = classification
+            .map(|classification| classification.media_type)
+            .unwrap_or(MediaType::Unclassified);
+        let needs_review = requires_review(item);
+        let target_path = item.target_path.as_ref().map(|path| path.to_string());
+        let preview_path = item
+            .target_path
+            .clone()
+            .unwrap_or_else(|| file.source_path.clone());
+
         Self {
             source_path: item.source_path.to_string(),
-            target_path: item.target_path.map(|path| path.to_string()),
+            target_path,
             manual_review: item.manual_review,
             needs_review,
-            duplicate_of: item.duplicate_of,
-            steps: item.steps.into_iter().map(format_plan_step).collect(),
+            duplicate_of: item.duplicate_of.clone(),
+            media_type: media_type.to_string(),
+            classification_source: classification.map(classification_source_label),
+            confidence: classification.map(|classification| classification.confidence),
+            title: file
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.title.clone()),
+            year: file.metadata.as_ref().and_then(|metadata| metadata.year),
+            size_bytes: file.size_bytes,
+            folder_segment: media_type.folder_segment().to_string(),
+            sidecar_path: sidecar_path_for(&preview_path).ok().map(|path| path.to_string()),
+            sidecar_preview: render_sidecar_preview(file, item, media_type),
+            steps: item.steps.iter().cloned().map(format_plan_step).collect(),
         }
+    }
+}
+
+fn render_sidecar_preview(
+    file: &IncomingFile,
+    item: &ImportPlanItem,
+    media_type: MediaType,
+) -> String {
+    let relative_path = item
+        .target_path
+        .clone()
+        .unwrap_or_else(|| file.source_path.clone());
+    let mut entry = MediaEntry::new(
+        format!("preview-{}", file.source_path),
+        media_type,
+        relative_path,
+        file.source_path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.source_path.to_string()),
+    );
+
+    entry.source = match item.classification.as_ref().map(|classification| classification.source) {
+        Some(ClassificationSource::Api) => PropertySource::Api,
+        Some(ClassificationSource::Ai) => PropertySource::Ai,
+        Some(ClassificationSource::User) => PropertySource::User,
+        Some(ClassificationSource::Folder)
+        | Some(ClassificationSource::Filename)
+        | Some(ClassificationSource::Extension)
+        | Some(ClassificationSource::Unknown)
+        | None => PropertySource::System,
+    };
+    entry.properties.status = Some(if item.manual_review || item.duplicate_of.is_some() {
+        MediaStatus::NeedsReview
+    } else {
+        MediaStatus::Inbox
+    });
+    entry.properties.title = file.metadata.as_ref().and_then(|metadata| metadata.title.clone());
+    entry.properties.year = file.metadata.as_ref().and_then(|metadata| metadata.year);
+    entry.properties.notes = Some(if item.manual_review {
+        "Manuelle Prüfung erforderlich".to_string()
+    } else if item.duplicate_of.is_some() {
+        "Als Duplikat markiert".to_string()
+    } else {
+        "Automatisch erzeugte Vorschau".to_string()
+    });
+    render_sidecar_yaml(&entry).unwrap_or_else(|error| {
+        format!("---\nerror: {error}\n---\n")
+    })
+}
+
+fn classification_source_label(source: &ClassificationSource) -> String {
+    match source {
+        ClassificationSource::User => "user".to_string(),
+        ClassificationSource::Folder => "folder".to_string(),
+        ClassificationSource::Filename => "filename".to_string(),
+        ClassificationSource::Extension => "extension".to_string(),
+        ClassificationSource::Api => "api".to_string(),
+        ClassificationSource::Ai => "ai".to_string(),
+        ClassificationSource::Unknown => "unknown".to_string(),
     }
 }
 
@@ -582,11 +682,58 @@ fn detect_classification(relative_path: &RelativePath) -> Option<FileClassificat
             confidence: 0.78,
             source: ClassificationSource::Extension,
         }),
-        Some("png" | "jpg" | "jpeg" | "webp" | "gif") => Some(FileClassification {
-            media_type: MediaType::Image,
-            confidence: 0.81,
-            source: ClassificationSource::Extension,
-        }),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff") => {
+            if contains_any(&path, PHOTO_HINTS) {
+                Some(FileClassification {
+                    media_type: MediaType::Photo,
+                    confidence: 0.92,
+                    source: if contains_any(&path, CAMERA_HINTS) {
+                        ClassificationSource::Folder
+                    } else {
+                        ClassificationSource::Filename
+                    },
+                })
+            } else if contains_any(&path, IMAGE_HINTS) {
+                Some(FileClassification {
+                    media_type: MediaType::Image,
+                    confidence: 0.91,
+                    source: ClassificationSource::Filename,
+                })
+            } else {
+                Some(FileClassification {
+                    media_type: MediaType::Image,
+                    confidence: 0.81,
+                    source: ClassificationSource::Extension,
+                })
+            }
+        }
         _ => None,
     }
+}
+
+const PHOTO_HINTS: [&str; 8] = [
+    "dcim",
+    "camera",
+    "photo",
+    "photos",
+    "picture",
+    "pictures",
+    "img_",
+    "dsc",
+];
+
+const CAMERA_HINTS: [&str; 4] = ["dcim", "camera", "dsc", "img_"];
+
+const IMAGE_HINTS: [&str; 7] = [
+    "screenshot",
+    "screen shot",
+    "wallpaper",
+    "scan",
+    "diagram",
+    "logo",
+    "icon",
+];
+
+fn contains_any(value: &str, hints: &[&str]) -> bool {
+    hints.iter().any(|hint| value.contains(hint))
 }
