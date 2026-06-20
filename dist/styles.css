@@ -456,6 +456,95 @@ h3 {
   max-width: 66ch;
 }
 
+.collections-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.collections-top {
+  display: grid;
+  grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+  gap: 16px;
+}
+
+.collection-chipbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.collection-chip {
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 9px 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 100%;
+  text-align: left;
+}
+
+.collection-chip:hover,
+.collection-chip.is-active {
+  border-color: rgba(155, 194, 139, 0.36);
+  background: rgba(122, 168, 116, 0.13);
+}
+
+.collection-chip strong {
+  font-weight: 600;
+}
+
+.collection-chip span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.collection-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.collection-meta div {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+}
+
+.collection-meta span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.collection-meta strong {
+  display: block;
+  margin-top: 8px;
+  color: var(--text);
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.collection-empty {
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  background: var(--panel-strong);
+}
+
+.collections-footer .body-copy {
+  max-width: 70ch;
+}
+
 @media (max-width: 1200px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -488,11 +577,17 @@ h3 {
   .metrics,
   .table-row,
   .review-grid,
-  .detail-summary {
+  .detail-summary,
+  .collections-top,
+  .collection-meta {
     grid-template-columns: 1fr;
   }
 
   .review-footer .body-copy {
+    max-width: none;
+  }
+
+  .collections-footer .body-copy {
     max-width: none;
   }
 

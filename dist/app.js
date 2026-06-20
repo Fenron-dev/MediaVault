@@ -9,6 +9,11 @@ const metricInbox = document.getElementById("metric-inbox");
 const metricReview = document.getElementById("metric-review");
 const metricDuplicates = document.getElementById("metric-duplicates");
 const metricCollections = document.getElementById("metric-collections");
+const collectionCards = document.getElementById("collection-cards");
+const collectionTitle = document.getElementById("collection-title");
+const collectionDescription = document.getElementById("collection-description");
+const collectionMeta = document.getElementById("collection-meta");
+const collectionRows = document.getElementById("collection-rows");
 const vaultRootInput = document.getElementById("vault-root-input");
 const vaultRootSave = document.getElementById("vault-root-save");
 const vaultRootClear = document.getElementById("vault-root-clear");
@@ -81,6 +86,7 @@ const statusOptions = [
 let sourcePlan = null;
 let currentPlan = null;
 let selectedItemKey = "";
+let selectedCollectionKey = "all";
 let corrections = loadStoredJson(correctionsKey, {});
 let auditTrail = loadStoredJson(auditTrailKey, []);
 
@@ -540,6 +546,7 @@ function renderPlan(plan) {
   setMetrics(plan.summary);
   renderInboxRows(plan.items);
   renderReviewRows(plan.items);
+  renderCollections(plan.items);
 
   const selected = getSelectedItem();
   renderDetail(selected);
@@ -549,6 +556,213 @@ function renderPlan(plan) {
     const noteText = plan.note ? ` ${plan.note}` : "";
     statusStrip.textContent = `${plan.title} (${plan.source}) geladen: ${plan.summary.total_files} Dateien, ${plan.summary.items_needing_review} zur Prüfung, ${plan.summary.duplicates} Duplikat(e).${rootText}${noteText}`;
   }
+}
+
+function buildCollectionCatalog(items) {
+  const collections = [
+    {
+      key: "all",
+      label: "Alle Dateien",
+      description: "Der gesamte aktuelle Scan.",
+      rule: "Alle gefundenen Einträge",
+      items,
+    },
+    {
+      key: "review",
+      label: "Zur Prüfung",
+      description: "Alles, was noch nicht klar ist.",
+      rule: "needs_review oder Duplikat",
+      items: items.filter((item) => item.needs_review || item.duplicate_of),
+    },
+    {
+      key: "duplicates",
+      label: "Duplikate",
+      description: "Markierte Mehrfachfunde.",
+      rule: "duplicate_of gesetzt",
+      items: items.filter((item) => item.duplicate_of),
+    },
+    {
+      key: "corrected",
+      label: "Korrigiert",
+      description: "Bereits lokal angepasst.",
+      rule: "lokale Korrektur vorhanden",
+      items: items.filter((item) => item.has_correction),
+    },
+    {
+      key: "photos",
+      label: "Fotos",
+      description: "Fotos und Kameraaufnahmen.",
+      rule: "media_type photo",
+      items: items.filter((item) => item.media_type === "photo"),
+    },
+    {
+      key: "images",
+      label: "Bilder",
+      description: "Grafiken, Screenshots, Icons.",
+      rule: "media_type image",
+      items: items.filter((item) => item.media_type === "image"),
+    },
+    {
+      key: "anime",
+      label: "Anime",
+      description: "Anime und verwandte Inhalte.",
+      rule: "media_type anime",
+      items: items.filter((item) => item.media_type === "anime"),
+    },
+    {
+      key: "video",
+      label: "Video",
+      description: "Filme, Serien und sonstige Videos.",
+      rule: "film, series, video-misc",
+      items: items.filter((item) =>
+        ["film", "series", "video-misc"].includes(item.media_type)
+      ),
+    },
+    {
+      key: "audio",
+      label: "Audio",
+      description: "Musik, Hörbücher und Podcasts.",
+      rule: "music, audiobook, podcast",
+      items: items.filter((item) =>
+        ["music-track", "music-album", "audiobook", "podcast"].includes(item.media_type)
+      ),
+    },
+    {
+      key: "books",
+      label: "Bücher",
+      description: "Bücher, E-Books, Comics und Manga.",
+      rule: "book, ebook, comic, manga",
+      items: items.filter((item) =>
+        ["book", "ebook", "comic", "manga"].includes(item.media_type)
+      ),
+    },
+    {
+      key: "docs",
+      label: "Dokumente",
+      description: "PDFs und andere Dokumente.",
+      rule: "media_type document",
+      items: items.filter((item) => item.media_type === "document"),
+    },
+  ];
+
+  return collections;
+}
+
+function renderCollectionMeta(collection) {
+  if (!collectionMeta) {
+    return;
+  }
+
+  clearNode(collectionMeta);
+
+  const totalBytes = collection.items.reduce((sum, item) => sum + (item.size_bytes || 0), 0);
+  const reviewCount = collection.items.filter((item) => item.needs_review).length;
+  const duplicateCount = collection.items.filter((item) => item.duplicate_of).length;
+
+  [
+    ["Treffer", `${collection.items.length}`],
+    ["Größe", formatBytes(totalBytes)],
+    ["Review", `${reviewCount} / ${duplicateCount}`],
+  ].forEach(([label, value]) => {
+    const block = document.createElement("div");
+    const span = document.createElement("span");
+    const strong = document.createElement("strong");
+    span.textContent = label;
+    strong.textContent = value;
+    block.appendChild(span);
+    block.appendChild(strong);
+    collectionMeta.appendChild(block);
+  });
+}
+
+function renderCollectionCards(collections) {
+  if (!collectionCards) {
+    return;
+  }
+
+  clearNode(collectionCards);
+
+  collections.forEach((collection) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "collection-chip";
+    button.classList.toggle("is-active", collection.key === selectedCollectionKey);
+    button.addEventListener("click", () => {
+      selectedCollectionKey = collection.key;
+      renderCollections(currentPlan?.items ?? []);
+    });
+
+    const label = document.createElement("strong");
+    label.textContent = collection.label;
+    const count = document.createElement("span");
+    count.textContent = `${collection.items.length}`;
+
+    button.appendChild(label);
+    button.appendChild(count);
+    collectionCards.appendChild(button);
+  });
+}
+
+function renderCollectionRows(collection) {
+  if (!collectionRows) {
+    return;
+  }
+
+  clearNode(collectionRows);
+
+  collection.items.forEach((item) => {
+    const target = item.target_path || statusLabel(item.status || "inbox");
+    collectionRows.appendChild(
+      createRow(item, [item.source_path, mediaTypeLabel(item.media_type), target], false)
+    );
+  });
+
+  if (!collection.items.length) {
+    const empty = document.createElement("div");
+    empty.className = "collection-empty";
+    empty.textContent = "Keine Einträge in dieser Sammlung.";
+    collectionRows.appendChild(empty);
+  }
+}
+
+function renderCollections(items) {
+  const collections = buildCollectionCatalog(items);
+  const selected =
+    collections.find((collection) => collection.key === selectedCollectionKey) ?? collections[0];
+
+  if (!selected) {
+    if (collectionTitle) {
+      collectionTitle.textContent = "Keine Sammlungen";
+    }
+    if (collectionDescription) {
+      collectionDescription.textContent = "Für den aktuellen Scan wurden keine Einträge gefunden.";
+    }
+    if (collectionMeta) {
+      clearNode(collectionMeta);
+    }
+    if (collectionRows) {
+      clearNode(collectionRows);
+    }
+    return;
+  }
+
+  if (selected.key !== selectedCollectionKey) {
+    selectedCollectionKey = selected.key;
+  }
+
+  if (collectionTitle) {
+    collectionTitle.textContent = selected.label;
+  }
+  if (collectionDescription) {
+    collectionDescription.textContent = `${selected.description} Regel: ${selected.rule}.`;
+  }
+  if (metricCollections) {
+    metricCollections.textContent = `${collections.length} smart`;
+  }
+
+  renderCollectionCards(collections);
+  renderCollectionMeta(selected);
+  renderCollectionRows(selected);
 }
 
 function getVaultRoot() {

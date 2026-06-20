@@ -224,25 +224,46 @@
         </section>
 
         <section class="view" data-view="collections">
-          <div class="panel-grid">
-            <section class="panel">
-              <p class="panel-label">Smart Collections</p>
-              <h3>Regeln statt starre Ordner</h3>
-              <ul class="list">
-                <li>Filter nach Typ, Genre, Status oder Tag.</li>
-                <li>Späterer Export als Ordnerstruktur oder Playlist.</li>
-                <li>Vorläufige Verwaltung mit relativen Pfaden.</li>
-              </ul>
-            </section>
-            <section class="panel">
-              <p class="panel-label">Beispiele</p>
-              <h3>Anime, Hörbücher, Referenzen</h3>
-              <ul class="chips">
-                <li>Anime 2020er</li>
-                <li>Hörbücher</li>
-                <li>Manuell geprüft</li>
-                <li>Ohne Duplikate</li>
-              </ul>
+          <div class="collections-layout">
+            <div class="collections-top">
+              <section class="panel">
+                <p class="panel-label">Smart Collections</p>
+                <h3>Regeln statt starre Ordner</h3>
+                <p class="body-copy">
+                  Sammlungen sind erstmal nur Regeln auf den aktuellen Scan. Damit kann man
+                  später sauber in Ordner, Playlists oder Exporte überführen.
+                </p>
+                <div class="collection-chipbar" id="collection-cards"></div>
+              </section>
+
+              <section class="panel">
+                <p class="panel-label">Auswahl</p>
+                <h3 id="collection-title">Alle Dateien</h3>
+                <p class="body-copy" id="collection-description">
+                  Alle gefundenen Einträge im aktuellen Vault-Scan.
+                </p>
+
+                <div class="collection-meta" id="collection-meta"></div>
+
+                <div class="table">
+                  <div class="table-row table-head">
+                    <span>Datei</span>
+                    <span>Typ</span>
+                    <span>Ziel / Status</span>
+                  </div>
+                  <div id="collection-rows"></div>
+                </div>
+              </section>
+            </div>
+
+            <section class="panel collections-footer">
+              <p class="panel-label">Nächster Schritt</p>
+              <h3>Regeln verfeinern, dann exportieren</h3>
+              <p class="body-copy">
+                Später können diese Regeln als echte Sammlungen gespeichert und daraus
+                Ordnerstrukturen oder Playlisten erzeugt werden. Im Moment ist es ein
+                schneller Weg, den Vault nach Inhalt zu sortieren.
+              </p>
             </section>
           </div>
         </section>
