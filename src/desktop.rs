@@ -410,7 +410,8 @@ impl DemoPlanItem {
             needs_review,
             duplicate_of: item.duplicate_of.clone(),
             media_type: media_type.to_string(),
-            classification_source: classification.map(classification_source_label),
+            classification_source: classification
+                .map(|classification| classification_source_label(&classification.source)),
             confidence: classification.map(|classification| classification.confidence),
             title: file
                 .metadata
@@ -683,17 +684,17 @@ fn detect_classification(relative_path: &RelativePath) -> Option<FileClassificat
             source: ClassificationSource::Extension,
         }),
         Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff") => {
-            if contains_any(&path, PHOTO_HINTS) {
+            if contains_any(&path, &PHOTO_HINTS) {
                 Some(FileClassification {
                     media_type: MediaType::Photo,
                     confidence: 0.92,
-                    source: if contains_any(&path, CAMERA_HINTS) {
+                    source: if contains_any(&path, &CAMERA_HINTS) {
                         ClassificationSource::Folder
                     } else {
                         ClassificationSource::Filename
                     },
                 })
-            } else if contains_any(&path, IMAGE_HINTS) {
+            } else if contains_any(&path, &IMAGE_HINTS) {
                 Some(FileClassification {
                     media_type: MediaType::Image,
                     confidence: 0.91,

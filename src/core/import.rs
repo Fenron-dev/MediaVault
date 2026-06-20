@@ -209,7 +209,7 @@ impl ImportPlanner {
     pub fn plan_file(&self, file: &IncomingFile) -> Result<ImportPlanItem> {
         let mut steps = vec![PlannedImportStep::DetectType];
         let mut manual_review = false;
-        let mut duplicate_of = None;
+        let duplicate_of = None;
 
         let classification = file.classification.clone();
         if let Some(classification) = classification.as_ref() {
