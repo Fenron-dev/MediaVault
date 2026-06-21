@@ -74,16 +74,28 @@ jobs:
             -s -k "$KEYCHAIN_PASSWORD" build.keychain
           rm certificate.p12
 
-      - name: Build bundled macOS app
-        run: cargo tauri build --bundles dmg
+      - name: Build macOS app bundle
+        run: cargo tauri build --bundles app
 
-      - name: List bundled outputs
+      - name: Ad-hoc sign app bundle
+        # Ad-hoc signing ("-") prevents the "app is damaged" Gatekeeper error.
+        # Without a Developer ID, macOS will show "unidentified developer" instead,
+        # which users can bypass with right-click → Open (or xattr -cr).
         run: |
-          find target/release/bundle -maxdepth 3 -print | sort
+          codesign --force --deep --sign - \
+            target/release/bundle/macos/MediaVault.app
 
-      - name: Upload bundled macOS DMG
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "MediaVault" \
+            -srcfolder target/release/bundle/macos/MediaVault.app \
+            -ov -format UDZO \
+            MediaVault.dmg
+
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
           name: mediavault-macos
-          path: target/release/bundle/dmg/*.dmg
+          path: MediaVault.dmg
           if-no-files-found: error
