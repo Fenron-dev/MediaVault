@@ -28,7 +28,11 @@ type AniListCacheMap = HashMap<String, AniListAnimeMetadata>;
 
 fn anilist_cache_path() -> Option<PathBuf> {
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".mediavault").join(ANILIST_CACHE_FILE))
+    Some(
+        PathBuf::from(home)
+            .join(".mediavault")
+            .join(ANILIST_CACHE_FILE),
+    )
 }
 
 fn load_anilist_cache() -> AniListCacheMap {
@@ -44,7 +48,9 @@ fn load_anilist_cache() -> AniListCacheMap {
 }
 
 fn save_anilist_cache(cache: &AniListCacheMap) {
-    let Some(path) = anilist_cache_path() else { return };
+    let Some(path) = anilist_cache_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -73,18 +79,16 @@ pub(crate) fn run() -> Result<()> {
                     APP_JS,
                 ),
                 "/styles.css" => response(StatusCode::OK, "text/css; charset=utf-8", STYLES_CSS),
-                "/api/vault-plan" => json_response(
-                    StatusCode::OK,
-                    &build_plan_response(request.uri().query()),
-                ),
+                "/api/vault-plan" => {
+                    json_response(StatusCode::OK, &build_plan_response(request.uri().query()))
+                }
                 "/api/anilist-search" => json_response(
                     StatusCode::OK,
                     &build_anilist_search_response(request.uri().query()),
                 ),
-                "/api/select-folder" => json_response(
-                    StatusCode::OK,
-                    &build_select_folder_response(),
-                ),
+                "/api/select-folder" => {
+                    json_response(StatusCode::OK, &build_select_folder_response())
+                }
                 "/api/create-vault" => json_response(
                     StatusCode::OK,
                     &build_create_vault_response(request.uri().query()),
@@ -94,15 +98,18 @@ pub(crate) fn run() -> Result<()> {
                     &build_vault_root_response(request.uri().query()),
                 ),
                 "/api/media-file" => build_media_file_response(request.uri().query()),
-                "/api/apply-import" => json_response(
-                    StatusCode::OK,
-                    &build_apply_import_response(request.body()),
-                ),
+                "/api/apply-import" => {
+                    json_response(StatusCode::OK, &build_apply_import_response(request.body()))
+                }
                 "/api/save-sidecars" => json_response(
                     StatusCode::OK,
                     &build_save_sidecars_response(request.body()),
                 ),
-                _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
+                _ => response(
+                    StatusCode::NOT_FOUND,
+                    "text/plain; charset=utf-8",
+                    "Not Found",
+                ),
             }
         })
         .run(tauri::generate_context!())
@@ -154,18 +161,14 @@ fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
     match resolve_vault_root(None) {
         Ok(Some(vault_root)) => match build_vault_plan_with_root(vault_root, refresh) {
             Ok(plan) => plan,
-            Err(error) => build_error_plan(
-                format!("Vault konnte nicht gescannt werden: {error}"),
-                None,
-            ),
+            Err(error) => {
+                build_error_plan(format!("Vault konnte nicht gescannt werden: {error}"), None)
+            }
         },
         Ok(None) => build_demo_plan(Some(
             "Kein Vault gefunden, daher Demo-Daten angezeigt.".to_string(),
         )),
-        Err(error) => build_error_plan(
-            format!("Vault-Erkennung fehlgeschlagen: {error}"),
-            None,
-        ),
+        Err(error) => build_error_plan(format!("Vault-Erkennung fehlgeschlagen: {error}"), None),
     }
 }
 
@@ -949,7 +952,10 @@ impl DemoPlanItem {
         sidecar: Option<&ParsedSidecar>,
         sidecar_preview: Option<&str>,
     ) -> Self {
-        let classification = item.classification.as_ref().or(file.classification.as_ref());
+        let classification = item
+            .classification
+            .as_ref()
+            .or(file.classification.as_ref());
         let media_type = classification
             .map(|classification| classification.media_type)
             .or(sidecar.and_then(|value| value.media_type))
@@ -959,19 +965,33 @@ impl DemoPlanItem {
         let anime_context = derive_anime_context(file, item, anilist, title.as_deref());
         let effective_series_title = sidecar
             .and_then(|value| value.series_title.clone())
-            .or_else(|| anime_context.as_ref().and_then(|context| context.series_title.clone()));
-        let effective_season_number = sidecar
-            .and_then(|value| value.season_number)
-            .or_else(|| anime_context.as_ref().and_then(|context| context.season_number));
-        let effective_episode_start = sidecar
-            .and_then(|value| value.episode_start)
-            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_start));
-        let effective_episode_end = sidecar
-            .and_then(|value| value.episode_end)
-            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_end));
+            .or_else(|| {
+                anime_context
+                    .as_ref()
+                    .and_then(|context| context.series_title.clone())
+            });
+        let effective_season_number = sidecar.and_then(|value| value.season_number).or_else(|| {
+            anime_context
+                .as_ref()
+                .and_then(|context| context.season_number)
+        });
+        let effective_episode_start = sidecar.and_then(|value| value.episode_start).or_else(|| {
+            anime_context
+                .as_ref()
+                .and_then(|context| context.episode_start)
+        });
+        let effective_episode_end = sidecar.and_then(|value| value.episode_end).or_else(|| {
+            anime_context
+                .as_ref()
+                .and_then(|context| context.episode_end)
+        });
         let effective_episode_title = sidecar
             .and_then(|value| value.episode_title.clone())
-            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_title.clone()));
+            .or_else(|| {
+                anime_context
+                    .as_ref()
+                    .and_then(|context| context.episode_title.clone())
+            });
         let collection_path = build_collection_path(
             media_type,
             title.as_deref(),
@@ -1037,12 +1057,12 @@ impl DemoPlanItem {
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
-            sidecar_path: sidecar_path_for(&preview_path).ok().map(|path| path.to_string()),
-            sidecar_preview: sidecar_preview
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref())
-                }),
+            sidecar_path: sidecar_path_for(&preview_path)
+                .ok()
+                .map(|path| path.to_string()),
+            sidecar_preview: sidecar_preview.map(ToString::to_string).unwrap_or_else(|| {
+                render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref())
+            }),
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
         }
     }
@@ -1069,7 +1089,11 @@ fn render_sidecar_preview(
             .unwrap_or_else(|| file.source_path.to_string()),
     );
 
-    entry.source = match item.classification.as_ref().map(|classification| classification.source) {
+    entry.source = match item
+        .classification
+        .as_ref()
+        .map(|classification| classification.source)
+    {
         Some(ClassificationSource::Api) => PropertySource::Api,
         Some(ClassificationSource::Ai) => PropertySource::Ai,
         Some(ClassificationSource::User) => PropertySource::User,
