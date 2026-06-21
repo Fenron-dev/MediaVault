@@ -1188,7 +1188,10 @@ fn derive_anime_context(
     series_title_hint: Option<&str>,
 ) -> Option<AnimeEpisodeContext> {
     let media_type = file.classification.as_ref()?.media_type;
-    if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+    if !matches!(
+        media_type,
+        MediaType::Anime | MediaType::HentaiAnime | MediaType::Series
+    ) {
         return None;
     }
 
@@ -1197,12 +1200,24 @@ fn derive_anime_context(
         .file_stem()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| file.source_path.to_string());
-    let series_title = anilist
-        .and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
-        .or_else(|| series_title_hint.map(|value| value.to_string()))
-        .or_else(|| extract_series_hint_from_path(&file.source_path))
-        .or_else(|| extract_anime_series_hint(&file.source_path))
-        .or_else(|| Some(normalize_title_candidate(&file_name)));
+
+    // For Anime: AniList > caller hint > folder extraction > file stem.
+    // For Series: folder extraction takes priority because the caller hint
+    // is derived from the episode filename (e.g. "S01E02 - Title"), not the
+    // series name.
+    let series_title = if matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+        anilist
+            .and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
+            .or_else(|| series_title_hint.map(|value| value.to_string()))
+            .or_else(|| extract_series_hint_from_path(&file.source_path))
+            .or_else(|| extract_anime_series_hint(&file.source_path))
+            .or_else(|| Some(normalize_title_candidate(&file_name)))
+    } else {
+        extract_series_hint_from_path(&file.source_path)
+            .or_else(|| extract_anime_series_hint(&file.source_path))
+            .or_else(|| Some(normalize_title_candidate(&file_name)))
+    };
+
     let season_number = extract_season_number(&file.source_path).or(Some(1));
     let (episode_start, episode_end) = parse_episode_range(&file_name);
     let episode_title = parse_episode_title(&file_name, series_title.as_deref());
@@ -1244,10 +1259,20 @@ fn build_collection_path(
                 season_number
             )
         }
-        MediaType::Series => format!(
-            "Series/{}",
-            sanitize_path_segment(title.unwrap_or("Unbenannt"))
-        ),
+        MediaType::Series => {
+            let series = anime_context
+                .and_then(|context| context.series_title.as_deref())
+                .or(title)
+                .unwrap_or("Unbekannte Serie");
+            let season_number = anime_context
+                .and_then(|context| context.season_number)
+                .unwrap_or(1);
+            format!(
+                "Serien/{}/Staffel {}",
+                sanitize_path_segment(series),
+                season_number
+            )
+        }
         MediaType::Film => format!(
             "Movies/{}",
             sanitize_path_segment(title.unwrap_or("Unbenannt"))
@@ -1271,11 +1296,14 @@ fn build_target_path_preview(
     anime_context: Option<&AnimeEpisodeContext>,
     anilist: Option<&AniListAnimeMetadata>,
 ) -> Option<String> {
-    if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+    let is_anime = matches!(media_type, MediaType::Anime | MediaType::HentaiAnime);
+    let is_series_with_context = media_type == MediaType::Series && anime_context.is_some();
+
+    if !is_anime && !is_series_with_context {
         return item.target_path.as_ref().map(|path| path.to_string());
     }
 
-    if is_anilist_movie(anilist) {
+    if is_anime && is_anilist_movie(anilist) {
         let movie_title = sanitize_path_segment(title.unwrap_or("Unbenannt"));
         let extension = file
             .source_path
@@ -1311,8 +1339,15 @@ fn build_target_path_preview(
         .source_path
         .extension()
         .map(|ext| ext.to_string_lossy().to_string());
-    let mut path = PathBuf::from("Anime");
-    path.push("Serien");
+
+    // Anime → "Anime/Serien/…",  TV Series → "Serien/…"
+    let mut path = if is_anime {
+        let mut p = PathBuf::from("Anime");
+        p.push("Serien");
+        p
+    } else {
+        PathBuf::from("Serien")
+    };
     path.push(sanitize_path_segment(series_title));
     path.push(format!("Staffel {season_number}"));
     let file_name = match extension {

@@ -769,11 +769,24 @@ function deriveSeriesTitle(item) {
   }
 
   const pathParts = String(item.source_path ?? "").split("/").map(cleanTitleText).filter(Boolean);
+
+  // Check for explicit "anime" folder
   const animeIndex = pathParts.findIndex((part) => part.toLowerCase() === "anime");
   if (animeIndex >= 0 && pathParts[animeIndex + 1]) {
     const candidate = pathParts[animeIndex + 1];
-    if (!/^staffel|^season|^s\d+/i.test(candidate)) {
+    if (!/^(?:staffel|season)\s*\d+$/i.test(candidate) && !/^s\d+$/i.test(candidate)) {
       return candidate;
+    }
+  }
+
+  // Find the folder directly above "Staffel X" / "Season X" in the path.
+  // e.g. "Inbox/Elfen Lied/Staffel 1/S01E02.mkv" → "Elfen Lied"
+  for (let i = 1; i < pathParts.length; i++) {
+    if (/^(?:staffel|season)\s*\d+$/i.test(pathParts[i]) || /^s\d{1,2}$/i.test(pathParts[i])) {
+      const candidate = pathParts[i - 1];
+      if (candidate && candidate.toLowerCase() !== "inbox" && !episodeMarker(candidate)) {
+        return candidate;
+      }
     }
   }
 
