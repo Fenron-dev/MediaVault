@@ -61,7 +61,11 @@ fn render_properties(document: &mut String, properties: &MediaProperties) {
     render_optional_u64(document, "anilist_id", properties.anilist_id.map(u64::from));
     render_optional_string(document, "anilist_url", properties.anilist_url.clone());
     render_optional_string(document, "series_title", properties.series_title.clone());
-    render_optional_u64(document, "season_number", properties.season_number.map(u64::from));
+    render_optional_u64(
+        document,
+        "season_number",
+        properties.season_number.map(u64::from),
+    );
     render_optional_string(document, "season_name", properties.season_name.clone());
     render_optional_u64(document, "episode_start", properties.episode_start.map(u64::from));
     render_optional_u64(document, "episode_end", properties.episode_end.map(u64::from));

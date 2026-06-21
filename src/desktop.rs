@@ -1122,9 +1122,7 @@ fn render_sidecar_preview(
     } else {
         "Automatisch erzeugte Vorschau".to_string()
     });
-    render_sidecar_yaml(&entry).unwrap_or_else(|error| {
-        format!("---\nerror: {error}\n---\n")
-    })
+    render_sidecar_yaml(&entry).unwrap_or_else(|error| format!("---\nerror: {error}\n---\n"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1345,7 +1343,10 @@ fn resolve_anilist_metadata_cached(
     item: &ImportPlanItem,
     cache: &mut AniListCacheMap,
 ) -> Option<AniListAnimeMetadata> {
-    let classification = item.classification.as_ref().or(file.classification.as_ref())?;
+    let classification = item
+        .classification
+        .as_ref()
+        .or(file.classification.as_ref())?;
     if !should_attempt_anilist(classification.media_type, &file.source_path) {
         return None;
     }
@@ -1358,7 +1359,10 @@ fn resolve_anilist_metadata_cached(
     }
 
     let result = client
-        .search_anime(&search_title, AniListClient::adult_flag_for(classification.media_type))
+        .search_anime(
+            &search_title,
+            AniListClient::adult_flag_for(classification.media_type),
+        )
         .ok()
         .flatten();
 
@@ -1374,10 +1378,7 @@ fn should_attempt_anilist(media_type: MediaType, source_path: &RelativePath) -> 
         return true;
     }
 
-    source_path
-        .to_string()
-        .to_lowercase()
-        .contains("anime")
+    source_path.to_string().to_lowercase().contains("anime")
 }
 
 fn build_anime_search_title(file: &IncomingFile) -> Option<String> {
@@ -1446,10 +1447,7 @@ fn looks_like_episode_fragment(value: &str) -> bool {
 
     lower.chars().all(|character| {
         character.is_ascii_digit()
-            || matches!(
-                character,
-                '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.'
-            )
+            || matches!(character, '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.')
     }) || lower.contains("episode")
         || lower.contains("ep")
 }
@@ -1699,15 +1697,12 @@ fn classification_source_label(source: &ClassificationSource) -> String {
 fn requires_review(item: &ImportPlanItem) -> bool {
     item.manual_review
         || item.duplicate_of.is_some()
-        || item
-            .steps
-            .iter()
-            .any(|step| {
-                matches!(
-                    step,
-                    PlannedImportStep::QueueReview { .. } | PlannedImportStep::AskUser { .. }
-                )
-            })
+        || item.steps.iter().any(|step| {
+            matches!(
+                step,
+                PlannedImportStep::QueueReview { .. } | PlannedImportStep::AskUser { .. }
+            )
+        })
 }
 
 fn format_plan_step(step: PlannedImportStep) -> String {
@@ -1734,7 +1729,9 @@ fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
             continue;
         };
         if key == wanted_key {
-            return urlencoding::decode(value).ok().map(|value| value.into_owned());
+            return urlencoding::decode(value)
+                .ok()
+                .map(|value| value.into_owned());
         }
     }
 
@@ -1812,7 +1809,11 @@ fn save_sidecar_item(vault: &Vault, item: &SaveSidecarItem) -> Result<()> {
     write_sidecar_preview(vault, &media_relative, &item.sidecar_preview)
 }
 
-fn write_sidecar_preview(vault: &Vault, media_relative: &RelativePath, sidecar_preview: &str) -> Result<()> {
+fn write_sidecar_preview(
+    vault: &Vault,
+    media_relative: &RelativePath,
+    sidecar_preview: &str,
+) -> Result<()> {
     let sidecar_relative = sidecar_path_for(media_relative)?;
     let sidecar_absolute = vault.resolve(sidecar_relative.as_path())?;
     let sidecar_parent = sidecar_absolute.parent().ok_or_else(|| {
@@ -2004,7 +2005,11 @@ fn scan_vault_files(vault: &Vault) -> Result<Vec<ScannedVaultFile>> {
     Ok(files)
 }
 
-fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultFile>) -> Result<()> {
+fn scan_directory(
+    vault: &Vault,
+    directory: &Path,
+    files: &mut Vec<ScannedVaultFile>,
+) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(VaultError::from)? {
         let entry = entry.map_err(VaultError::from)?;
         let path = entry.path();
@@ -2054,7 +2059,11 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultF
                     .clone()
                     .or_else(|| sidecar.title.clone())
             })
-            .or_else(|| relative_path.file_stem().map(|stem| stem.to_string_lossy().to_string()));
+            .or_else(|| {
+                relative_path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+            });
         let resolved_metadata = Some(ResolvedMetadata {
             title: resolved_title,
             year: parsed_sidecar.as_ref().and_then(|sidecar| sidecar.year),
@@ -2303,14 +2312,7 @@ fn detect_classification(relative_path: &RelativePath) -> Option<FileClassificat
 }
 
 const PHOTO_HINTS: [&str; 8] = [
-    "dcim",
-    "camera",
-    "photo",
-    "photos",
-    "picture",
-    "pictures",
-    "img_",
-    "dsc",
+    "dcim", "camera", "photo", "photos", "picture", "pictures", "img_", "dsc",
 ];
 
 const CAMERA_HINTS: [&str; 4] = ["dcim", "camera", "dsc", "img_"];
