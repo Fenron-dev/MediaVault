@@ -58,16 +58,22 @@ jobs:
         run: cargo tauri icon icons/icon.png
 
       - name: Build bundled macOS app
-        run: cargo tauri build --bundles app
+        run: cargo tauri build --bundles dmg
 
-      - name: Archive bundled macOS app
+      - name: List bundled outputs
         run: |
-          ditto -c -k --keepParent \
-            "target/release/bundle/macos/MediaVault.app" \
-            "target/release/bundle/macos/MediaVault-macos.zip"
+          find target/release/bundle -maxdepth 3 -print | sort
 
-      - name: Upload bundled macOS archive
+      - name: Archive app bundle for fallback testing
+        run: |
+          cd target/release/bundle/macos
+          zip -r MediaVault.app.zip MediaVault.app
+
+      - name: Upload bundled macOS artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mediavault-macos-app
-          path: target/release/bundle/macos/MediaVault-macos.zip
+          name: mediavault-macos
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/macos/MediaVault.app.zip
+          if-no-files-found: error
