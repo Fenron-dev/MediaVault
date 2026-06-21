@@ -38,7 +38,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 260px minmax(0, 1fr) 340px;
+  grid-template-columns: 260px minmax(0, 1fr) 380px;
   min-height: 100vh;
 }
 
@@ -163,6 +163,10 @@ body:not(.is-vault-open) .app-shell {
 
 .app-modal.is-active {
   display: grid;
+}
+
+.app-modal > [hidden] {
+  display: none !important;
 }
 
 .modal-card {
@@ -301,6 +305,7 @@ body:not(.is-vault-open) .app-shell {
 .inspector {
   border-right: 0;
   border-left: 1px solid var(--line);
+  min-width: 0;
 }
 
 .workspace {
@@ -625,8 +630,15 @@ h3 {
 
 .table-row > span {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  word-break: normal;
   line-height: 1.45;
+  white-space: pre-line;
+}
+
+#inbox-rows .table-row,
+#review-rows .table-row {
+  grid-template-columns: minmax(0, 1.5fr) minmax(92px, 0.55fr) minmax(0, 1.35fr);
 }
 
 .table-head {
@@ -1329,6 +1341,18 @@ h3 {
   overflow: hidden;
 }
 
+.credit-card:not(.has-left-image) {
+  grid-template-columns: minmax(0, 1fr) 96px;
+}
+
+.credit-card:not(.has-right-image) {
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.credit-card:not(.has-left-image):not(.has-right-image) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .credit-thumb {
   width: 100%;
   min-height: 118px;
@@ -1541,7 +1565,7 @@ h3 {
 
 .property-row {
   display: grid;
-  grid-template-columns: minmax(150px, 0.52fr) minmax(0, 1fr);
+  grid-template-columns: minmax(150px, 0.42fr) minmax(0, 0.58fr);
   gap: 10px 14px;
   align-items: start;
 }
@@ -1585,6 +1609,7 @@ h3 {
   overflow-wrap: anywhere;
   margin: 0;
   min-width: 0;
+  white-space: pre-wrap;
 }
 
 .property-empty {

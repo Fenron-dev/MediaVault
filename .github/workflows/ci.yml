@@ -51,11 +51,14 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release app binary
-        run: cargo build --release
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
 
-      - name: Upload release binary
+      - name: Build bundled macOS app
+        run: cargo tauri build --bundles app
+
+      - name: Upload bundled macOS app
         uses: actions/upload-artifact@v4
         with:
-          name: mediavault-macos
-          path: target/release/mediavault
+          name: mediavault-macos-app
+          path: target/release/bundle/macos/*.app

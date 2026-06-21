@@ -892,7 +892,9 @@ function needsReviewInUi(item) {
 
 function projectItem(item) {
   const correction = corrections[item.source_path] ?? {};
-  const metadata = apiMetadata[item.source_path] ?? parseSidecarPreviewMetadata(item.sidecar_preview);
+  const metadata = normalizeRestoredMetadata(
+    apiMetadata[item.source_path] ?? parseSidecarPreviewMetadata(item.sidecar_preview)
+  );
   const effective = { ...item };
 
   [
@@ -913,6 +915,8 @@ function projectItem(item) {
     "airing_season",
     "anilist_url",
     "episode_title",
+    "status",
+    "notes",
   ].forEach((field) => {
     if (typeof metadata[field] === "string") {
       effective[field] = metadata[field];
@@ -1058,6 +1062,46 @@ function buildApplyImportItem(item) {
     target_path: prepared.target_path,
     sidecar_preview: prepared.sidecar_preview,
   };
+}
+
+async function persistSidecarsForItems(items) {
+  const fileItems = (Array.isArray(items) ? items : [])
+    .filter((item) => item && typeof item.source_path === "string")
+    .map((item) => ({
+      media_path: item.source_path,
+      sidecar_preview:
+        yamlOverrides[item.source_path] ||
+        buildSidecarPreview({
+          ...item,
+          target_path: item.source_path,
+        }),
+    }));
+
+  if (!fileItems.length) {
+    return;
+  }
+
+  const response = await fetch("/api/save-sidecars", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      vault_root: getVaultRoot(),
+      items: fileItems,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  return result;
 }
 
 function clearAppliedLocalState(sourcePaths) {
@@ -1433,12 +1477,12 @@ function normalizeAniListMetadata(metadata, item) {
     mal_id: metadata.mal_id ?? null,
     genres: Array.isArray(metadata.genres) ? metadata.genres : [],
     synonyms: Array.isArray(metadata.synonyms) ? metadata.synonyms : [],
-    tags: Array.isArray(metadata.tags) ? metadata.tags : [],
-    studios: Array.isArray(metadata.studios) ? metadata.studios : [],
-    relations: Array.isArray(metadata.relations) ? metadata.relations : [],
-    characters: Array.isArray(metadata.characters) ? metadata.characters : [],
-    staff: Array.isArray(metadata.staff) ? metadata.staff : [],
-    reviews: Array.isArray(metadata.reviews) ? metadata.reviews : [],
+    tags: normalizeAniListTags(metadata.tags),
+    studios: normalizeAniListStudios(metadata.studios),
+    relations: normalizeAniListRelations(metadata.relations),
+    characters: normalizeAniListCharacters(metadata.characters),
+    staff: normalizeAniListStaff(metadata.staff),
+    reviews: normalizeAniListReviews(metadata.reviews),
     cover_image_medium: metadata.cover_image_medium || null,
     cover_image_large: metadata.cover_image_large || null,
     cover_image_extra_large: metadata.cover_image_extra_large || null,
@@ -1465,6 +1509,160 @@ function normalizeAniListMetadata(metadata, item) {
   });
 
   return normalized;
+}
+
+function normalizeAniListTags(tags) {
+  if (!Array.isArray(tags)) {
+    return [];
+  }
+
+  return tags
+    .map((tag) => {
+      if (typeof tag === "string") {
+        return tag;
+      }
+      if (!tag || typeof tag !== "object") {
+        return "";
+      }
+      return tag.name || "";
+    })
+    .filter(Boolean);
+}
+
+function normalizeAniListStudios(studios) {
+  if (!Array.isArray(studios)) {
+    return [];
+  }
+
+  return studios
+    .map((studio) => {
+      if (!studio || typeof studio !== "object") {
+        return null;
+      }
+      return {
+        id: studio.id ?? null,
+        name: studio.name || "",
+        is_animation_studio: Boolean(studio.is_animation_studio),
+        site_url: studio.site_url || null,
+      };
+    })
+    .filter((studio) => studio?.name);
+}
+
+function normalizeAniListRelations(relations) {
+  if (!Array.isArray(relations)) {
+    return [];
+  }
+
+  return relations
+    .map((relation) => {
+      if (!relation || typeof relation !== "object") {
+        return null;
+      }
+      return {
+        id: relation.id ?? null,
+        relation_type: relation.relation_type || null,
+        title: relation.title || null,
+        media_type: relation.media_type || null,
+        format: relation.format || null,
+        site_url: relation.site_url || null,
+        cover_image_medium: relation.cover_image_medium || null,
+        cover_image_large: relation.cover_image_large || null,
+        cover_image_extra_large: relation.cover_image_extra_large || null,
+      };
+    })
+    .filter((relation) => relation?.title);
+}
+
+function normalizeAniListCharacters(characters) {
+  if (!Array.isArray(characters)) {
+    return [];
+  }
+
+  return characters
+    .map((character) => {
+      if (!character || typeof character !== "object") {
+        return null;
+      }
+      const firstVoiceActor = Array.isArray(character.voice_actors)
+        ? character.voice_actors[0]
+        : character.voice_actor && typeof character.voice_actor === "object"
+          ? character.voice_actor
+          : null;
+      return {
+        role: character.role || null,
+        character_id: character.character_id ?? null,
+        character_name: character.character_name || character.name || null,
+        character_image: character.character_image || character.character?.image || null,
+        voice_actor_name: character.voice_actor_name || firstVoiceActor?.name || null,
+        voice_actor_native_name:
+          character.voice_actor_native_name || firstVoiceActor?.native_name || null,
+        voice_actor_language: character.voice_actor_language || firstVoiceActor?.language || null,
+        voice_actor_image: character.voice_actor_image || firstVoiceActor?.image || null,
+      };
+    })
+    .filter((character) => character?.character_name);
+}
+
+function normalizeAniListStaff(staff) {
+  if (!Array.isArray(staff)) {
+    return [];
+  }
+
+  return staff
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const person = entry.person && typeof entry.person === "object" ? entry.person : entry;
+      return {
+        role: entry.role || null,
+        id: person.id ?? null,
+        name: entry.name || person.name || null,
+        native_name: entry.native_name || person.native_name || null,
+        language: entry.language || person.language || null,
+        image: entry.image || person.image || null,
+      };
+    })
+    .filter((entry) => entry?.name);
+}
+
+function normalizeAniListReviews(reviews) {
+  if (!Array.isArray(reviews)) {
+    return [];
+  }
+
+  return reviews
+    .map((review) => {
+      if (!review || typeof review !== "object") {
+        return null;
+      }
+      return {
+        id: review.id ?? null,
+        summary: review.summary || null,
+        rating: review.rating ?? null,
+        rating_amount: review.rating_amount ?? null,
+        site_url: review.site_url || null,
+        user_name: review.user_name || null,
+      };
+    })
+    .filter((review) => review?.summary || review?.user_name);
+}
+
+function normalizeRestoredMetadata(metadata) {
+  if (!metadata || typeof metadata !== "object") {
+    return {};
+  }
+
+  return {
+    ...metadata,
+    tags: normalizeAniListTags(metadata.tags),
+    studios: normalizeAniListStudios(metadata.studios),
+    relations: normalizeAniListRelations(metadata.relations),
+    characters: normalizeAniListCharacters(metadata.characters),
+    staff: normalizeAniListStaff(metadata.staff),
+    reviews: normalizeAniListReviews(metadata.reviews),
+  };
 }
 
 function setApiFeedback(node, message, tone = "") {
@@ -1507,18 +1705,31 @@ function closeActionModal() {
   pendingAniListTargets = [];
   pendingAniListFeedback = null;
 
-  if (trashDialog) {
-    trashDialog.hidden = true;
-  }
-  if (anilistDialog) {
-    anilistDialog.hidden = true;
-  }
-  if (imageDialog) {
-    imageDialog.hidden = true;
-  }
+  hideModalCards();
   if (appModal) {
     appModal.classList.remove("is-active");
     appModal.hidden = true;
+  }
+}
+
+function hideModalCards() {
+  [trashDialog, anilistDialog, imageDialog].forEach((dialog) => {
+    if (dialog) {
+      dialog.hidden = true;
+    }
+  });
+}
+
+function showModalCard(dialog) {
+  if (!dialog) {
+    return;
+  }
+
+  hideModalCards();
+  dialog.hidden = false;
+  if (appModal) {
+    appModal.hidden = false;
+    appModal.classList.add("is-active");
   }
 }
 
@@ -1528,16 +1739,13 @@ function openImagePreview(item) {
     return;
   }
 
+  hideModalCards();
   if (imageDialogTitle) {
     imageDialogTitle.textContent = item?.title || fileStem(item?.source_path || "") || "Bildansicht";
   }
   imageDialogPreview.src = imageUrl;
   imageDialogPreview.alt = item?.title || "Bildvorschau";
-  imageDialog.hidden = false;
-  if (appModal) {
-    appModal.hidden = false;
-    appModal.classList.add("is-active");
-  }
+  showModalCard(imageDialog);
 }
 
 function selectionSearchTitle(selection) {
@@ -1557,7 +1765,12 @@ function selectionSearchTitle(selection) {
     return selection.node.label || item.series_title || item.title || "";
   }
 
-  return item.series_title || item.title || stripEpisodeMarkerText(fileStem(item.source_path)) || "";
+  const rawTitle =
+    item.series_title ||
+    item.title ||
+    stripEpisodeMarkerText(fileStem(item.source_path)) ||
+    "";
+  return rawTitle.replace(/^[\s\-–—_:]+/, "").trim();
 }
 
 function showAniListResults(results, query) {
@@ -1661,15 +1874,9 @@ function openAniListDialog(selection, feedbackNode = null, targetItems = []) {
   if (trashDialog) {
     trashDialog.hidden = true;
   }
-  if (anilistDialog) {
-    anilistDialog.hidden = false;
-  }
-  if (appModal) {
-    appModal.hidden = false;
-    appModal.classList.add("is-active");
-  }
+  showModalCard(anilistDialog);
   if (statusStrip) {
-    statusStrip.textContent = `AniList-Treffer für ${selectionTitle(selection)} werden geladen.`;
+    statusStrip.textContent = `AniList-Treffer für ${selectionTitle(resolvedSelection)} werden geladen.`;
   }
 }
 
@@ -1774,6 +1981,15 @@ function applyAniListResult(metadata) {
   renderPlan(currentPlan);
   setApiFeedback(pendingAniListFeedback, `AniList übernommen: ${aniListSummary(normalized)}`, "success");
   updateAuditTrail(`AniList-Metadaten übernommen für ${selectionTitle(pendingAniListSelection)}.`);
+  void persistSidecarsForItems(
+    pendingAniListTargets
+      .map((target) => currentPlan.items.find((item) => item.source_path === target.source_path))
+      .filter(Boolean)
+  ).catch((error) => {
+    if (statusStrip) {
+      statusStrip.textContent = `AniList übernommen, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+    }
+  });
   closeActionModal();
 }
 
@@ -1827,7 +2043,7 @@ function createRow(item, cells, selected) {
 
   cells.forEach((cell) => {
     const span = document.createElement("span");
-    span.textContent = cell;
+    span.textContent = formatTableCellValue(cell);
     row.appendChild(span);
   });
 
@@ -1839,6 +2055,14 @@ function createRow(item, cells, selected) {
   });
 
   return row;
+}
+
+function formatTableCellValue(value) {
+  const text = String(value ?? "");
+  if (!text.includes("/")) {
+    return text;
+  }
+  return text.replaceAll("/", "/\n");
 }
 
 function getSelectedItem() {
@@ -2035,20 +2259,44 @@ function propertyDisplayValue(value) {
     }
     return value
       .slice(0, 5)
-      .map((entry) => {
-        if (entry && typeof entry === "object") {
-          return entry.name || entry.title || entry.character_name || entry.relation_type || JSON.stringify(entry);
-        }
-        return String(entry);
-      })
+      .map((entry) => summarizePropertyObject(entry))
       .join(", ");
   }
 
   if (value && typeof value === "object") {
-    return JSON.stringify(value);
+    return summarizePropertyObject(value);
   }
 
   return value === null || typeof value === "undefined" || value === "" ? "-" : String(value);
+}
+
+function summarizePropertyObject(value) {
+  if (!value || typeof value !== "object") {
+    return value === null || typeof value === "undefined" ? "-" : String(value);
+  }
+
+  if (value.character_name || value.voice_actor_name) {
+    return [value.character_name || value.name, value.voice_actor_name ? `VA ${value.voice_actor_name}` : ""]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (value.role && (value.name || value.person?.name)) {
+    return `${value.role}: ${value.name || value.person?.name}`;
+  }
+  if (value.relation_type || value.title) {
+    return [value.relation_type, value.title || value.name].filter(Boolean).join(": ");
+  }
+  if (value.summary || value.user_name) {
+    return [value.user_name, value.summary].filter(Boolean).join(": ");
+  }
+  if (value.name || value.title) {
+    return value.name || value.title;
+  }
+
+  return Object.entries(value)
+    .slice(0, 3)
+    .map(([key, entry]) => `${key}: ${typeof entry === "object" ? "…" : String(entry)}`)
+    .join(" | ");
 }
 
 function propertyEntriesFor(value) {
@@ -2468,7 +2716,8 @@ function selectionTitle(selection) {
     const primary = selection.item;
     return nodeDisplayTitle(selection.node, primary) || "Sammlung";
   }
-  return selection.item?.title || fileStem(selection.item?.source_path) || "Unbenannt";
+  const rawTitle = selection.item?.title || fileStem(selection.item?.source_path) || "Unbenannt";
+  return rawTitle.replace(/^[\s\-–—_:]+/, "").trim() || rawTitle;
 }
 
 function selectionYamlPreview(selection) {
@@ -2875,6 +3124,8 @@ function appendCollectionMetadataSections(stack, item, synopsisText) {
 function createCreditCard(name, subline, meta, leftImageUrl = "", rightImageUrl = "") {
   const card = document.createElement("div");
   card.className = "credit-card";
+  card.classList.toggle("has-left-image", Boolean(leftImageUrl));
+  card.classList.toggle("has-right-image", Boolean(rightImageUrl));
 
   if (leftImageUrl) {
     const left = document.createElement("img");
@@ -2939,12 +3190,18 @@ function createDetailsGrid(item) {
   grid.className = "media-details-grid";
   [
     ["Typ", item.format || mediaTypeLabel(mediaSelectionValue(item))],
-    ["Status", item.status || "-"],
+    ["Status", item.status ? statusLabel(item.status) : "-"],
     ["Staffel", item.airing_season || "-"],
     ["Ausgestrahlt", [datePartsLabel(item.start_date), datePartsLabel(item.end_date)].filter(Boolean).join(" - ")],
     ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
     ["Score", typeof item.average_score === "number" ? scoreLabel(item.average_score) : "-"],
-    ["Studios", (item.studios || []).map((studio) => studio.name).filter(Boolean).join(", ")],
+    [
+      "Studios",
+      (item.studios || [])
+        .map((studio) => (typeof studio === "string" ? studio : studio?.name))
+        .filter(Boolean)
+        .join(", "),
+    ],
     ["Synonyme", (item.synonyms || []).slice(0, 4).join(", ")],
   ].forEach(([label, value]) => {
     const block = document.createElement("div");
@@ -3584,16 +3841,7 @@ function openTrashDialog(selection) {
   if (trashDialogBody) {
     trashDialogBody.textContent = `${selection.items.length} Eintrag(e) werden zunächst nur in den App-Papierkorb verschoben.`;
   }
-  if (anilistDialog) {
-    anilistDialog.hidden = true;
-  }
-  if (trashDialog) {
-    trashDialog.hidden = false;
-  }
-  if (appModal) {
-    appModal.hidden = false;
-    appModal.classList.add("is-active");
-  }
+  showModalCard(trashDialog);
 }
 
 function commitTrashSelection(selection) {
@@ -4020,7 +4268,7 @@ if (inspectorPropertyAddToggle) {
 }
 
 if (inspectorApply) {
-  inspectorApply.addEventListener("click", () => {
+  inspectorApply.addEventListener("click", async () => {
     if (!selectionEditable(inspectorSelection)) {
       return;
     }
@@ -4039,6 +4287,17 @@ if (inspectorApply) {
       selectedItemKey = inspectorSelection.item.source_path;
     }
     renderPlan(currentPlan);
+    try {
+      await persistSidecarsForItems(
+        inspectorSelection.items
+          .map((item) => currentPlan.items.find((candidate) => candidate.source_path === item.source_path))
+          .filter(Boolean)
+      );
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Änderungen übernommen, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+      }
+    }
     updateAuditTrail(`Inspector-Korrektur übernommen für ${inspectorSelection.key}.`);
   });
 }
@@ -4180,7 +4439,7 @@ if (appModal) {
 }
 
 if (inspectorYamlSave) {
-  inspectorYamlSave.addEventListener("click", () => {
+  inspectorYamlSave.addEventListener("click", async () => {
     if (!inspectorItemKey || !inspectorYaml) {
       return;
     }
@@ -4189,12 +4448,23 @@ if (inspectorYamlSave) {
     saveStoredJson(yamlOverridesKey, yamlOverrides);
     currentPlan = projectPlan(sourcePlan);
     renderPlan(currentPlan);
-    updateAuditTrail(`YAML lokal gespeichert für ${inspectorItemKey}.`);
+    try {
+      await persistSidecarsForItems(
+        inspectorSelection?.items
+          ?.map((item) => currentPlan.items.find((candidate) => candidate.source_path === item.source_path))
+          .filter(Boolean) || []
+      );
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `YAML gespeichert, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+      }
+    }
+    updateAuditTrail(`YAML gespeichert für ${inspectorItemKey}.`);
   });
 }
 
 if (inspectorYamlReset) {
-  inspectorYamlReset.addEventListener("click", () => {
+  inspectorYamlReset.addEventListener("click", async () => {
     if (!inspectorItemKey) {
       return;
     }
@@ -4203,12 +4473,23 @@ if (inspectorYamlReset) {
     saveStoredJson(yamlOverridesKey, yamlOverrides);
     currentPlan = projectPlan(sourcePlan);
     renderPlan(currentPlan);
+    try {
+      await persistSidecarsForItems(
+        inspectorSelection?.items
+          ?.map((item) => currentPlan.items.find((candidate) => candidate.source_path === item.source_path))
+          .filter(Boolean) || []
+      );
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `YAML-Reset gespeichert, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+      }
+    }
     updateAuditTrail(`YAML-Override zurückgesetzt für ${inspectorItemKey}.`);
   });
 }
 
 if (inspectorPropertyAdd) {
-  inspectorPropertyAdd.addEventListener("click", () => {
+  inspectorPropertyAdd.addEventListener("click", async () => {
     if (!inspectorItemKey || !inspectorYaml || !inspectorPropertyKey) {
       return;
     }
@@ -4228,7 +4509,18 @@ if (inspectorPropertyAdd) {
     saveStoredJson(yamlOverridesKey, yamlOverrides);
     currentPlan = projectPlan(sourcePlan);
     renderPlan(currentPlan);
-    updateAuditTrail(`Property ${inspectorPropertyKey.value} lokal ergänzt für ${inspectorItemKey}.`);
+    try {
+      await persistSidecarsForItems(
+        inspectorSelection?.items
+          ?.map((item) => currentPlan.items.find((candidate) => candidate.source_path === item.source_path))
+          .filter(Boolean) || []
+      );
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Property ergänzt, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+      }
+    }
+    updateAuditTrail(`Property ${inspectorPropertyKey.value} ergänzt für ${inspectorItemKey}.`);
 
     inspectorPropertyKey.value = "";
     if (inspectorPropertyValue) {

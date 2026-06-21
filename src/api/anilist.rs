@@ -87,6 +87,11 @@ query ($search: String!, $isAdult: Boolean) {
             english
             native
           }
+          coverImage {
+            medium
+            large
+            extraLarge
+          }
         }
       }
     }
@@ -99,6 +104,10 @@ query ($search: String!, $isAdult: Boolean) {
             full
             native
           }
+          image {
+            medium
+            large
+          }
         }
         voiceActors(language: JAPANESE) {
           id
@@ -107,6 +116,10 @@ query ($search: String!, $isAdult: Boolean) {
             native
           }
           languageV2
+          image {
+            medium
+            large
+          }
         }
       }
     }
@@ -118,6 +131,10 @@ query ($search: String!, $isAdult: Boolean) {
           name {
             full
             native
+          }
+          image {
+            medium
+            large
           }
         }
       }
@@ -217,6 +234,11 @@ query ($search: String!, $isAdult: Boolean, $page: Int, $perPage: Int) {
               english
               native
             }
+            coverImage {
+              medium
+              large
+              extraLarge
+            }
           }
         }
       }
@@ -229,6 +251,10 @@ query ($search: String!, $isAdult: Boolean, $page: Int, $perPage: Int) {
               full
               native
             }
+            image {
+              medium
+              large
+            }
           }
           voiceActors(language: JAPANESE) {
             id
@@ -237,6 +263,10 @@ query ($search: String!, $isAdult: Boolean, $page: Int, $perPage: Int) {
               native
             }
             languageV2
+            image {
+              medium
+              large
+            }
           }
         }
       }
@@ -248,6 +278,10 @@ query ($search: String!, $isAdult: Boolean, $page: Int, $perPage: Int) {
             name {
               full
               native
+            }
+            image {
+              medium
+              large
             }
           }
         }
@@ -580,6 +614,12 @@ pub struct AniListRelation {
     pub site_url: Option<String>,
     /// Related media title.
     pub title: Option<String>,
+    /// Preferred related media cover.
+    pub cover_image_medium: Option<String>,
+    /// Large related media cover.
+    pub cover_image_large: Option<String>,
+    /// Extra large related media cover.
+    pub cover_image_extra_large: Option<String>,
 }
 
 /// Character and Japanese voice actor credit.
@@ -591,6 +631,8 @@ pub struct AniListCharacterCredit {
     pub character_id: u32,
     /// Character name.
     pub character_name: Option<String>,
+    /// Character image URL.
+    pub character_image: Option<String>,
     /// Japanese voice actors.
     pub voice_actors: Vec<AniListPerson>,
 }
@@ -615,6 +657,8 @@ pub struct AniListPerson {
     pub native_name: Option<String>,
     /// Language label when available.
     pub language: Option<String>,
+    /// Person image URL.
+    pub image: Option<String>,
 }
 
 /// Review metadata returned by AniList.
@@ -798,6 +842,8 @@ struct AniListGraphQlRelatedMedia {
     #[serde(rename = "siteUrl")]
     site_url: Option<String>,
     title: AniListTitles,
+    #[serde(rename = "coverImage")]
+    cover_image: Option<AniListGraphQlSimpleImage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -819,6 +865,7 @@ struct AniListGraphQlCharacterEdge {
 struct AniListGraphQlCharacter {
     id: u32,
     name: AniListName,
+    image: Option<AniListGraphQlSimpleImage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -839,6 +886,15 @@ struct AniListGraphQlPerson {
     name: AniListName,
     #[serde(rename = "languageV2")]
     language: Option<String>,
+    image: Option<AniListGraphQlSimpleImage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListGraphQlSimpleImage {
+    medium: Option<String>,
+    large: Option<String>,
+    #[serde(rename = "extraLarge")]
+    extra_large: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1005,6 +1061,21 @@ impl From<AniListGraphQlRelationEdge> for AniListRelation {
             format: edge.node.format,
             site_url: edge.node.site_url,
             title: edge.node.title.display_title().map(|value| value.to_string()),
+            cover_image_medium: edge
+                .node
+                .cover_image
+                .as_ref()
+                .and_then(|image| image.medium.clone()),
+            cover_image_large: edge
+                .node
+                .cover_image
+                .as_ref()
+                .and_then(|image| image.large.clone()),
+            cover_image_extra_large: edge
+                .node
+                .cover_image
+                .as_ref()
+                .and_then(|image| image.extra_large.clone()),
         }
     }
 }
@@ -1015,6 +1086,10 @@ impl From<AniListGraphQlCharacterEdge> for AniListCharacterCredit {
             role: edge.role,
             character_id: edge.node.id,
             character_name: edge.node.name.full.or(edge.node.name.native),
+            character_image: edge
+                .node
+                .image
+                .and_then(|image| image.large.or(image.medium)),
             voice_actors: edge.voice_actors.into_iter().map(AniListPerson::from).collect(),
         }
     }
@@ -1036,6 +1111,7 @@ impl From<AniListGraphQlPerson> for AniListPerson {
             name: person.name.full,
             native_name: person.name.native,
             language: person.language,
+            image: person.image.and_then(|image| image.large.or(image.medium)),
         }
     }
 }

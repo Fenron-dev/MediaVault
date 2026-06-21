@@ -68,6 +68,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_apply_import_response(request.body()),
                 ),
+                "/api/save-sidecars" => json_response(
+                    StatusCode::OK,
+                    &build_save_sidecars_response(request.body()),
+                ),
                 _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
             }
         })
@@ -349,6 +353,43 @@ fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
 
     ApplyImportResponse {
         applied,
+        skipped,
+        error: None,
+    }
+}
+
+fn build_save_sidecars_response(body: &[u8]) -> SaveSidecarsResponse {
+    let request: SaveSidecarsRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return SaveSidecarsResponse::error(format!("ungültiger Request: {error}")),
+    };
+
+    let vault_root = match resolve_vault_root(request.vault_root.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => return SaveSidecarsResponse::error("kein Vault ausgewählt".to_string()),
+        Err(error) => return SaveSidecarsResponse::error(error.to_string()),
+    };
+
+    let vault = match Vault::new(&vault_root) {
+        Ok(vault) => vault,
+        Err(error) => return SaveSidecarsResponse::error(error.to_string()),
+    };
+
+    let mut saved = Vec::new();
+    let mut skipped = Vec::new();
+
+    for item in request.items {
+        match save_sidecar_item(&vault, &item) {
+            Ok(()) => saved.push(item.media_path),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: item.media_path,
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    SaveSidecarsResponse {
+        saved,
         skipped,
         error: None,
     }
@@ -768,6 +809,18 @@ struct ApplyImportItem {
     sidecar_preview: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct SaveSidecarsRequest {
+    vault_root: Option<String>,
+    items: Vec<SaveSidecarItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SaveSidecarItem {
+    media_path: String,
+    sidecar_preview: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ApplyImportSkipped {
     source_path: String,
@@ -785,6 +838,23 @@ impl ApplyImportResponse {
     fn error(error: String) -> Self {
         Self {
             applied: Vec::new(),
+            skipped: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SaveSidecarsResponse {
+    saved: Vec<String>,
+    skipped: Vec<ApplyImportSkipped>,
+    error: Option<String>,
+}
+
+impl SaveSidecarsResponse {
+    fn error(error: String) -> Self {
+        Self {
+            saved: Vec::new(),
             skipped: Vec::new(),
             error: Some(error),
         }
@@ -1661,7 +1731,28 @@ fn apply_import_item(vault: &Vault, item: &ApplyImportItem) -> Result<()> {
         move_file_with_fallback(&source_absolute, &target_absolute)?;
     }
 
-    let sidecar_relative = sidecar_path_for(&target_relative)?;
+    write_sidecar_preview(vault, &target_relative, &item.sidecar_preview)?;
+
+    prune_empty_inbox_dirs(vault, source_absolute.parent());
+    Ok(())
+}
+
+fn save_sidecar_item(vault: &Vault, item: &SaveSidecarItem) -> Result<()> {
+    let media_relative = RelativePath::new(&item.media_path)?;
+    let media_absolute = vault.resolve(media_relative.as_path())?;
+
+    if !media_absolute.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Datei nicht gefunden: {}",
+            media_relative
+        )));
+    }
+
+    write_sidecar_preview(vault, &media_relative, &item.sidecar_preview)
+}
+
+fn write_sidecar_preview(vault: &Vault, media_relative: &RelativePath, sidecar_preview: &str) -> Result<()> {
+    let sidecar_relative = sidecar_path_for(media_relative)?;
     let sidecar_absolute = vault.resolve(sidecar_relative.as_path())?;
     let sidecar_parent = sidecar_absolute.parent().ok_or_else(|| {
         VaultError::InvalidVaultPath(format!(
@@ -1670,9 +1761,15 @@ fn apply_import_item(vault: &Vault, item: &ApplyImportItem) -> Result<()> {
         ))
     })?;
     fs::create_dir_all(sidecar_parent).map_err(VaultError::from)?;
-    fs::write(&sidecar_absolute, item.sidecar_preview.as_bytes()).map_err(VaultError::from)?;
+    fs::write(&sidecar_absolute, sidecar_preview.as_bytes()).map_err(VaultError::from)?;
 
-    prune_empty_inbox_dirs(vault, source_absolute.parent());
+    let mut legacy_relative = media_relative.to_path_buf();
+    legacy_relative.set_extension("mediashelf.yaml");
+    let legacy_absolute = vault.resolve(legacy_relative)?;
+    if legacy_absolute.exists() {
+        fs::remove_file(legacy_absolute).map_err(VaultError::from)?;
+    }
+
     Ok(())
 }
 
