@@ -64,16 +64,9 @@ jobs:
         run: |
           find target/release/bundle -maxdepth 3 -print | sort
 
-      - name: Archive app bundle for fallback testing
-        run: |
-          cd target/release/bundle/macos
-          zip -r MediaVault.app.zip MediaVault.app
-
-      - name: Upload bundled macOS artifacts
+      - name: Upload bundled macOS DMG
         uses: actions/upload-artifact@v4
         with:
           name: mediavault-macos
-          path: |
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/macos/MediaVault.app.zip
+          path: target/release/bundle/dmg/*.dmg
           if-no-files-found: error
