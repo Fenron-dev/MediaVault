@@ -390,6 +390,21 @@ h3 {
   border-color: rgba(122, 168, 116, 0.45);
 }
 
+.vault-switch-btn {
+  width: 100%;
+  font-size: 0.85rem;
+  color: var(--muted);
+  border-color: transparent;
+  background: transparent;
+  margin-top: 4px;
+}
+
+.vault-switch-btn:hover {
+  color: var(--text);
+  border-color: var(--line);
+  background: var(--panel);
+}
+
 .sidebar-meta {
   margin-top: auto;
   display: grid;
@@ -630,10 +645,10 @@ h3 {
 
 .table-row > span {
   min-width: 0;
-  overflow-wrap: break-word;
-  word-break: normal;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   line-height: 1.45;
-  white-space: pre-line;
 }
 
 #inbox-rows .table-row,

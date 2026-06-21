@@ -1122,16 +1122,17 @@ function clearAppliedLocalState(sourcePaths) {
 async function applyReadyImports() {
   const readyItems = (currentPlan?.items ?? []).filter((item) => isReadyForImport(item));
   if (!readyItems.length) {
+    const reviewCount = (currentPlan?.items ?? []).filter((item) => needsReviewInUi(item)).length;
+    const hint = reviewCount
+      ? ` ${reviewCount} Eintrag(e) warten noch auf Prüfung.`
+      : " Alle Einträge sind bereits in der Vault oder werden als Review markiert.";
     if (statusStrip) {
-      statusStrip.textContent = "Keine verschiebbaren Einträge vorhanden. Prüfe Titel, Typ und Duplikate.";
+      statusStrip.textContent = "Kein Eintrag bereit zum Verschieben." + hint;
+      statusStrip.style.color = "var(--accent-strong)";
+      setTimeout(() => {
+        statusStrip.style.color = "";
+      }, 4000);
     }
-    return;
-  }
-
-  const confirmed = window.confirm(
-    `${readyItems.length} Eintrag(e) jetzt aus der Inbox in die Vault-Struktur verschieben?`
-  );
-  if (!confirmed) {
     return;
   }
 
@@ -2043,7 +2044,9 @@ function createRow(item, cells, selected) {
 
   cells.forEach((cell) => {
     const span = document.createElement("span");
-    span.textContent = formatTableCellValue(cell);
+    const text = String(cell ?? "");
+    span.textContent = text;
+    span.title = text;
     row.appendChild(span);
   });
 
@@ -2055,14 +2058,6 @@ function createRow(item, cells, selected) {
   });
 
   return row;
-}
-
-function formatTableCellValue(value) {
-  const text = String(value ?? "");
-  if (!text.includes("/")) {
-    return text;
-  }
-  return text.replaceAll("/", "/\n");
 }
 
 function getSelectedItem() {
@@ -2482,6 +2477,12 @@ function renderPlan(plan) {
 
   const selected = getSelectedItem();
   renderDetail(selected);
+
+  const readyCount = plan.items.filter((item) => isReadyForImport(item)).length;
+  if (applyImportButton) {
+    applyImportButton.textContent =
+      readyCount > 0 ? `Import anwenden (${readyCount})` : "Import anwenden";
+  }
 
   if (statusStrip) {
     const rootText = plan.vault_root ? ` Vault: ${plan.vault_root}.` : "";
@@ -3968,6 +3969,17 @@ if (applyImportButton) {
         statusStrip.textContent = `Import konnte nicht angewendet werden: ${error.message}`;
       }
     }
+  });
+}
+
+const vaultSwitchBtn = document.getElementById("vault-switch");
+if (vaultSwitchBtn) {
+  vaultSwitchBtn.addEventListener("click", () => {
+    localStorage.removeItem(storageKey);
+    persistVaultRootState("").catch(() => {});
+    document.body.classList.remove("is-vault-open");
+    syncVaultHint();
+    renderRecentVaults();
   });
 }
 
