@@ -54,11 +54,20 @@ jobs:
       - name: Install Tauri CLI
         run: cargo install tauri-cli --locked --version "^2"
 
+      - name: Generate bundle icons
+        run: cargo tauri icon icons/icon.png
+
       - name: Build bundled macOS app
         run: cargo tauri build --bundles app
 
-      - name: Upload bundled macOS app
+      - name: Archive bundled macOS app
+        run: |
+          ditto -c -k --keepParent \
+            "target/release/bundle/macos/MediaVault.app" \
+            "target/release/bundle/macos/MediaVault-macos.zip"
+
+      - name: Upload bundled macOS archive
         uses: actions/upload-artifact@v4
         with:
           name: mediavault-macos-app
-          path: target/release/bundle/macos/*.app
+          path: target/release/bundle/macos/MediaVault-macos.zip
