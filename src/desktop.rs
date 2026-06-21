@@ -1,6 +1,6 @@
 //! Desktop shell bootstrap for MediaVault.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,36 @@ use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
 const PROTOCOL_SCHEME: &str = "mediavault";
 const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
 const LEGACY_SIDECAR_SUFFIX: &str = ".mediashelf.yaml";
+const ANILIST_CACHE_FILE: &str = "anilist_cache.json";
+
+type AniListCacheMap = HashMap<String, AniListAnimeMetadata>;
+
+fn anilist_cache_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".mediavault").join(ANILIST_CACHE_FILE))
+}
+
+fn load_anilist_cache() -> AniListCacheMap {
+    let path = match anilist_cache_path() {
+        Some(p) => p,
+        None => return HashMap::new(),
+    };
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn save_anilist_cache(cache: &AniListCacheMap) {
+    let Some(path) = anilist_cache_path() else { return };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(body) = serde_json::to_string(cache) {
+        let _ = fs::write(path, body);
+    }
+}
 
 const INDEX_HTML: &str = include_str!("../dist/index.html");
 const APP_JS: &str = include_str!("../dist/app.js");
@@ -104,9 +134,13 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8
 
 fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
     let root_override = query.and_then(|query| extract_query_value(query, "root"));
+    let refresh = query
+        .and_then(|query| extract_query_value(query, "refresh"))
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     if let Some(root_override) = root_override {
-        match build_vault_plan(Some(&root_override)) {
+        match build_vault_plan(Some(&root_override), refresh) {
             Ok(plan) => return plan,
             Err(error) => {
                 return build_error_plan(
@@ -118,7 +152,7 @@ fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
     }
 
     match resolve_vault_root(None) {
-        Ok(Some(vault_root)) => match build_vault_plan_with_root(vault_root) {
+        Ok(Some(vault_root)) => match build_vault_plan_with_root(vault_root, refresh) {
             Ok(plan) => plan,
             Err(error) => build_error_plan(
                 format!("Vault konnte nicht gescannt werden: {error}"),
@@ -434,13 +468,13 @@ fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
     fs::canonicalize(&vault_root).map_err(VaultError::from)
 }
 
-fn build_vault_plan(root_override: Option<&str>) -> Result<DemoPlanResponse> {
+fn build_vault_plan(root_override: Option<&str>, refresh: bool) -> Result<DemoPlanResponse> {
     let vault_root = resolve_vault_root(root_override)?
         .ok_or_else(|| VaultError::InvalidVaultPath("no vault root found".to_string()))?;
-    build_vault_plan_with_root(vault_root)
+    build_vault_plan_with_root(vault_root, refresh)
 }
 
-fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
+fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<DemoPlanResponse> {
     let vault = Vault::new(vault_root.clone())?;
     let files = scan_vault_files(&vault)?;
     let planner = ImportPlanner::new(ImportConfig {
@@ -448,6 +482,11 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
         ..ImportConfig::default()
     });
     let anilist_client = AniListClient::default();
+    let mut anilist_cache = if refresh {
+        HashMap::new()
+    } else {
+        load_anilist_cache()
+    };
 
     let mut items = Vec::with_capacity(files.len());
     let mut anilist_results = Vec::with_capacity(files.len());
@@ -455,10 +494,11 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
 
     for file in &files {
         let mut item = planner.plan_file(&file.incoming)?;
-        anilist_results.push(resolve_anilist_metadata(
+        anilist_results.push(resolve_anilist_metadata_cached(
             &anilist_client,
             &file.incoming,
             &item,
+            &mut anilist_cache,
         ));
         if is_in_inbox(&file.incoming.source_path) {
             if let Some(fingerprint) = item.fingerprint.as_ref() {
@@ -491,6 +531,8 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
 
         items.push(item);
     }
+
+    save_anilist_cache(&anilist_cache);
 
     let plan = ImportPlan {
         dry_run: true,
@@ -592,12 +634,18 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     let mut items = Vec::with_capacity(files.len());
     let mut anilist_results = Vec::with_capacity(files.len());
     let mut seen_fingerprints = HashSet::new();
+    let mut demo_cache: AniListCacheMap = HashMap::new();
 
     for file in &files {
         let mut item = planner
             .plan_file(file)
             .expect("demo planning should succeed");
-        anilist_results.push(resolve_anilist_metadata(&anilist_client, file, &item));
+        anilist_results.push(resolve_anilist_metadata_cached(
+            &anilist_client,
+            file,
+            &item,
+            &mut demo_cache,
+        ));
 
         if let Some(fingerprint) = item.fingerprint.as_ref() {
             let is_duplicate = !seen_fingerprints.insert(fingerprint.hash.clone());
@@ -1291,10 +1339,11 @@ fn format_episode_label(context: &AnimeEpisodeContext) -> Option<String> {
     }
 }
 
-fn resolve_anilist_metadata(
+fn resolve_anilist_metadata_cached(
     client: &AniListClient,
     file: &IncomingFile,
     item: &ImportPlanItem,
+    cache: &mut AniListCacheMap,
 ) -> Option<AniListAnimeMetadata> {
     let classification = item.classification.as_ref().or(file.classification.as_ref())?;
     if !should_attempt_anilist(classification.media_type, &file.source_path) {
@@ -1302,10 +1351,22 @@ fn resolve_anilist_metadata(
     }
 
     let search_title = build_anime_search_title(file)?;
-    client
+    let cache_key = search_title.to_lowercase();
+
+    if let Some(cached) = cache.get(&cache_key) {
+        return Some(cached.clone());
+    }
+
+    let result = client
         .search_anime(&search_title, AniListClient::adult_flag_for(classification.media_type))
         .ok()
-        .flatten()
+        .flatten();
+
+    if let Some(ref metadata) = result {
+        cache.insert(cache_key, metadata.clone());
+    }
+
+    result
 }
 
 fn should_attempt_anilist(media_type: MediaType, source_path: &RelativePath) -> bool {
@@ -1799,11 +1860,10 @@ fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
             break;
         }
 
-        let can_remove = fs::read_dir(&path)
-            .ok()
-            .and_then(|mut entries| entries.next().transpose().ok())
-            .flatten()
-            .is_none();
+        let can_remove = match fs::read_dir(&path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => false,
+        };
 
         if !can_remove {
             break;
@@ -1977,7 +2037,11 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultF
             .as_deref()
             .map(parse_sidecar_metadata)
             .transpose()?;
-        let fingerprint = Some(compute_fingerprint_for_file(&path)?);
+        let fingerprint = if is_in_inbox(&relative_path) {
+            Some(compute_fingerprint_for_file(&path)?)
+        } else {
+            None
+        };
         let classification = parsed_sidecar
             .as_ref()
             .and_then(classification_from_sidecar)
@@ -2100,11 +2164,16 @@ fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
 
 fn unquote_yaml(value: &str) -> String {
     let trimmed = value.trim();
-    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-        return trimmed[1..trimmed.len() - 1]
-            .replace("\\n", "\n")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
+    if trimmed.len() >= 2 {
+        let is_double = trimmed.starts_with('"') && trimmed.ends_with('"');
+        let is_single = trimmed.starts_with('\'') && trimmed.ends_with('\'');
+        if is_double || is_single {
+            return trimmed[1..trimmed.len() - 1]
+                .replace("\\n", "\n")
+                .replace("\\\"", "\"")
+                .replace("\\'", "'")
+                .replace("\\\\", "\\");
+        }
     }
     trimmed.to_string()
 }

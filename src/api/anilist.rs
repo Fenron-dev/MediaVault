@@ -437,7 +437,7 @@ impl AniListClient {
 }
 
 /// A normalized AniList anime result.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AniListAnimeMetadata {
     /// AniList media ID.
     pub anilist_id: u32,
@@ -550,7 +550,7 @@ impl AniListAnimeMetadata {
 }
 
 /// Date value returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListDate {
     /// Year component.
     pub year: Option<u16>,
@@ -561,7 +561,7 @@ pub struct AniListDate {
 }
 
 /// Trailer metadata returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListTrailer {
     /// Provider-local trailer id.
     pub id: Option<String>,
@@ -572,7 +572,7 @@ pub struct AniListTrailer {
 }
 
 /// AniList tag metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListTag {
     /// Tag name.
     pub name: String,
@@ -587,7 +587,7 @@ pub struct AniListTag {
 }
 
 /// Studio metadata returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListStudio {
     /// AniList studio id.
     pub id: u32,
@@ -600,7 +600,7 @@ pub struct AniListStudio {
 }
 
 /// Related media metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListRelation {
     /// Relation type.
     pub relation_type: Option<String>,
@@ -623,7 +623,7 @@ pub struct AniListRelation {
 }
 
 /// Character and Japanese voice actor credit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListCharacterCredit {
     /// Character role.
     pub role: Option<String>,
@@ -638,7 +638,7 @@ pub struct AniListCharacterCredit {
 }
 
 /// Staff credit metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListStaffCredit {
     /// Staff role.
     pub role: Option<String>,
@@ -647,7 +647,7 @@ pub struct AniListStaffCredit {
 }
 
 /// Person metadata used for staff and voice actors.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListPerson {
     /// AniList person id.
     pub id: u32,
@@ -662,7 +662,7 @@ pub struct AniListPerson {
 }
 
 /// Review metadata returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListReview {
     /// AniList review id.
     pub id: u32,
@@ -676,18 +676,6 @@ pub struct AniListReview {
     pub site_url: Option<String>,
     /// Reviewer name.
     pub user_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AniListGraphQlResponse {
-    data: Option<AniListGraphQlData>,
-    errors: Option<Vec<AniListGraphQlError>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AniListGraphQlData {
-    #[serde(rename = "Media")]
-    media: Option<AniListGraphQlMedia>,
 }
 
 #[derive(Debug, Deserialize)]
