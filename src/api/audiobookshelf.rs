@@ -122,12 +122,12 @@ impl AbsClient {
     /// - `api_key` – ABS API key from user settings
     ///
     /// # Errors
-    /// - Returns `VaultError::ApiError` if the HTTP client cannot be built.
+    /// - Returns `VaultError::ExternalApi` if the HTTP client cannot be built.
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Result<Self> {
         let client = Client::builder()
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
             .build()
-            .map_err(|e| VaultError::ApiError(format!("failed to build HTTP client: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("failed to build HTTP client: {e}")))?;
         Ok(Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_key: api_key.into(),
@@ -138,7 +138,7 @@ impl AbsClient {
     /// Verifies connectivity by fetching the server ping endpoint.
     ///
     /// # Errors
-    /// - Returns `VaultError::ApiError` if the server cannot be reached or
+    /// - Returns `VaultError::ExternalApi` if the server cannot be reached or
     ///   returns an unexpected status code.
     pub fn test_connection(&self) -> Result<()> {
         let url = format!("{}/ping", self.base_url);
@@ -146,9 +146,9 @@ impl AbsClient {
             .client
             .get(&url)
             .send()
-            .map_err(|e| VaultError::ApiError(format!("connection failed: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("connection failed: {e}")))?;
         if !resp.status().is_success() {
-            return Err(VaultError::ApiError(format!(
+            return Err(VaultError::ExternalApi(format!(
                 "server returned status {}",
                 resp.status()
             )));
@@ -159,7 +159,7 @@ impl AbsClient {
     /// Returns all libraries available on the ABS server.
     ///
     /// # Errors
-    /// - Returns `VaultError::ApiError` on network or parse errors.
+    /// - Returns `VaultError::ExternalApi` on network or parse errors.
     pub fn list_libraries(&self) -> Result<Vec<AbsLibrary>> {
         let url = format!("{}/api/libraries", self.base_url);
         let resp = self
@@ -167,10 +167,10 @@ impl AbsClient {
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
             .send()
-            .map_err(|e| VaultError::ApiError(format!("list_libraries failed: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("list_libraries failed: {e}")))?;
         let body: AbsLibrariesResponse = resp
             .json()
-            .map_err(|e| VaultError::ApiError(format!("list_libraries parse error: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("list_libraries parse error: {e}")))?;
         Ok(body.libraries)
     }
 
@@ -180,7 +180,7 @@ impl AbsClient {
     /// - `library_id` – ABS library identifier
     ///
     /// # Errors
-    /// - Returns `VaultError::ApiError` on network or parse errors.
+    /// - Returns `VaultError::ExternalApi` on network or parse errors.
     pub fn list_library_items(&self, library_id: &str) -> Result<Vec<AbsLibraryItem>> {
         let url = format!(
             "{}/api/libraries/{}/items?limit=100",
@@ -191,10 +191,10 @@ impl AbsClient {
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
             .send()
-            .map_err(|e| VaultError::ApiError(format!("list_library_items failed: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("list_library_items failed: {e}")))?;
         let body: AbsLibraryItemsResponse = resp
             .json()
-            .map_err(|e| VaultError::ApiError(format!("list_library_items parse error: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("list_library_items parse error: {e}")))?;
         Ok(body.results)
     }
 
@@ -203,7 +203,7 @@ impl AbsClient {
     /// Returns `None` if no progress record exists yet.
     ///
     /// # Errors
-    /// - Returns `VaultError::ApiError` on network errors.
+    /// - Returns `VaultError::ExternalApi` on network errors.
     pub fn get_progress(&self, item_id: &str) -> Result<Option<AbsProgress>> {
         let url = format!("{}/api/me/progress/{}", self.base_url, item_id);
         let resp = self
@@ -211,13 +211,13 @@ impl AbsClient {
             .get(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
             .send()
-            .map_err(|e| VaultError::ApiError(format!("get_progress failed: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("get_progress failed: {e}")))?;
         if resp.status().as_u16() == 404 {
             return Ok(None);
         }
         let progress: AbsProgress = resp
             .json()
-            .map_err(|e| VaultError::ApiError(format!("get_progress parse error: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("get_progress parse error: {e}")))?;
         Ok(Some(progress))
     }
 
@@ -230,7 +230,7 @@ impl AbsClient {
     /// - `is_finished` – whether the item has been completed
     ///
     /// # Errors
-    /// - Returns `VaultError::ApiError` on network errors or non-2xx status.
+    /// - Returns `VaultError::ExternalApi` on network errors or non-2xx status.
     pub fn set_progress(
         &self,
         item_id: &str,
@@ -250,9 +250,9 @@ impl AbsClient {
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
             .json(&payload)
             .send()
-            .map_err(|e| VaultError::ApiError(format!("set_progress failed: {e}")))?;
+            .map_err(|e| VaultError::ExternalApi(format!("set_progress failed: {e}")))?;
         if !resp.status().is_success() {
-            return Err(VaultError::ApiError(format!(
+            return Err(VaultError::ExternalApi(format!(
                 "set_progress returned status {}",
                 resp.status()
             )));
