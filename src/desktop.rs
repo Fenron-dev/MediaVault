@@ -13,6 +13,10 @@ use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
 };
+use crate::core::playlist::{
+    delete_cursor, delete_playlist, list_playlists, load_cursor, load_playlist, save_cursor,
+    save_playlist, Playlist, PlaylistCursor, PlaylistFilter, PlaylistKind, SortRule,
+};
 use crate::core::progress::{
     delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
 };
@@ -154,6 +158,30 @@ pub(crate) fn run() -> Result<()> {
                 "/api/open-external" => json_response(
                     StatusCode::OK,
                     &build_open_external_response(request.uri().query()),
+                ),
+                "/api/playlist/list" => json_response(
+                    StatusCode::OK,
+                    &build_list_playlists_response(request.uri().query()),
+                ),
+                "/api/playlist/get" => json_response(
+                    StatusCode::OK,
+                    &build_get_playlist_response(request.uri().query()),
+                ),
+                "/api/playlist/save" => json_response(
+                    StatusCode::OK,
+                    &build_save_playlist_response(request.body()),
+                ),
+                "/api/playlist/delete" => json_response(
+                    StatusCode::OK,
+                    &build_delete_playlist_response(request.body()),
+                ),
+                "/api/playlist/cursor/save" => json_response(
+                    StatusCode::OK,
+                    &build_save_cursor_response(request.body()),
+                ),
+                "/api/playlist/cursor/load" => json_response(
+                    StatusCode::OK,
+                    &build_load_cursor_response(request.uri().query()),
                 ),
                 "/api/recent-items" => json_response(
                     StatusCode::OK,
@@ -3517,4 +3545,288 @@ fn build_in_progress_response(query: Option<&str>) -> InProgressResponse {
         .collect();
 
     InProgressResponse { items, error: None }
+}
+
+// ---------------------------------------------------------------------------
+// Playlist APIs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ListPlaylistsResponse {
+    playlists: Vec<Playlist>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GetPlaylistResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playlist: Option<Playlist>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SavePlaylistRequest {
+    vault_root: Option<String>,
+    playlist: Playlist,
+}
+
+#[derive(Serialize)]
+struct SavePlaylistResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl SavePlaylistResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeletePlaylistRequest {
+    vault_root: Option<String>,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct DeletePlaylistResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl DeletePlaylistResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SaveCursorRequest {
+    vault_root: Option<String>,
+    cursor: PlaylistCursor,
+}
+
+#[derive(Serialize)]
+struct SaveCursorResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl SaveCursorResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct LoadCursorResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<PlaylistCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_list_playlists_response(query: Option<&str>) -> ListPlaylistsResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ListPlaylistsResponse {
+                playlists: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return ListPlaylistsResponse {
+                playlists: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return ListPlaylistsResponse {
+                playlists: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    match list_playlists(&vault.system_dir()) {
+        Ok(playlists) => ListPlaylistsResponse { playlists, error: None },
+        Err(e) => ListPlaylistsResponse { playlists: vec![], error: Some(e.to_string()) },
+    }
+}
+
+fn build_get_playlist_response(query: Option<&str>) -> GetPlaylistResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return GetPlaylistResponse { playlist: None, error: Some("missing query".into()) },
+    };
+
+    let id = match extract_query_value(query, "id") {
+        Some(id) => id,
+        None => return GetPlaylistResponse { playlist: None, error: Some("missing id".into()) },
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => return GetPlaylistResponse { playlist: None, error: Some(e.to_string()) },
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return GetPlaylistResponse { playlist: None, error: Some(e.to_string()) },
+    };
+
+    match load_playlist(&vault.system_dir(), &id) {
+        Ok(playlist) => GetPlaylistResponse { playlist, error: None },
+        Err(e) => GetPlaylistResponse { playlist: None, error: Some(e.to_string()) },
+    }
+}
+
+fn build_save_playlist_response(body: &[u8]) -> SavePlaylistResponse {
+    let req: SavePlaylistRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return SavePlaylistResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return SavePlaylistResponse::error("Kein Vault geöffnet."),
+        Err(e) => return SavePlaylistResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return SavePlaylistResponse::error(e.to_string()),
+    };
+
+    let mut playlist = req.playlist;
+    match save_playlist(&vault.system_dir(), &mut playlist) {
+        Ok(()) => SavePlaylistResponse::ok(),
+        Err(e) => SavePlaylistResponse::error(e.to_string()),
+    }
+}
+
+fn build_delete_playlist_response(body: &[u8]) -> DeletePlaylistResponse {
+    let req: DeletePlaylistRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return DeletePlaylistResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return DeletePlaylistResponse::error("Kein Vault geöffnet."),
+        Err(e) => return DeletePlaylistResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return DeletePlaylistResponse::error(e.to_string()),
+    };
+
+    match delete_playlist(&vault.system_dir(), &req.id) {
+        Ok(()) => DeletePlaylistResponse::ok(),
+        Err(e) => DeletePlaylistResponse::error(e.to_string()),
+    }
+}
+
+fn build_save_cursor_response(body: &[u8]) -> SaveCursorResponse {
+    let req: SaveCursorRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return SaveCursorResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return SaveCursorResponse::error("Kein Vault geöffnet."),
+        Err(e) => return SaveCursorResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return SaveCursorResponse::error(e.to_string()),
+    };
+
+    let mut cursor = req.cursor;
+    match save_cursor(&vault.progress_dir(), &mut cursor) {
+        Ok(()) => SaveCursorResponse::ok(),
+        Err(e) => SaveCursorResponse::error(e.to_string()),
+    }
+}
+
+fn build_load_cursor_response(query: Option<&str>) -> LoadCursorResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return LoadCursorResponse { cursor: None, error: Some("missing query".into()) },
+    };
+
+    let id = match extract_query_value(query, "id") {
+        Some(id) => id,
+        None => return LoadCursorResponse { cursor: None, error: Some("missing id".into()) },
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => return LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+    };
+
+    match load_cursor(&vault.progress_dir(), &id) {
+        Ok(cursor) => LoadCursorResponse { cursor, error: None },
+        Err(e) => LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+    }
 }

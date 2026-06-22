@@ -165,6 +165,11 @@ impl Vault {
         self.system_dir().join(PROGRESS_DIR)
     }
 
+    /// Returns the playlists directory.
+    pub fn playlists_dir(&self) -> PathBuf {
+        self.system_dir().join("playlists")
+    }
+
     /// Resolves an absolute path into a vault-relative path.
     pub fn relative_from_absolute<P: AsRef<Path>>(&self, absolute: P) -> Result<RelativePath> {
         let absolute = absolute.as_ref();

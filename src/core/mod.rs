@@ -4,6 +4,7 @@ pub mod audit;
 pub mod covers;
 pub mod duplicate;
 pub mod import;
+pub mod playlist;
 pub mod progress;
 pub mod properties;
 pub mod vault;
