@@ -163,7 +163,10 @@ pub fn progress_file_path(progress_dir: &std::path::Path, vault_path: &str) -> P
 }
 
 /// Loads the progress record for a vault-relative path, if one exists.
-pub fn load_progress(progress_dir: &std::path::Path, vault_path: &str) -> Result<Option<ProgressRecord>> {
+pub fn load_progress(
+    progress_dir: &std::path::Path,
+    vault_path: &str,
+) -> Result<Option<ProgressRecord>> {
     let file_path = progress_file_path(progress_dir, vault_path);
 
     if !file_path.exists() {

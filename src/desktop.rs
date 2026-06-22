@@ -1628,9 +1628,8 @@ fn build_collection_path(
         MediaType::Anime | MediaType::HentaiAnime => {
             if is_anilist_movie(anilist) {
                 let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
-                let y = year_suffix(
-                    year.or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year)),
-                );
+                let y =
+                    year_suffix(year.or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year)));
                 return format!("Anime/Filme/{t}{y}");
             }
 
@@ -2711,10 +2710,8 @@ fn parse_nfo_metadata(content: &str) -> ParsedNfoMetadata {
         title: extract_xml_tag(content, "title"),
         series_title: extract_xml_tag(content, "showtitle"),
         year: extract_xml_tag(content, "year").and_then(|s| s.parse::<u16>().ok()),
-        season_number: extract_xml_tag(content, "season")
-            .and_then(|s| s.parse::<u16>().ok()),
-        episode_start: extract_xml_tag(content, "episode")
-            .and_then(|s| s.parse::<u16>().ok()),
+        season_number: extract_xml_tag(content, "season").and_then(|s| s.parse::<u16>().ok()),
+        episode_start: extract_xml_tag(content, "episode").and_then(|s| s.parse::<u16>().ok()),
     }
 }
 
@@ -3168,7 +3165,12 @@ fn build_load_progress_response(query: Option<&str>) -> LoadProgressResponse {
     let root_override = extract_query_value(query, "root");
     let vault_root = match resolve_vault_root(root_override.as_deref()) {
         Ok(Some(r)) => r,
-        Ok(None) => return LoadProgressResponse { record: None, error: Some("Kein Vault geöffnet.".into()) },
+        Ok(None) => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
         Err(e) => return LoadProgressResponse { record: None, error: Some(e.to_string()) },
     };
 
@@ -3210,7 +3212,12 @@ fn build_list_progress_response(query: Option<&str>) -> ListProgressResponse {
     let root_override = query.and_then(|q| extract_query_value(q, "root"));
     let vault_root = match resolve_vault_root(root_override.as_deref()) {
         Ok(Some(r)) => r,
-        Ok(None) => return ListProgressResponse { records: vec![], error: Some("Kein Vault geöffnet.".into()) },
+        Ok(None) => {
+            return ListProgressResponse {
+                records: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
         Err(e) => return ListProgressResponse { records: vec![], error: Some(e.to_string()) },
     };
 
