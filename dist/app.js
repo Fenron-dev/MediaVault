@@ -1790,6 +1790,139 @@ function openImagePreview(item) {
 }
 
 // ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+const dashboardResumeSection = document.getElementById("dashboard-resume-section");
+const dashboardResumeCards = document.getElementById("dashboard-resume-cards");
+const dashboardRecentSection = document.getElementById("dashboard-recent-section");
+const dashboardRecentCards = document.getElementById("dashboard-recent-cards");
+const dashboardEmptyHint = document.getElementById("dashboard-empty-hint");
+
+function mediaTypeEmoji(type) {
+  switch (type) {
+    case "film": return "🎬";
+    case "series": return "📺";
+    case "anime": case "hentai-anime": return "🌸";
+    case "audiobook": return "🎧";
+    case "music-album": case "music-track": return "🎵";
+    case "book": case "ebook": return "📖";
+    case "manga": return "📚";
+    case "comic": return "💬";
+    case "video-misc": return "🎞";
+    default: return "📁";
+  }
+}
+
+function createDashboardCard(item, onPlay) {
+  const card = document.createElement("div");
+  card.className = "dashboard-card";
+  card.title = item.title;
+
+  const coverWrap = document.createElement("div");
+  coverWrap.className = "dashboard-card-cover";
+  if (item.cover_url) {
+    const img = document.createElement("img");
+    img.src = item.cover_url;
+    img.alt = item.title;
+    img.onerror = () => { img.style.display = "none"; };
+    coverWrap.appendChild(img);
+  } else {
+    coverWrap.textContent = mediaTypeEmoji(item.media_type);
+  }
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "dashboard-card-title";
+  titleEl.textContent = item.title;
+
+  const meta = document.createElement("div");
+  meta.className = "dashboard-card-meta";
+  meta.textContent = item.year ? String(item.year) : mediaTypeLabel(item.media_type);
+
+  card.appendChild(coverWrap);
+
+  if (typeof item.progress_fraction === "number") {
+    const barWrap = document.createElement("div");
+    barWrap.className = "dashboard-progress-bar";
+    const fill = document.createElement("div");
+    fill.className = "dashboard-progress-fill";
+    fill.style.width = `${Math.round(item.progress_fraction * 100)}%`;
+    barWrap.appendChild(fill);
+    card.appendChild(barWrap);
+  }
+
+  card.appendChild(titleEl);
+  card.appendChild(meta);
+
+  card.addEventListener("click", () => {
+    if (onPlay) onPlay(item);
+  });
+
+  return card;
+}
+
+async function loadDashboard() {
+  const root = getVaultRoot();
+  if (!root) return;
+
+  const rootQuery = `root=${encodeURIComponent(root)}`;
+
+  // Load in-progress items
+  try {
+    const res = await fetch(`mediavault://localhost/api/in-progress?${rootQuery}`);
+    const data = await res.json();
+    if (dashboardResumeCards) clearNode(dashboardResumeCards);
+    if (data.items && data.items.length > 0) {
+      if (dashboardResumeSection) dashboardResumeSection.hidden = false;
+      if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
+      data.items.forEach((item) => {
+        const card = createDashboardCard(item, (it) => {
+          const planItem = currentPlan?.items.find((p) => p.source_path === it.vault_path);
+          if (planItem) openPlayer(planItem);
+        });
+        dashboardResumeCards?.appendChild(card);
+      });
+    } else {
+      if (dashboardResumeSection) dashboardResumeSection.hidden = true;
+    }
+  } catch {
+    if (dashboardResumeSection) dashboardResumeSection.hidden = true;
+  }
+
+  // Load recent items
+  try {
+    const res = await fetch(`mediavault://localhost/api/recent-items?${rootQuery}`);
+    const data = await res.json();
+    if (dashboardRecentCards) clearNode(dashboardRecentCards);
+    if (data.items && data.items.length > 0) {
+      if (dashboardRecentSection) dashboardRecentSection.hidden = false;
+      if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
+      data.items.forEach((item) => {
+        const card = createDashboardCard(item, (it) => {
+          const planItem = currentPlan?.items.find((p) => p.source_path === it.vault_path);
+          if (planItem) {
+            const ext = playerFileExt(it.vault_path);
+            if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext)) {
+              openPlayer(planItem);
+            } else {
+              selectedItemKey = it.vault_path;
+              setActiveTab("inbox");
+              renderPlan(currentPlan);
+              renderDetail(planItem);
+            }
+          }
+        });
+        dashboardRecentCards?.appendChild(card);
+      });
+    } else {
+      if (dashboardRecentSection) dashboardRecentSection.hidden = true;
+    }
+  } catch {
+    if (dashboardRecentSection) dashboardRecentSection.hidden = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Media player
 // ---------------------------------------------------------------------------
 
@@ -4253,6 +4386,8 @@ async function loadPlan() {
     }
 
     renderPlan(currentPlan);
+    // Load dashboard asynchronously so it doesn't block the plan render.
+    loadDashboard().catch(() => {});
   } catch (error) {
     if (statusStrip) {
       statusStrip.textContent = `Vault-Scan konnte nicht geladen werden: ${error.message}`;
@@ -4266,6 +4401,9 @@ tabs.forEach((button) => {
     setActiveTab(tab, { resetCollections: tab === "collections" });
     if (tab === "collections" && currentPlan) {
       renderCollections(currentPlan.items);
+    }
+    if (tab === "overview") {
+      loadDashboard().catch(() => {});
     }
   });
 });

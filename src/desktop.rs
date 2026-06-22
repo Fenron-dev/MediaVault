@@ -155,6 +155,14 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_open_external_response(request.uri().query()),
                 ),
+                "/api/recent-items" => json_response(
+                    StatusCode::OK,
+                    &build_recent_items_response(request.uri().query()),
+                ),
+                "/api/in-progress" => json_response(
+                    StatusCode::OK,
+                    &build_in_progress_response(request.uri().query()),
+                ),
                 _ => response(
                     StatusCode::NOT_FOUND,
                     "text/plain; charset=utf-8",
@@ -3288,4 +3296,210 @@ fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {
         Ok(_) => OpenExternalResponse::ok(),
         Err(e) => OpenExternalResponse::error(format!("open failed: {e}")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard APIs
+// ---------------------------------------------------------------------------
+
+/// A lightweight item descriptor for dashboard cards.
+#[derive(Serialize)]
+struct DashboardItem {
+    vault_path: String,
+    title: String,
+    media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    year: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_fraction: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position_seconds: Option<f64>,
+    /// File modification time as UNIX seconds.
+    modified_at: u64,
+}
+
+#[derive(Serialize)]
+struct RecentItemsResponse {
+    items: Vec<DashboardItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InProgressResponse {
+    items: Vec<DashboardItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+const DASHBOARD_LIMIT: usize = 24;
+
+fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(&vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let scanned = match scan_vault_files(&vault) {
+        Ok(files) => files,
+        Err(e) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    // Sort by file system modification time, newest first.
+    let mut with_mtime: Vec<(u64, ScannedVaultFile)> = scanned
+        .into_iter()
+        .filter_map(|file| {
+            let abs = vault.resolve(file.incoming.source_path.as_path()).ok()?;
+            let mtime = fs::metadata(&abs)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some((mtime, file))
+        })
+        .collect();
+
+    with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let items = with_mtime
+        .into_iter()
+        .take(DASHBOARD_LIMIT)
+        .map(|(mtime, file)| {
+            let cls = file.incoming.classification.as_ref();
+            let media_type = cls
+                .map(|c| c.media_type.to_string())
+                .unwrap_or_else(|| "unclassified".to_string());
+            let title = file
+                .sidecar
+                .as_ref()
+                .and_then(|s| s.title.clone().or_else(|| s.series_title.clone()))
+                .or_else(|| {
+                    file.incoming
+                        .source_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| file.incoming.source_path.to_string());
+            let year = file
+                .incoming
+                .metadata
+                .as_ref()
+                .and_then(|m| m.year)
+                .or_else(|| file.sidecar.as_ref().and_then(|s| s.year));
+            DashboardItem {
+                vault_path: file.incoming.source_path.to_string(),
+                title,
+                media_type,
+                year,
+                cover_url: None,
+                progress_fraction: None,
+                position_seconds: None,
+                modified_at: mtime,
+            }
+        })
+        .collect();
+
+    RecentItemsResponse { items, error: None }
+}
+
+fn build_in_progress_response(query: Option<&str>) -> InProgressResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let records = match list_in_progress(&vault.progress_dir()) {
+        Ok(r) => r,
+        Err(e) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let items = records
+        .into_iter()
+        .take(DASHBOARD_LIMIT)
+        .map(|record| {
+            let title = record
+                .vault_path
+                .rsplit('/')
+                .next()
+                .and_then(|name| name.rsplit('.').nth(1).map(|_| name.to_string()))
+                .unwrap_or_else(|| record.vault_path.clone());
+            let position_seconds = match &record.progress {
+                MediaProgress::Video { position_seconds, .. }
+                | MediaProgress::Audio { position_seconds, .. } => Some(*position_seconds),
+                MediaProgress::Audiobook { position_seconds, .. } => Some(*position_seconds),
+                _ => None,
+            };
+            let modified_at = record.last_accessed;
+            DashboardItem {
+                vault_path: record.vault_path.clone(),
+                title,
+                media_type: "unknown".to_string(),
+                year: None,
+                cover_url: None,
+                progress_fraction: record.fraction(),
+                position_seconds,
+                modified_at,
+            }
+        })
+        .collect();
+
+    InProgressResponse { items, error: None }
 }

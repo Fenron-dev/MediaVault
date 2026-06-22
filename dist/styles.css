@@ -1719,6 +1719,93 @@ h3 {
 }
 
 /* --------------------------------------------------------------------------
+   Dashboard
+   -------------------------------------------------------------------------- */
+
+.dashboard-section {
+  margin: 0 0 8px;
+}
+
+.dashboard-section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+  color: var(--text);
+}
+
+.dashboard-scroll {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scrollbar-width: thin;
+}
+
+.dashboard-card {
+  flex: 0 0 140px;
+  display: grid;
+  grid-template-rows: 200px auto auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.dashboard-card:hover {
+  border-color: var(--accent);
+}
+
+.dashboard-card-cover {
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  background: var(--panel-strong);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 2rem;
+}
+
+.dashboard-card-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.dashboard-card-title {
+  padding: 6px 8px 2px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dashboard-card-meta {
+  padding: 0 8px 8px;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.dashboard-progress-bar {
+  height: 3px;
+  background: var(--line);
+  margin: 2px 8px 0;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.dashboard-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  transition: width 0.2s;
+}
+
+/* --------------------------------------------------------------------------
    Media player modal
    -------------------------------------------------------------------------- */
 
