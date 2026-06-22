@@ -607,6 +607,19 @@
           <video id="player-video" preload="metadata"></video>
         </div>
 
+        <!-- PDF stage (shown for .pdf files) -->
+        <div class="player-pdf-stage" id="player-pdf-stage" hidden>
+          <iframe id="player-pdf-frame" title="PDF-Ansicht"></iframe>
+        </div>
+
+        <!-- Manga/image stage (shown for image sequences) -->
+        <div class="player-manga-stage" id="player-manga-stage" hidden>
+          <button class="action-button icon-button player-manga-nav" id="player-manga-prev" title="Zurück">‹</button>
+          <img id="player-manga-img" alt="Seite" />
+          <button class="action-button icon-button player-manga-nav" id="player-manga-next" title="Weiter">›</button>
+          <div class="player-manga-counter" id="player-manga-counter">1 / 1</div>
+        </div>
+
         <!-- Audio-only placeholder (shown instead of stage for audio) -->
         <div class="player-audio-art" id="player-audio-art" hidden>
           <img id="player-cover-art" alt="" />

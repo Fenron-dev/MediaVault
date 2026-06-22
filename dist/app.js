@@ -147,6 +147,13 @@ const playerAudio = document.getElementById("player-audio");
 const playerAudioArt = document.getElementById("player-audio-art");
 const playerCoverArt = document.getElementById("player-cover-art");
 const playerSubtitleDisplay = document.getElementById("player-subtitle-display");
+const playerPdfStage = document.getElementById("player-pdf-stage");
+const playerPdfFrame = document.getElementById("player-pdf-frame");
+const playerMangaStage = document.getElementById("player-manga-stage");
+const playerMangaImg = document.getElementById("player-manga-img");
+const playerMangaPrev = document.getElementById("player-manga-prev");
+const playerMangaNext = document.getElementById("player-manga-next");
+const playerMangaCounter = document.getElementById("player-manga-counter");
 const playerClose = document.getElementById("player-close");
 const playerPlayPause = document.getElementById("player-play-pause");
 const playerSeek = document.getElementById("player-seek");
@@ -1916,7 +1923,7 @@ async function loadDashboard() {
           const planItem = currentPlan?.items.find((p) => p.source_path === it.vault_path);
           if (planItem) {
             const ext = playerFileExt(it.vault_path);
-            if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext)) {
+            if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext)) {
               openPlayer(planItem);
             } else {
               selectedItemKey = it.vault_path;
@@ -1945,6 +1952,11 @@ const PLAYER_VIDEO_EXTS = new Set(["mp4", "m4v", "mov", "webm", "ogv"]);
 const PLAYER_AUDIO_EXTS = new Set(["mp3", "m4a", "m4b", "aac", "ogg", "oga", "opus", "flac", "wav", "weba"]);
 // MKV/AVI cannot be played by macOS WKWebView natively.
 const PLAYER_UNSUPPORTED_EXTS = new Set(["mkv", "avi", "ts", "wmv", "rmvb"]);
+const PLAYER_PDF_EXTS = new Set(["pdf"]);
+const PLAYER_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"]);
+
+// mangaState holds the image list and current index when a manga/image sequence is open.
+let mangaState = null; // { items: string[], index: number }
 
 let playerState = null; // { mediaEl, item, vaultPath, sleepTimerId, saveTimerId, subtitleTrack }
 
@@ -2043,8 +2055,103 @@ function playerStop() {
   if (playerVideo) { playerVideo.src = ""; }
   if (playerAudio) { playerAudio.src = ""; }
   if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+  if (playerPdfFrame) playerPdfFrame.src = "";
+  if (playerPdfStage) playerPdfStage.hidden = true;
+  if (playerMangaStage) playerMangaStage.hidden = true;
+  mangaState = null;
 
   playerState = null;
+}
+
+// ── SRT subtitle parsing ────────────────────────────────────────────────────
+
+function parseSrt(text) {
+  const cues = [];
+  const blocks = text.replace(/\r\n/g, "\n").trim().split(/\n\n+/);
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    if (lines.length < 3) continue;
+    const timeLine = lines.find((l) => l.includes("-->"));
+    if (!timeLine) continue;
+    const [startStr, endStr] = timeLine.split("-->").map((s) => s.trim());
+    const toSec = (ts) => {
+      const [hms, ms] = ts.replace(",", ".").split(".");
+      const [h, m, s] = hms.split(":").map(Number);
+      return h * 3600 + m * 60 + s + Number(`0.${ms || 0}`);
+    };
+    const start = toSec(startStr);
+    const end = toSec(endStr);
+    const textIdx = lines.indexOf(timeLine) + 1;
+    const cueText = lines.slice(textIdx).join("\n").replace(/<[^>]+>/g, "");
+    cues.push({ start, end, text: cueText });
+  }
+  return cues;
+}
+
+let subtitleCues = [];
+let subtitleRafId = null;
+
+function startSubtitleLoop(mediaEl) {
+  if (subtitleRafId) cancelAnimationFrame(subtitleRafId);
+  function tick() {
+    if (!playerState || !subtitleCues.length) {
+      if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+      return;
+    }
+    const t = mediaEl.currentTime;
+    const cue = subtitleCues.find((c) => t >= c.start && t <= c.end);
+    if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = cue?.text ?? "";
+    subtitleRafId = requestAnimationFrame(tick);
+  }
+  subtitleRafId = requestAnimationFrame(tick);
+}
+
+async function loadSubtitles(vaultPath) {
+  subtitleCues = [];
+  const srtPath = vaultPath.replace(/\.[^.]+$/, ".srt");
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/media-file?path=${encodeURIComponent(srtPath)}${rootQuery}`
+    );
+    if (!res.ok) return;
+    const text = await res.text();
+    subtitleCues = parseSrt(text);
+  } catch {
+    subtitleCues = [];
+  }
+}
+
+// ── Manga/image sequence ────────────────────────────────────────────────────
+
+function mangaSiblings(vaultPath) {
+  if (!currentPlan) return [vaultPath];
+  const dir = vaultPath.includes("/") ? vaultPath.substring(0, vaultPath.lastIndexOf("/")) : "";
+  return currentPlan.items
+    .filter((it) => {
+      const p = it.source_path || "";
+      const ext = p.split(".").pop().toLowerCase();
+      if (!PLAYER_IMAGE_EXTS.has(ext)) return false;
+      const d = p.includes("/") ? p.substring(0, p.lastIndexOf("/")) : "";
+      return d === dir;
+    })
+    .map((it) => it.source_path)
+    .sort();
+}
+
+function mangaShowIndex(index) {
+  if (!mangaState || !playerMangaImg || !playerMangaCounter) return;
+  const items = mangaState.items;
+  const clamped = Math.max(0, Math.min(items.length - 1, index));
+  mangaState.index = clamped;
+  const vaultPath = items[clamped];
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  playerMangaImg.src = `mediavault://localhost/api/media-file?path=${encodeURIComponent(vaultPath)}${rootQuery}`;
+  playerMangaCounter.textContent = `${clamped + 1} / ${items.length}`;
+  if (playerMangaPrev) playerMangaPrev.disabled = clamped === 0;
+  if (playerMangaNext) playerMangaNext.disabled = clamped === items.length - 1;
 }
 
 function playerSetPlayPause(el) {
@@ -2063,35 +2170,67 @@ async function openPlayer(item) {
   const ext = playerFileExt(sourcePath);
   const isVideo = isVideoFile(sourcePath);
   const isAudio = isAudioFile(sourcePath);
+  const isPdf = PLAYER_PDF_EXTS.has(ext);
+  const isImage = PLAYER_IMAGE_EXTS.has(ext);
   const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext);
 
-  if (!isVideo && !isAudio && !unsupported) return;
+  if (!isVideo && !isAudio && !isPdf && !isImage && !unsupported) return;
 
   const fileUrl = mediaFileUrlFor(item);
   const title = item.title || fileStem(sourcePath) || "Wiedergabe";
 
   if (playerTitle) playerTitle.textContent = title;
 
+  // Show the player fullscreen overlay
+  playerDialog.hidden = false;
+  if (appModal) {
+    appModal.hidden = true;
+  }
+
+  // ── PDF ──────────────────────────────────────────────────────────────────
+  if (isPdf) {
+    if (playerStage) playerStage.hidden = true;
+    if (playerAudioArt) playerAudioArt.hidden = true;
+    if (playerPdfStage) playerPdfStage.hidden = false;
+    if (playerMangaStage) playerMangaStage.hidden = true;
+    if (playerPdfFrame) playerPdfFrame.src = fileUrl;
+    // PDF has no playback controls; disable them
+    if (playerPlayPause) playerPlayPause.disabled = true;
+    // Store minimal state so closePlayer works
+    playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
+    return;
+  }
+
+  // ── Image / manga sequence ───────────────────────────────────────────────
+  if (isImage) {
+    if (playerStage) playerStage.hidden = true;
+    if (playerAudioArt) playerAudioArt.hidden = true;
+    if (playerPdfStage) playerPdfStage.hidden = true;
+    if (playerMangaStage) playerMangaStage.hidden = false;
+    if (playerPlayPause) playerPlayPause.disabled = true;
+    const siblings = mangaSiblings(sourcePath);
+    const startIdx = Math.max(0, siblings.indexOf(sourcePath));
+    mangaState = { items: siblings, index: startIdx };
+    mangaShowIndex(startIdx);
+    playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
+    return;
+  }
+
+  // ── Audio / Video ────────────────────────────────────────────────────────
   const mediaEl = isVideo ? playerVideo : playerAudio;
   if (!mediaEl) return;
 
-  // Show/hide video stage vs audio art
   if (playerStage) playerStage.hidden = !isVideo;
   if (playerAudioArt) playerAudioArt.hidden = isVideo;
+  if (playerPdfStage) playerPdfStage.hidden = true;
+  if (playerMangaStage) playerMangaStage.hidden = true;
   if (playerCoverArt && !isVideo) {
     const cover = coverUrlFor(item);
     playerCoverArt.src = cover || "";
     playerCoverArt.hidden = !cover;
   }
 
-  // Show the player fullscreen overlay
-  playerDialog.hidden = false;
-  if (appModal) {
-    appModal.hidden = true; // player sits outside app-modal, don't obscure it
-  }
-
   if (unsupported) {
-    // Cannot play natively — show open-with-system option prominently
     if (playerPlayPause) playerPlayPause.disabled = true;
     if (playerOpenSystem) playerOpenSystem.style.fontWeight = "bold";
   } else {
@@ -2106,6 +2245,13 @@ async function openPlayer(item) {
     const record = await playerLoadProgress(sourcePath);
     if (record?.progress?.position_seconds && isFinite(record.progress.position_seconds)) {
       mediaEl.currentTime = record.progress.position_seconds;
+    }
+
+    // Load .srt subtitle companion for video files
+    if (isVideo) {
+      loadSubtitles(sourcePath).then(() => {
+        if (playerState && subtitleCues.length > 0) startSubtitleLoop(mediaEl);
+      });
     }
 
     mediaEl.play().catch(() => {});
@@ -2386,6 +2532,18 @@ function initPlayer() {
     });
   }
 
+  // Manga navigation buttons
+  if (playerMangaPrev) {
+    playerMangaPrev.addEventListener("click", () => {
+      if (mangaState) mangaShowIndex(mangaState.index - 1);
+    });
+  }
+  if (playerMangaNext) {
+    playerMangaNext.addEventListener("click", () => {
+      if (mangaState) mangaShowIndex(mangaState.index + 1);
+    });
+  }
+
   // Keep time display and seek bar in sync.
   for (const mediaEl of [playerVideo, playerAudio]) {
     if (!mediaEl) continue;
@@ -2396,6 +2554,7 @@ function initPlayer() {
     mediaEl.addEventListener("ended", () => {
       if (playerPlayPause) playerPlayPause.textContent = "▶";
       playerSaveProgress();
+      playerAdvancePlaylist();
     });
   }
 
@@ -2410,10 +2569,27 @@ function initPlayer() {
         e.preventDefault();
         playerPlayPause?.click();
       }
-      if (e.key === "ArrowLeft") { e.preventDefault(); playerSkipBack?.click(); }
-      if (e.key === "ArrowRight") { e.preventDefault(); playerSkipFwd?.click(); }
+      if (e.key === "ArrowLeft") {
+        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index - 1); }
+        else { e.preventDefault(); playerSkipBack?.click(); }
+      }
+      if (e.key === "ArrowRight") {
+        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index + 1); }
+        else { e.preventDefault(); playerSkipFwd?.click(); }
+      }
     }
   });
+}
+
+function playerAdvancePlaylist() {
+  if (!activePlaylistId || !currentPlan) return;
+  const pl = activePlaylists.find((p) => p.id === activePlaylistId);
+  if (!pl || !pl.items?.length || !playerState) return;
+  const cur = playerState.vaultPath;
+  const idx = pl.items.indexOf(cur);
+  if (idx < 0 || idx >= pl.items.length - 1) return;
+  const next = currentPlan.items.find((it) => it.source_path === pl.items[idx + 1]);
+  if (next) openPlayer(next);
 }
 
 function selectionSearchTitle(selection) {
@@ -3108,7 +3284,12 @@ function renderInspector(value) {
   if (inspectorPlay) {
     const srcPath = item?.source_path || item?.target_path || "";
     const ext = playerFileExt(srcPath);
-    const playable = isVideoFile(srcPath) || isAudioFile(srcPath) || PLAYER_UNSUPPORTED_EXTS.has(ext);
+    const playable =
+      isVideoFile(srcPath) ||
+      isAudioFile(srcPath) ||
+      PLAYER_UNSUPPORTED_EXTS.has(ext) ||
+      PLAYER_PDF_EXTS.has(ext) ||
+      PLAYER_IMAGE_EXTS.has(ext);
     inspectorPlay.hidden = !item || !playable;
   }
   if (inspectorFetchMetadata) {
