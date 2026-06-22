@@ -669,43 +669,48 @@ function classificationSourceLabel(value) {
 function folderSegmentFor(mediaType) {
   switch (mediaType) {
     case "film":
-      return "Movies";
+      return "Filme";
     case "series":
-      return "Series";
+      return "Serien";
     case "anime":
+    case "hentai-anime":
       return "Anime";
     case "photo":
-      return "Photos";
+      return "Fotos";
     case "image":
-      return "Images";
+      return "Bilder";
     case "music-album":
-      return "Music/Albums";
     case "music-track":
-      return "Music/Tracks";
+      return "Musik";
     case "book":
-      return "Books";
     case "ebook":
-      return "Ebooks";
+      return "Bücher";
     case "manga":
       return "Manga";
     case "comic":
       return "Comics";
     case "audiobook":
-      return "Audiobooks";
+      return "Hörbücher";
     case "video-game":
-      return "Video Games";
+      return "Games";
+    case "rpg":
+      return "TTRPG";
+    case "board-game":
+      return "Brettspiele";
     case "document":
-      return "Documents";
+      return "Dokumente";
     case "archive":
-      return "Archives";
+      return "Archive";
     case "software":
       return "Software";
     case "3d-model":
-      return "3D Models";
+      return "3D-Modelle";
     case "video-misc":
       return "Videos";
+    case "font":
+      return "Schriften";
     default:
-      return "Unclassified";
+      return "Unklassifiziert";
   }
 }
 
@@ -880,7 +885,8 @@ function collectionPathFor(item) {
 
   const folder = item.folder_segment ?? folderSegmentFor(item.media_type);
   const title = sanitizeSegment(item.title || fileStem(item.source_path) || "Unbenannt");
-  return title ? `${folder}/${title}` : folder;
+  const yearSuffix = item.year ? ` (${item.year})` : "";
+  return title ? `${folder}/${title}${yearSuffix}` : folder;
 }
 
 function episodeFileLabel(item) {

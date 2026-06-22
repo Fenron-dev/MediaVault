@@ -24,6 +24,21 @@ const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
 const LEGACY_SIDECAR_SUFFIX: &str = ".mediashelf.yaml";
 const ANILIST_CACHE_FILE: &str = "anilist_cache.json";
 
+const INBOX_SUBFOLDERS: &[&str] = &[
+    "Unsortiert",
+    "Anime/TV",
+    "Anime/Filme",
+    "Serien",
+    "Filme",
+    "Musik",
+    "Bücher",
+    "Hörbücher",
+    "Manga",
+    "Comics",
+    "TTRPG",
+    "Games",
+];
+
 type AniListCacheMap = HashMap<String, AniListAnimeMetadata>;
 
 fn anilist_cache_path() -> Option<PathBuf> {
@@ -104,6 +119,10 @@ pub(crate) fn run() -> Result<()> {
                 "/api/save-sidecars" => json_response(
                     StatusCode::OK,
                     &build_save_sidecars_response(request.body()),
+                ),
+                "/api/cleanup-vault" => json_response(
+                    StatusCode::OK,
+                    &build_cleanup_vault_response(request.uri().query()),
                 ),
                 _ => response(
                     StatusCode::NOT_FOUND,
@@ -432,6 +451,201 @@ fn build_save_sidecars_response(body: &[u8]) -> SaveSidecarsResponse {
     }
 }
 
+fn build_cleanup_vault_response(query: Option<&str>) -> CleanupVaultResponse {
+    let root_override = query.and_then(|query| extract_query_value(query, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => {
+            return CleanupVaultResponse::error("Kein Vault geöffnet.".to_string());
+        }
+        Err(error) => return CleanupVaultResponse::error(error.to_string()),
+    };
+    let vault = match Vault::new(&vault_root) {
+        Ok(vault) => vault,
+        Err(error) => return CleanupVaultResponse::error(error.to_string()),
+    };
+    match run_vault_cleanup(&vault) {
+        Ok(response) => response,
+        Err(error) => CleanupVaultResponse::error(error.to_string()),
+    }
+}
+
+/// Scans the vault for maintenance issues: orphaned sidecars, empty folders, and
+/// thumbnail/asset entries that no longer have a corresponding media file.
+fn run_vault_cleanup(vault: &Vault) -> Result<CleanupVaultResponse> {
+    let mut issues: Vec<CleanupIssue> = Vec::new();
+
+    // --- Orphaned .mediavault.yaml sidecars ---
+    find_orphaned_sidecars(vault, vault.root(), &mut issues)?;
+
+    // --- Empty directories (excluding system and inbox) ---
+    find_empty_directories(vault, vault.root(), &mut issues)?;
+
+    // --- Orphaned thumbnail cache files ---
+    if vault.thumbnails_dir().exists() {
+        for entry in fs::read_dir(vault.thumbnails_dir()).map_err(VaultError::from)? {
+            let entry = entry.map_err(VaultError::from)?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "jpg").unwrap_or(false) {
+                // Thumbnails are named by content hash; we can't re-link them here without
+                // the DB.  Flag them as potentially stale for manual review.
+                issues.push(CleanupIssue {
+                    kind: "stale_thumbnail".to_string(),
+                    path: path.display().to_string(),
+                    description: "Thumbnail ohne zugehörigen Eintrag (DB nicht verfügbar)"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    let summary = CleanupSummary {
+        orphaned_sidecars: issues
+            .iter()
+            .filter(|i| i.kind == "orphaned_sidecar")
+            .count(),
+        empty_directories: issues
+            .iter()
+            .filter(|i| i.kind == "empty_directory")
+            .count(),
+        stale_thumbnails: issues
+            .iter()
+            .filter(|i| i.kind == "stale_thumbnail")
+            .count(),
+    };
+
+    Ok(CleanupVaultResponse {
+        issues,
+        summary,
+        error: None,
+    })
+}
+
+fn find_orphaned_sidecars(
+    vault: &Vault,
+    directory: &Path,
+    issues: &mut Vec<CleanupIssue>,
+) -> Result<()> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(VaultError::from)?;
+        let path = entry.path();
+        if path.is_dir() {
+            if should_skip_scanned_directory(vault, &path) {
+                continue;
+            }
+            find_orphaned_sidecars(vault, &path, issues)?;
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name.ends_with(".mediavault.yaml") || name.ends_with(LEGACY_SIDECAR_SUFFIX) {
+            // Derive the expected media filename by stripping the sidecar suffix.
+            let media_path = if name.ends_with(".mediavault.yaml") {
+                path.with_file_name(name.trim_end_matches(".mediavault.yaml"))
+            } else {
+                path.with_file_name(name.trim_end_matches(LEGACY_SIDECAR_SUFFIX))
+            };
+            if !media_path.exists() {
+                issues.push(CleanupIssue {
+                    kind: "orphaned_sidecar".to_string(),
+                    path: path.display().to_string(),
+                    description: format!(
+                        "Sidecar ohne Mediendatei: {}",
+                        media_path.display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_empty_directories(
+    vault: &Vault,
+    directory: &Path,
+    issues: &mut Vec<CleanupIssue>,
+) -> Result<()> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut has_content = false;
+
+    for entry in entries {
+        let entry = entry.map_err(VaultError::from)?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            if should_skip_scanned_directory(vault, &path)
+                || path == vault.inbox_dir()
+                || path.starts_with(vault.inbox_dir())
+            {
+                has_content = true; // inbox subfolders are intentionally empty initially
+                continue;
+            }
+            find_empty_directories(vault, &path, issues)?;
+            has_content = true;
+        } else if path.is_file() {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !is_hidden_system_entry(name) {
+                has_content = true;
+            }
+        }
+    }
+
+    if !has_content && directory != vault.root() {
+        issues.push(CleanupIssue {
+            kind: "empty_directory".to_string(),
+            path: directory.display().to_string(),
+            description: "Leerer Ordner".to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupIssue {
+    kind: String,
+    path: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupSummary {
+    orphaned_sidecars: usize,
+    empty_directories: usize,
+    stale_thumbnails: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupVaultResponse {
+    issues: Vec<CleanupIssue>,
+    summary: CleanupSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl CleanupVaultResponse {
+    fn error(message: String) -> Self {
+        Self {
+            issues: Vec::new(),
+            summary: CleanupSummary {
+                orphaned_sidecars: 0,
+                empty_directories: 0,
+                stale_thumbnails: 0,
+            },
+            error: Some(message),
+        }
+    }
+}
+
 fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
     let parent = PathBuf::from(parent.trim());
     if parent.as_os_str().is_empty() {
@@ -467,6 +681,17 @@ fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
     fs::create_dir_all(vault.review_queue_dir()).map_err(VaultError::from)?;
     fs::create_dir_all(vault.covers_dir()).map_err(VaultError::from)?;
     fs::create_dir_all(vault.system_dir()).map_err(VaultError::from)?;
+
+    // Pre-create sorted inbox subfolders so users can drop files in the right place immediately.
+    let inbox = vault.inbox_dir();
+    for subfolder in INBOX_SUBFOLDERS {
+        fs::create_dir_all(inbox.join(subfolder)).map_err(VaultError::from)?;
+    }
+
+    // Create app-internal cache directories up front so cover downloads never need to
+    // check-and-mkdir at call time.
+    fs::create_dir_all(vault.thumbnails_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.assets_dir()).map_err(VaultError::from)?;
 
     fs::canonicalize(&vault_root).map_err(VaultError::from)
 }
@@ -992,9 +1217,15 @@ impl DemoPlanItem {
                     .as_ref()
                     .and_then(|context| context.episode_title.clone())
             });
+        let effective_year = file
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.year)
+            .or_else(|| sidecar.and_then(|value| value.year));
         let collection_path = build_collection_path(
             media_type,
             title.as_deref(),
+            effective_year,
             anime_context.as_ref(),
             anilist,
         );
@@ -1234,16 +1465,23 @@ fn derive_anime_context(
 fn build_collection_path(
     media_type: MediaType,
     title: Option<&str>,
+    year: Option<u16>,
     anime_context: Option<&AnimeEpisodeContext>,
     anilist: Option<&AniListAnimeMetadata>,
 ) -> String {
+    // Append "(year)" suffix when a year is known — helps distinguish remakes and re-releases.
+    let year_suffix = |y: Option<u16>| -> String {
+        y.map(|y| format!(" ({y})")).unwrap_or_default()
+    };
+
     match media_type {
         MediaType::Anime | MediaType::HentaiAnime => {
             if is_anilist_movie(anilist) {
-                return format!(
-                    "Anime/Filme/{}",
-                    sanitize_path_segment(title.unwrap_or("Unbenannt"))
+                let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+                let y = year_suffix(
+                    year.or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year)),
                 );
+                return format!("Anime/Filme/{t}{y}");
             }
 
             let series = anime_context
@@ -1273,17 +1511,35 @@ fn build_collection_path(
                 season_number
             )
         }
-        MediaType::Film => format!(
-            "Movies/{}",
-            sanitize_path_segment(title.unwrap_or("Unbenannt"))
-        ),
+        MediaType::Film => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Filme/{t}{y}")
+        }
+        // Books and Ebooks: Bücher/<Title (Year)>/  — Author subfolder added once OpenLibrary
+        // metadata is available.
+        MediaType::Book | MediaType::Ebook => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Bücher/{t}{y}")
+        }
+        MediaType::Audiobook => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Hörbücher/{t}{y}")
+        }
+        // Music: Musik/<Title (Year)>/  — Artist subfolder added once MusicBrainz metadata is
+        // available.
+        MediaType::MusicAlbum | MediaType::MusicTrack => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Musik/{t}{y}")
+        }
         _ => {
             let folder = media_type.folder_segment();
-            if let Some(title) = title {
-                format!("{folder}/{}", sanitize_path_segment(title))
-            } else {
-                folder.to_string()
-            }
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("{folder}/{t}{y}")
         }
     }
 }
@@ -1305,16 +1561,23 @@ fn build_target_path_preview(
 
     if is_anime && is_anilist_movie(anilist) {
         let movie_title = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+        let year = file
+            .metadata
+            .as_ref()
+            .and_then(|m| m.year)
+            .or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year));
+        let year_suffix = year.map(|y| format!(" ({y})")).unwrap_or_default();
+        let folder_name = format!("{movie_title}{year_suffix}");
         let extension = file
             .source_path
             .extension()
             .map(|ext| ext.to_string_lossy().to_string());
         let mut path = PathBuf::from("Anime");
         path.push("Filme");
-        path.push(&movie_title);
+        path.push(&folder_name);
         let file_name = match extension {
-            Some(extension) if !extension.is_empty() => format!("{movie_title}.{extension}"),
-            _ => movie_title,
+            Some(extension) if !extension.is_empty() => format!("{folder_name}.{extension}"),
+            _ => folder_name,
         };
         path.push(file_name.as_str());
         return Some(path.display().to_string());
@@ -2101,16 +2364,25 @@ fn scan_directory(
             .as_deref()
             .map(parse_sidecar_metadata)
             .transpose()?;
+        let parsed_nfo = find_nfo_companion(&path)
+            .map(|nfo_path| {
+                fs::read_to_string(&nfo_path)
+                    .map(|content| parse_nfo_metadata(&content))
+                    .map_err(VaultError::from)
+            })
+            .transpose()?;
+        // NFO data fills any gap not already covered by the .mediavault.yaml sidecar.
+        let effective_sidecar = merge_nfo_into_sidecar(parsed_sidecar, parsed_nfo.as_ref());
         let fingerprint = if is_in_inbox(&relative_path) {
             Some(compute_fingerprint_for_file(&path)?)
         } else {
             None
         };
-        let classification = parsed_sidecar
+        let classification = effective_sidecar
             .as_ref()
             .and_then(classification_from_sidecar)
             .or_else(|| detect_classification(&relative_path));
-        let resolved_title = parsed_sidecar
+        let resolved_title = effective_sidecar
             .as_ref()
             .and_then(|sidecar| {
                 sidecar
@@ -2125,7 +2397,7 @@ fn scan_directory(
             });
         let resolved_metadata = Some(ResolvedMetadata {
             title: resolved_title,
-            year: parsed_sidecar.as_ref().and_then(|sidecar| sidecar.year),
+            year: effective_sidecar.as_ref().and_then(|sidecar| sidecar.year),
         });
 
         files.push(ScannedVaultFile {
@@ -2136,7 +2408,7 @@ fn scan_directory(
                 classification,
                 metadata: resolved_metadata,
             },
-            sidecar: parsed_sidecar,
+            sidecar: effective_sidecar,
             sidecar_preview,
         });
     }
@@ -2164,6 +2436,98 @@ fn should_skip_scanned_file(path: &Path) -> bool {
     is_hidden_system_entry(name)
         || name.ends_with(".mediavault.yaml")
         || name.ends_with(LEGACY_SIDECAR_SUFFIX)
+        // NFO files are metadata companions, not independent media entries.
+        || name.to_lowercase().ends_with(".nfo")
+}
+
+/// Looks for a Kodi/XBMC-style `.nfo` companion file alongside a media file.
+///
+/// Checks in priority order:
+/// 1. Same filename with `.nfo` extension (e.g. `Movie.mkv` → `Movie.nfo`)
+/// 2. `movie.nfo` in the same directory (common Kodi convention)
+fn find_nfo_companion(media_path: &Path) -> Option<PathBuf> {
+    let mut nfo_path = media_path.to_path_buf();
+    nfo_path.set_extension("nfo");
+    if nfo_path.exists() {
+        return Some(nfo_path);
+    }
+    let movie_nfo = media_path.parent()?.join("movie.nfo");
+    if movie_nfo.exists() {
+        Some(movie_nfo)
+    } else {
+        None
+    }
+}
+
+/// Metadata extracted from a Kodi/XBMC NFO companion file.
+#[derive(Debug, Default)]
+struct ParsedNfoMetadata {
+    title: Option<String>,
+    /// For episode NFOs: the show title (`<showtitle>`).
+    series_title: Option<String>,
+    year: Option<u16>,
+    season_number: Option<u16>,
+    episode_start: Option<u16>,
+}
+
+/// Parses a subset of the Kodi NFO XML format without a full XML parser.
+///
+/// Only extracts fields that map to existing `ParsedSidecar` slots; everything
+/// else is ignored.  The NFO format is well-defined enough that tag-based
+/// substring search is reliable here.
+fn parse_nfo_metadata(content: &str) -> ParsedNfoMetadata {
+    ParsedNfoMetadata {
+        title: extract_xml_tag(content, "title"),
+        series_title: extract_xml_tag(content, "showtitle"),
+        year: extract_xml_tag(content, "year").and_then(|s| s.parse::<u16>().ok()),
+        season_number: extract_xml_tag(content, "season")
+            .and_then(|s| s.parse::<u16>().ok()),
+        episode_start: extract_xml_tag(content, "episode")
+            .and_then(|s| s.parse::<u16>().ok()),
+    }
+}
+
+/// Extracts the text content of the first matching XML tag.
+fn extract_xml_tag(content: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = content.find(&open)? + open.len();
+    let end = content[start..].find(&close).map(|i| start + i)?;
+    let value = content[start..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Merges NFO companion data into a sidecar, with NFO only filling absent fields.
+///
+/// The `.mediavault.yaml` sidecar always wins; NFO data only fills gaps.
+fn merge_nfo_into_sidecar(
+    sidecar: Option<ParsedSidecar>,
+    nfo: Option<&ParsedNfoMetadata>,
+) -> Option<ParsedSidecar> {
+    let Some(nfo) = nfo else {
+        return sidecar;
+    };
+    let mut result = sidecar.unwrap_or_default();
+    if result.title.is_none() {
+        result.title = nfo.title.clone();
+    }
+    if result.series_title.is_none() {
+        result.series_title = nfo.series_title.clone();
+    }
+    if result.year.is_none() {
+        result.year = nfo.year;
+    }
+    if result.season_number.is_none() {
+        result.season_number = nfo.season_number;
+    }
+    if result.episode_start.is_none() {
+        result.episode_start = nfo.episode_start;
+    }
+    Some(result)
 }
 
 fn find_sidecar_file(vault: &Vault, media_path: &RelativePath) -> Result<Option<PathBuf>> {
@@ -2287,8 +2651,65 @@ fn parse_media_status(value: &str) -> Option<MediaStatus> {
     }
 }
 
+fn classify_from_inbox_folder(path: &str) -> Option<FileClassification> {
+    let make = |media_type: MediaType| FileClassification {
+        media_type,
+        confidence: 0.96,
+        source: ClassificationSource::Folder,
+    };
+    // These paths reflect the pre-created INBOX_SUBFOLDERS — the user intentionally
+    // placed the file there, so treat the folder as a strong signal.
+    if path.starts_with("inbox/anime/tv/") || path.starts_with("inbox/anime/serien/") {
+        return Some(make(MediaType::Anime));
+    }
+    if path.starts_with("inbox/anime/") {
+        return Some(make(MediaType::Anime));
+    }
+    if path.starts_with("inbox/serien/") {
+        return Some(make(MediaType::Series));
+    }
+    if path.starts_with("inbox/filme/") {
+        return Some(make(MediaType::Film));
+    }
+    if path.starts_with("inbox/musik/") {
+        return Some(make(MediaType::MusicAlbum));
+    }
+    if path.starts_with("inbox/bücher/") {
+        return Some(make(MediaType::Book));
+    }
+    if path.starts_with("inbox/hörbücher/") {
+        return Some(make(MediaType::Audiobook));
+    }
+    if path.starts_with("inbox/manga/") {
+        return Some(make(MediaType::Manga));
+    }
+    if path.starts_with("inbox/comics/") {
+        return Some(make(MediaType::Comic));
+    }
+    if path.starts_with("inbox/ttrpg/") {
+        return Some(make(MediaType::RPG));
+    }
+    if path.starts_with("inbox/games/") {
+        return Some(make(MediaType::VideoGame));
+    }
+    if path.starts_with("inbox/unsortiert/") {
+        return Some(FileClassification {
+            media_type: MediaType::Unclassified,
+            confidence: 0.50,
+            source: ClassificationSource::Folder,
+        });
+    }
+    None
+}
+
 fn detect_classification(relative_path: &RelativePath) -> Option<FileClassification> {
     let path = relative_path.to_string().to_lowercase();
+
+    // Inbox subfolder takes highest priority — the user explicitly sorted it there.
+    if let Some(cls) = classify_from_inbox_folder(&path) {
+        return Some(cls);
+    }
+
     let extension = relative_path
         .extension()
         .map(|ext| ext.to_string_lossy().to_lowercase());
