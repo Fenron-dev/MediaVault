@@ -2409,10 +2409,16 @@ function renderInboxRows(items) {
   clearNode(inboxRows);
 
   items.forEach((item) => {
+    // Audiobook sub-parts are hidden by default under their group representative.
+    if (item.is_audiobook_part) {
+      return;
+    }
     const status = item.duplicate_of
       ? "Duplikat"
       : needsReviewInUi(item)
       ? "Review"
+      : item.audiobook_parts
+      ? `Hörbuch (${item.audiobook_parts.length} Teile)`
       : "klar";
     const target = item.duplicate_of || item.needs_review
       ? "Inbox/_review_queue"

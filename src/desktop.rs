@@ -892,6 +892,36 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
     };
     let summary = summarize_demo_plan(&plan);
 
+    let mut plan_items: Vec<DemoPlanItem> = files
+        .iter()
+        .zip(items.iter())
+        .zip(anilist_results.iter())
+        .map(|((file, item), anilist_metadata)| {
+            DemoPlanItem::from_scanned(
+                &file.incoming,
+                item,
+                anilist_metadata.as_ref(),
+                file.sidecar.as_ref(),
+                file.sidecar_preview.as_deref(),
+            )
+        })
+        .collect();
+
+    group_audiobook_folders(&mut plan_items);
+
+    // Append parts list to the sidecar YAML preview for audiobook group representatives.
+    for item in &mut plan_items {
+        if let Some(parts) = item.audiobook_parts.as_deref() {
+            let parts_yaml = parts
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("  - path: \"{}\"\n    part: {}", p, i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            item.sidecar_preview = format!("{}parts:\n{}\n", item.sidecar_preview, parts_yaml);
+        }
+    }
+
     Ok(DemoPlanResponse {
         title: "Vault-Dry-Run".to_string(),
         source: "vault".to_string(),
@@ -902,20 +932,7 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
             None
         },
         summary,
-        items: files
-            .iter()
-            .zip(items.iter())
-            .zip(anilist_results.iter())
-            .map(|((file, item), anilist_metadata)| {
-                DemoPlanItem::from_scanned(
-                    &file.incoming,
-                    item,
-                    anilist_metadata.as_ref(),
-                    file.sidecar.as_ref(),
-                    file.sidecar_preview.as_deref(),
-                )
-            })
-            .collect(),
+        items: plan_items,
     })
 }
 
@@ -1290,6 +1307,14 @@ struct DemoPlanItem {
     sidecar_path: Option<String>,
     sidecar_preview: String,
     steps: Vec<String>,
+    /// When this item is the group representative of a multi-file audiobook,
+    /// contains the vault-relative paths of all sibling audio parts (sorted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audiobook_parts: Option<Vec<String>>,
+    /// True for audio files that are part of a multi-file audiobook group but
+    /// are not the group representative.  The UI can collapse these.
+    #[serde(default)]
+    is_audiobook_part: bool,
 }
 
 impl DemoPlanItem {
@@ -1418,6 +1443,8 @@ impl DemoPlanItem {
                 render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref())
             }),
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
+            audiobook_parts: None,
+            is_audiobook_part: false,
         }
     }
 }
@@ -2581,6 +2608,67 @@ fn should_skip_scanned_file(path: &Path) -> bool {
         || name.ends_with(LEGACY_SIDECAR_SUFFIX)
         // NFO files are metadata companions, not independent media entries.
         || name.to_lowercase().ends_with(".nfo")
+}
+
+/// Audio file extensions that qualify a file to be counted as an audiobook part.
+const AUDIOBOOK_AUDIO_EXTS: &[&str] = &[
+    "mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "weba",
+];
+
+/// Post-processes a flat list of plan items to detect multi-file audiobook groups.
+///
+/// Rule: if every audio file in a directory is classified as `Audiobook`, they
+/// are treated as parts of a single audiobook.  The lexicographically first
+/// item becomes the group representative and receives `audiobook_parts`; the
+/// others are flagged as `is_audiobook_part = true`.
+///
+/// Items that don't belong to a multi-file group are left unchanged.
+fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
+    // Group item indices by parent directory, counting only Audiobook items.
+    let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (idx, item) in items.iter().enumerate() {
+        if item.media_type != MediaType::Audiobook.to_string() {
+            continue;
+        }
+        let ext = item
+            .source_path
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !AUDIOBOOK_AUDIO_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        // Parent directory = everything before the last '/'
+        let parent = item
+            .source_path
+            .rfind('/')
+            .map(|idx| item.source_path[..idx].to_string())
+            .unwrap_or_default();
+        dir_groups.entry(parent).or_default().push(idx);
+    }
+
+    for (_dir, mut group_indices) in dir_groups {
+        if group_indices.len() < 2 {
+            continue; // Single file — not a multi-part audiobook
+        }
+
+        // Sort indices by source_path so parts are in alphabetical (track) order.
+        group_indices.sort_by(|&a, &b| items[a].source_path.cmp(&items[b].source_path));
+
+        let part_paths: Vec<String> = group_indices
+            .iter()
+            .map(|&idx| items[idx].source_path.clone())
+            .collect();
+
+        let representative = group_indices[0];
+        items[representative].audiobook_parts = Some(part_paths);
+
+        for &part_idx in &group_indices[1..] {
+            items[part_idx].is_audiobook_part = true;
+        }
+    }
 }
 
 /// Looks for a Kodi/XBMC-style `.nfo` companion file alongside a media file.
