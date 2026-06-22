@@ -427,10 +427,7 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
         return Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
             .header(CONTENT_TYPE, content_type)
-            .header(
-                "Content-Range",
-                format!("bytes {start}-{end}/{file_size}"),
-            )
+            .header("Content-Range", format!("bytes {start}-{end}/{file_size}"))
             .header("Content-Length", length.to_string())
             .header("Accept-Ranges", "bytes")
             .body(body)
@@ -684,10 +681,7 @@ fn find_orphaned_sidecars(
                 issues.push(CleanupIssue {
                     kind: "orphaned_sidecar".to_string(),
                     path: path.display().to_string(),
-                    description: format!(
-                        "Sidecar ohne Mediendatei: {}",
-                        media_path.display()
-                    ),
+                    description: format!("Sidecar ohne Mediendatei: {}", media_path.display()),
                 });
             }
         }
@@ -1628,9 +1622,8 @@ fn build_collection_path(
     anilist: Option<&AniListAnimeMetadata>,
 ) -> String {
     // Append "(year)" suffix when a year is known — helps distinguish remakes and re-releases.
-    let year_suffix = |y: Option<u16>| -> String {
-        y.map(|y| format!(" ({y})")).unwrap_or_default()
-    };
+    let year_suffix =
+        |y: Option<u16>| -> String { y.map(|y| format!(" ({y})")).unwrap_or_default() };
 
     match media_type {
         MediaType::Anime | MediaType::HentaiAnime => {
@@ -3092,10 +3085,16 @@ struct SaveProgressResponse {
 
 impl SaveProgressResponse {
     fn ok() -> Self {
-        Self { ok: true, error: None }
+        Self {
+            ok: true,
+            error: None,
+        }
     }
     fn error(msg: impl Into<String>) -> Self {
-        Self { ok: false, error: Some(msg.into()) }
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -3122,10 +3121,16 @@ struct DeleteProgressResponse {
 
 impl DeleteProgressResponse {
     fn ok() -> Self {
-        Self { ok: true, error: None }
+        Self {
+            ok: true,
+            error: None,
+        }
     }
     fn error(msg: impl Into<String>) -> Self {
-        Self { ok: false, error: Some(msg.into()) }
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -3252,8 +3257,18 @@ struct OpenExternalResponse {
 }
 
 impl OpenExternalResponse {
-    fn ok() -> Self { Self { ok: true, error: None } }
-    fn error(msg: impl Into<String>) -> Self { Self { ok: false, error: Some(msg.into()) } }
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
 }
 
 fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {

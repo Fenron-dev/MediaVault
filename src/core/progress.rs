@@ -74,8 +74,14 @@ impl MediaProgress {
     /// Returns a value in [0.0, 1.0] suitable for a progress bar, if derivable.
     pub fn fraction(&self) -> Option<f64> {
         match self {
-            Self::Video { position_seconds, duration_seconds: Some(dur) }
-            | Self::Audio { position_seconds, duration_seconds: Some(dur) } => {
+            Self::Video {
+                position_seconds,
+                duration_seconds: Some(dur),
+            }
+            | Self::Audio {
+                position_seconds,
+                duration_seconds: Some(dur),
+            } => {
                 if *dur > 0.0 {
                     Some((position_seconds / dur).clamp(0.0, 1.0))
                 } else {
