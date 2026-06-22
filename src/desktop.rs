@@ -15,8 +15,8 @@ use crate::core::import::{
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
 };
 use crate::core::playlist::{
-    delete_cursor, delete_playlist, list_playlists, load_cursor, load_playlist, save_cursor,
-    save_playlist, Playlist, PlaylistCursor, PlaylistFilter, PlaylistKind, SortRule,
+    delete_playlist, list_playlists, load_cursor, load_playlist, save_cursor, save_playlist,
+    Playlist, PlaylistCursor,
 };
 use crate::core::progress::{
     delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
