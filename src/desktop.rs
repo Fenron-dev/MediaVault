@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
+use crate::api::audiobookshelf::AbsClient;
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
 use crate::core::import::{
@@ -182,6 +183,22 @@ pub(crate) fn run() -> Result<()> {
                 "/api/playlist/cursor/load" => json_response(
                     StatusCode::OK,
                     &build_load_cursor_response(request.uri().query()),
+                ),
+                "/api/abs/test" => json_response(
+                    StatusCode::OK,
+                    &build_abs_test_response(request.uri().query()),
+                ),
+                "/api/abs/libraries" => json_response(
+                    StatusCode::OK,
+                    &build_abs_libraries_response(request.uri().query()),
+                ),
+                "/api/abs/library-items" => json_response(
+                    StatusCode::OK,
+                    &build_abs_library_items_response(request.uri().query()),
+                ),
+                "/api/abs/sync-progress" => json_response(
+                    StatusCode::OK,
+                    &build_abs_sync_progress_response(request.body()),
                 ),
                 "/api/recent-items" => json_response(
                     StatusCode::OK,
@@ -3828,5 +3845,183 @@ fn build_load_cursor_response(query: Option<&str>) -> LoadCursorResponse {
     match load_cursor(&vault.progress_dir(), &id) {
         Ok(cursor) => LoadCursorResponse { cursor, error: None },
         Err(e) => LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audiobookshelf (ABS) sync APIs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct AbsTestResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl AbsTestResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AbsLibrariesResponse {
+    libraries: Vec<crate::api::audiobookshelf::AbsLibrary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AbsLibraryItemsResponse {
+    items: Vec<crate::api::audiobookshelf::AbsLibraryItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AbsSyncProgressRequest {
+    abs_url: String,
+    api_key: String,
+    item_id: String,
+    current_time: f64,
+    #[serde(default)]
+    duration: f64,
+    #[serde(default)]
+    is_finished: bool,
+}
+
+#[derive(Serialize)]
+struct AbsSyncProgressResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl AbsSyncProgressResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+fn build_abs_test_response(query: Option<&str>) -> AbsTestResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return AbsTestResponse::error("missing query"),
+    };
+    let url = match extract_query_value(query, "url") {
+        Some(u) => u,
+        None => return AbsTestResponse::error("missing url"),
+    };
+    let key = extract_query_value(query, "key").unwrap_or_default();
+    match AbsClient::new(url, key) {
+        Ok(client) => match client.test_connection() {
+            Ok(()) => AbsTestResponse::ok(),
+            Err(e) => AbsTestResponse::error(e.to_string()),
+        },
+        Err(e) => AbsTestResponse::error(e.to_string()),
+    }
+}
+
+fn build_abs_libraries_response(query: Option<&str>) -> AbsLibrariesResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return AbsLibrariesResponse {
+                libraries: vec![],
+                error: Some("missing query".into()),
+            }
+        }
+    };
+    let url = match extract_query_value(query, "url") {
+        Some(u) => u,
+        None => {
+            return AbsLibrariesResponse {
+                libraries: vec![],
+                error: Some("missing url".into()),
+            }
+        }
+    };
+    let key = extract_query_value(query, "key").unwrap_or_default();
+    match AbsClient::new(url, key) {
+        Ok(client) => match client.list_libraries() {
+            Ok(libraries) => AbsLibrariesResponse { libraries, error: None },
+            Err(e) => AbsLibrariesResponse { libraries: vec![], error: Some(e.to_string()) },
+        },
+        Err(e) => AbsLibrariesResponse { libraries: vec![], error: Some(e.to_string()) },
+    }
+}
+
+fn build_abs_library_items_response(query: Option<&str>) -> AbsLibraryItemsResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some("missing query".into()),
+            }
+        }
+    };
+    let url = match extract_query_value(query, "url") {
+        Some(u) => u,
+        None => {
+            return AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some("missing url".into()),
+            }
+        }
+    };
+    let key = extract_query_value(query, "key").unwrap_or_default();
+    let library_id = match extract_query_value(query, "library") {
+        Some(id) => id,
+        None => {
+            return AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some("missing library".into()),
+            }
+        }
+    };
+    match AbsClient::new(url, key) {
+        Ok(client) => match client.list_library_items(&library_id) {
+            Ok(items) => AbsLibraryItemsResponse { items, error: None },
+            Err(e) => AbsLibraryItemsResponse { items: vec![], error: Some(e.to_string()) },
+        },
+        Err(e) => AbsLibraryItemsResponse { items: vec![], error: Some(e.to_string()) },
+    }
+}
+
+fn build_abs_sync_progress_response(body: &[u8]) -> AbsSyncProgressResponse {
+    let req: AbsSyncProgressRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return AbsSyncProgressResponse::error(format!("Invalid request: {e}")),
+    };
+    match AbsClient::new(&req.abs_url, &req.api_key) {
+        Ok(client) => {
+            let result =
+                client.set_progress(&req.item_id, req.current_time, req.duration, req.is_finished);
+            match result {
+                Ok(()) => AbsSyncProgressResponse::ok(),
+                Err(e) => AbsSyncProgressResponse::error(e.to_string()),
+            }
+        }
+        Err(e) => AbsSyncProgressResponse::error(e.to_string()),
     }
 }

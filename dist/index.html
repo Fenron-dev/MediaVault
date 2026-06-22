@@ -481,6 +481,43 @@
                 </p>
               </div>
             </section>
+            <section class="panel">
+              <p class="panel-label">Audiobookshelf Sync</p>
+              <h3>ABS-Server verbinden</h3>
+              <p class="body-copy">
+                Fortschritt zwischen MediaVault und einem lokalen Audiobookshelf-Server synchronisieren.
+              </p>
+              <div class="stack">
+                <label class="field">
+                  <span>Server-URL</span>
+                  <input
+                    id="abs-url-input"
+                    type="text"
+                    placeholder="http://localhost:13378"
+                  />
+                </label>
+                <label class="field">
+                  <span>API-Key</span>
+                  <input
+                    id="abs-key-input"
+                    type="password"
+                    placeholder="ABS API-Schlüssel"
+                  />
+                </label>
+                <div class="toolbar">
+                  <button class="action-button primary" id="abs-test-btn">Verbindung testen</button>
+                  <button class="action-button" id="abs-libraries-btn">Bibliotheken laden</button>
+                </div>
+                <p class="field-hint" id="abs-feedback"></p>
+                <div id="abs-libraries-section" hidden>
+                  <label class="field">
+                    <span>Bibliothek</span>
+                    <select id="abs-library-select"></select>
+                  </label>
+                  <button class="action-button" id="abs-import-btn">Bibliothek importieren</button>
+                </div>
+              </div>
+            </section>
           </div>
         </section>
       </main>

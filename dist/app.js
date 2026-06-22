@@ -125,6 +125,16 @@ const imageDialogTitle = document.getElementById("image-dialog-title");
 const imageDialogPreview = document.getElementById("image-dialog-preview");
 const imageDialogClose = document.getElementById("image-dialog-close");
 
+// Audiobookshelf sync
+const absUrlInput = document.getElementById("abs-url-input");
+const absKeyInput = document.getElementById("abs-key-input");
+const absTestBtn = document.getElementById("abs-test-btn");
+const absLibrariesBtn = document.getElementById("abs-libraries-btn");
+const absFeedback = document.getElementById("abs-feedback");
+const absLibrariesSection = document.getElementById("abs-libraries-section");
+const absLibrarySelect = document.getElementById("abs-library-select");
+const absImportBtn = document.getElementById("abs-import-btn");
+
 // Playlists
 const playlistList = document.getElementById("playlist-list");
 const playlistNew = document.getElementById("playlist-new");
@@ -1923,7 +1933,7 @@ async function loadDashboard() {
           const planItem = currentPlan?.items.find((p) => p.source_path === it.vault_path);
           if (planItem) {
             const ext = playerFileExt(it.vault_path);
-            if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext)) {
+            if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
               openPlayer(planItem);
             } else {
               selectedItemKey = it.vault_path;
@@ -1954,6 +1964,8 @@ const PLAYER_AUDIO_EXTS = new Set(["mp3", "m4a", "m4b", "aac", "ogg", "oga", "op
 const PLAYER_UNSUPPORTED_EXTS = new Set(["mkv", "avi", "ts", "wmv", "rmvb"]);
 const PLAYER_PDF_EXTS = new Set(["pdf"]);
 const PLAYER_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"]);
+// EPUB opens via system viewer; listed here so the inspector "Abspielen" button shows.
+const PLAYER_EPUB_EXTS = new Set(["epub"]);
 
 // mangaState holds the image list and current index when a manga/image sequence is open.
 let mangaState = null; // { items: string[], index: number }
@@ -2172,7 +2184,8 @@ async function openPlayer(item) {
   const isAudio = isAudioFile(sourcePath);
   const isPdf = PLAYER_PDF_EXTS.has(ext);
   const isImage = PLAYER_IMAGE_EXTS.has(ext);
-  const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext);
+  const isEpub = PLAYER_EPUB_EXTS.has(ext);
+  const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext) || isEpub;
 
   if (!isVideo && !isAudio && !isPdf && !isImage && !unsupported) return;
 
@@ -2262,6 +2275,117 @@ async function openPlayer(item) {
 function closePlayer() {
   playerStop();
   if (playerDialog) playerDialog.hidden = true;
+}
+
+// ─── Audiobookshelf (ABS) sync ────────────────────────────────────────────
+
+const absSettingsKey = "mediavault.absSettings";
+
+function absGetSettings() {
+  return loadStoredJson(absSettingsKey, { url: "", key: "" });
+}
+
+function absSaveSettings(url, key) {
+  saveStoredJson(absSettingsKey, { url, key });
+}
+
+function absUrl() {
+  return absUrlInput?.value.trim() || absGetSettings().url;
+}
+
+function absKey() {
+  return absKeyInput?.value.trim() || absGetSettings().key;
+}
+
+async function absTest() {
+  const url = absUrl();
+  const key = absKey();
+  if (!url) {
+    if (absFeedback) absFeedback.textContent = "Bitte Server-URL eingeben.";
+    return false;
+  }
+  absSaveSettings(url, key);
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/abs/test?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`
+    );
+    const data = await res.json();
+    if (data.ok) {
+      if (absFeedback) absFeedback.textContent = "Verbindung erfolgreich.";
+      return true;
+    }
+    if (absFeedback) absFeedback.textContent = `Fehler: ${data.error || "Unbekannt"}`;
+    return false;
+  } catch (e) {
+    if (absFeedback) absFeedback.textContent = `Verbindungsfehler: ${e.message}`;
+    return false;
+  }
+}
+
+async function absLoadLibraries() {
+  const url = absUrl();
+  const key = absKey();
+  if (!url) {
+    if (absFeedback) absFeedback.textContent = "Bitte Server-URL eingeben.";
+    return;
+  }
+  absSaveSettings(url, key);
+  if (absFeedback) absFeedback.textContent = "Lade Bibliotheken…";
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/abs/libraries?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`
+    );
+    const data = await res.json();
+    if (data.error) {
+      if (absFeedback) absFeedback.textContent = `Fehler: ${data.error}`;
+      return;
+    }
+    if (!absLibrarySelect || !absLibrariesSection) return;
+    absLibrarySelect.innerHTML = "";
+    (data.libraries || []).forEach((lib) => {
+      const opt = document.createElement("option");
+      opt.value = lib.id;
+      opt.textContent = `${lib.name} (${lib.media_type})`;
+      absLibrarySelect.appendChild(opt);
+    });
+    absLibrariesSection.hidden = data.libraries?.length === 0;
+    if (absFeedback) absFeedback.textContent = `${data.libraries?.length || 0} Bibliothek(en) gefunden.`;
+  } catch (e) {
+    if (absFeedback) absFeedback.textContent = `Fehler: ${e.message}`;
+  }
+}
+
+async function absImportLibrary() {
+  const url = absUrl();
+  const key = absKey();
+  const libraryId = absLibrarySelect?.value;
+  if (!url || !libraryId) return;
+  if (absFeedback) absFeedback.textContent = "Lade Bibliotheksinhalte…";
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/abs/library-items?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}&library=${encodeURIComponent(libraryId)}`
+    );
+    const data = await res.json();
+    if (data.error) {
+      if (absFeedback) absFeedback.textContent = `Fehler: ${data.error}`;
+      return;
+    }
+    const count = data.items?.length || 0;
+    if (absFeedback) {
+      absFeedback.textContent = `${count} Einträge gefunden. Import-Funktion wird in einem späteren Release implementiert.`;
+    }
+  } catch (e) {
+    if (absFeedback) absFeedback.textContent = `Fehler: ${e.message}`;
+  }
+}
+
+function initAbsSettings() {
+  const stored = absGetSettings();
+  if (absUrlInput && stored.url) absUrlInput.value = stored.url;
+  if (absKeyInput && stored.key) absKeyInput.value = stored.key;
+  if (absTestBtn) absTestBtn.addEventListener("click", absTest);
+  if (absLibrariesBtn) absLibrariesBtn.addEventListener("click", absLoadLibraries);
+  if (absImportBtn) absImportBtn.addEventListener("click", absImportLibrary);
 }
 
 // ─── Playlist management ──────────────────────────────────────────────────
@@ -3289,7 +3413,8 @@ function renderInspector(value) {
       isAudioFile(srcPath) ||
       PLAYER_UNSUPPORTED_EXTS.has(ext) ||
       PLAYER_PDF_EXTS.has(ext) ||
-      PLAYER_IMAGE_EXTS.has(ext);
+      PLAYER_IMAGE_EXTS.has(ext) ||
+      PLAYER_EPUB_EXTS.has(ext);
     inspectorPlay.hidden = !item || !playable;
   }
   if (inspectorFetchMetadata) {
@@ -5431,6 +5556,7 @@ renderAuditTrail();
 syncTemplateInputs();
 initPlayer();
 initPlaylists();
+initAbsSettings();
 bootstrapVault().catch(() => {
   renderRecentVaults();
   syncVaultHint();
