@@ -2017,3 +2017,129 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+/* ─── Playlists view ──────────────────────────────────────────── */
+
+.playlists-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: var(--gap);
+  height: 100%;
+  overflow: hidden;
+}
+
+.playlists-sidebar {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.playlists-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gap-sm);
+  margin-bottom: var(--gap-sm);
+}
+
+#playlist-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.playlist-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-sm);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.playlist-row:hover {
+  background: var(--surface-hover);
+}
+
+.playlist-row.is-active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.playlist-row-icon {
+  font-size: 1.1em;
+  flex-shrink: 0;
+}
+
+.playlist-row-name {
+  flex: 1;
+  font-size: 0.875rem;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.playlist-row-count {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.playlists-detail {
+  overflow-y: auto;
+}
+
+.playlists-empty-hint {
+  padding: var(--gap);
+}
+
+.playlists-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--gap);
+  margin-bottom: var(--gap);
+}
+
+.playlists-detail-actions {
+  display: flex;
+  gap: var(--gap-sm);
+  flex-shrink: 0;
+}
+
+.playlist-items-hint {
+  padding: var(--gap-sm) 0;
+  color: var(--text-muted);
+}
+
+.playlist-item-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: var(--gap-sm);
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.playlist-item-row:last-child {
+  border-bottom: none;
+}
+
+.playlist-item-play {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.playlist-item-play:hover {
+  opacity: 1;
+}
+
+@media (max-width: 700px) {
+  .playlists-layout {
+    grid-template-columns: 1fr;
+  }
+}

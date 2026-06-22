@@ -55,6 +55,7 @@
           <button class="nav-item" data-tab="inbox">Inbox</button>
           <button class="nav-item" data-tab="review">Prüfung</button>
           <button class="nav-item" data-tab="collections">Sammlungen</button>
+          <button class="nav-item" data-tab="playlists">Wiedergabelisten</button>
           <button class="nav-item" data-tab="settings">Einstellungen</button>
         </nav>
 
@@ -371,6 +372,47 @@
                 <p class="panel-label">Sidecar-Vorschau</p>
                 <pre class="code-block" id="collection-editor-sidecar-preview">Wähle einen Eintrag aus.</pre>
               </section>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-view="playlists">
+          <div class="playlists-layout">
+            <aside class="panel playlists-sidebar">
+              <div class="playlists-sidebar-header">
+                <p class="panel-label">Wiedergabelisten</p>
+                <button class="action-button primary compact" id="playlist-new">+ Neue Liste</button>
+              </div>
+              <div id="playlist-list"></div>
+            </aside>
+            <section class="panel playlists-detail">
+              <div id="playlist-detail-empty" class="playlists-empty-hint">
+                <p class="body-copy">Wähle eine Playlist aus oder erstelle eine neue.</p>
+              </div>
+              <div id="playlist-detail-content" hidden>
+                <div class="playlists-detail-header">
+                  <div>
+                    <p class="panel-label" id="playlist-detail-kind-label">Manuell</p>
+                    <h3 id="playlist-detail-title">—</h3>
+                    <p class="body-copy" id="playlist-detail-count">0 Einträge</p>
+                  </div>
+                  <div class="playlists-detail-actions">
+                    <button class="action-button primary" id="playlist-play-all" hidden>▶ Alle abspielen</button>
+                    <button class="action-button danger" id="playlist-delete">Löschen</button>
+                  </div>
+                </div>
+                <div class="table" id="playlist-items-table">
+                  <div class="table-row table-head">
+                    <span>Titel</span>
+                    <span>Typ</span>
+                    <span></span>
+                  </div>
+                  <div id="playlist-items-rows"></div>
+                </div>
+                <p class="body-copy playlist-items-hint" id="playlist-items-hint" hidden>
+                  Noch keine Einträge. Öffne eine Datei über die Sammlungen und füge sie hier hinzu.
+                </p>
+              </div>
             </section>
           </div>
         </section>

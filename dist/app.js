@@ -125,6 +125,19 @@ const imageDialogTitle = document.getElementById("image-dialog-title");
 const imageDialogPreview = document.getElementById("image-dialog-preview");
 const imageDialogClose = document.getElementById("image-dialog-close");
 
+// Playlists
+const playlistList = document.getElementById("playlist-list");
+const playlistNew = document.getElementById("playlist-new");
+const playlistDetailEmpty = document.getElementById("playlist-detail-empty");
+const playlistDetailContent = document.getElementById("playlist-detail-content");
+const playlistDetailKindLabel = document.getElementById("playlist-detail-kind-label");
+const playlistDetailTitle = document.getElementById("playlist-detail-title");
+const playlistDetailCount = document.getElementById("playlist-detail-count");
+const playlistPlayAll = document.getElementById("playlist-play-all");
+const playlistDelete = document.getElementById("playlist-delete");
+const playlistItemsRows = document.getElementById("playlist-items-rows");
+const playlistItemsHint = document.getElementById("playlist-items-hint");
+
 // Player
 const playerDialog = document.getElementById("player-dialog");
 const playerTitle = document.getElementById("player-title");
@@ -162,6 +175,7 @@ const labels = {
   inbox: "Inbox",
   review: "Prüfung",
   collections: "Sammlungen",
+  playlists: "Wiedergabelisten",
   settings: "Einstellungen",
 };
 
@@ -2102,6 +2116,196 @@ async function openPlayer(item) {
 function closePlayer() {
   playerStop();
   if (playerDialog) playerDialog.hidden = true;
+}
+
+// ─── Playlist management ──────────────────────────────────────────────────
+
+let activePlaylists = [];
+let activePlaylistId = null;
+
+function playlistKindLabel(kind) {
+  if (kind === "smart") return "Smart Playlist";
+  if (kind === "series") return "Serie";
+  return "Manuell";
+}
+
+function playlistKindIcon(kind) {
+  if (kind === "smart") return "✦";
+  if (kind === "series") return "▶▶";
+  return "☰";
+}
+
+async function loadPlaylists() {
+  const root = getVaultRoot();
+  if (!root) return;
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/playlist/list?root=${encodeURIComponent(root)}`
+    );
+    const data = await res.json();
+    activePlaylists = data.playlists || [];
+    renderPlaylistList();
+  } catch {
+    activePlaylists = [];
+  }
+}
+
+function renderPlaylistList() {
+  if (!playlistList) return;
+  playlistList.innerHTML = "";
+  if (activePlaylists.length === 0) {
+    const hint = document.createElement("p");
+    hint.className = "body-copy";
+    hint.style.padding = "8px 4px";
+    hint.style.color = "var(--text-muted)";
+    hint.textContent = "Noch keine Playlists.";
+    playlistList.appendChild(hint);
+    return;
+  }
+  for (const pl of activePlaylists) {
+    const row = document.createElement("div");
+    row.className = "playlist-row" + (pl.id === activePlaylistId ? " is-active" : "");
+    row.dataset.id = pl.id;
+
+    const icon = document.createElement("span");
+    icon.className = "playlist-row-icon";
+    icon.textContent = playlistKindIcon(pl.kind);
+
+    const name = document.createElement("span");
+    name.className = "playlist-row-name";
+    name.textContent = pl.name;
+
+    const count = document.createElement("span");
+    count.className = "playlist-row-count";
+    count.textContent = pl.items?.length ?? 0;
+
+    row.append(icon, name, count);
+    row.addEventListener("click", () => selectPlaylist(pl.id));
+    playlistList.appendChild(row);
+  }
+}
+
+function selectPlaylist(id) {
+  activePlaylistId = id;
+  renderPlaylistList();
+  const pl = activePlaylists.find((p) => p.id === id);
+  if (!pl) return;
+  renderPlaylistDetail(pl);
+}
+
+function renderPlaylistDetail(pl) {
+  if (!playlistDetailEmpty || !playlistDetailContent) return;
+  playlistDetailEmpty.hidden = true;
+  playlistDetailContent.hidden = false;
+
+  if (playlistDetailKindLabel) playlistDetailKindLabel.textContent = playlistKindLabel(pl.kind);
+  if (playlistDetailTitle) playlistDetailTitle.textContent = pl.name;
+
+  const count = pl.items?.length ?? 0;
+  if (playlistDetailCount) playlistDetailCount.textContent = `${count} Eintr${count === 1 ? "ag" : "äge"}`;
+
+  if (playlistPlayAll) playlistPlayAll.hidden = count === 0 || pl.kind === "smart";
+  if (playlistItemsHint) playlistItemsHint.hidden = count > 0;
+
+  if (!playlistItemsRows) return;
+  playlistItemsRows.innerHTML = "";
+  if (count === 0) return;
+
+  for (let i = 0; i < pl.items.length; i++) {
+    const vaultPath = pl.items[i];
+    const row = document.createElement("div");
+    row.className = "playlist-item-row";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.style.fontSize = "0.875rem";
+    nameSpan.style.overflow = "hidden";
+    nameSpan.style.textOverflow = "ellipsis";
+    nameSpan.style.whiteSpace = "nowrap";
+    const stem = vaultPath.split("/").pop()?.replace(/\.[^.]+$/, "") || vaultPath;
+    nameSpan.textContent = stem;
+    nameSpan.title = vaultPath;
+
+    const typeSpan = document.createElement("span");
+    typeSpan.style.fontSize = "0.75rem";
+    typeSpan.style.color = "var(--text-muted)";
+    const ext = vaultPath.split(".").pop()?.toLowerCase() || "";
+    typeSpan.textContent = ext.toUpperCase();
+
+    const playBtn = document.createElement("button");
+    playBtn.className = "action-button icon-button playlist-item-play";
+    playBtn.title = "Abspielen";
+    playBtn.textContent = "▶";
+    playBtn.addEventListener("click", () => {
+      if (!currentPlan) return;
+      const item = currentPlan.items.find((it) => it.source_path === vaultPath);
+      if (item) openPlayer(item);
+    });
+
+    row.append(nameSpan, typeSpan, playBtn);
+    playlistItemsRows.appendChild(row);
+  }
+}
+
+async function createNewPlaylist() {
+  const name = prompt("Name der neuen Playlist:");
+  if (!name?.trim()) return;
+  const root = getVaultRoot();
+  if (!root) return;
+  const id = `pl_${Date.now()}`;
+  const playlist = {
+    id,
+    name: name.trim(),
+    kind: "manual",
+    items: [],
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+  try {
+    await fetch("mediavault://localhost/api/playlist/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: root, playlist }),
+    });
+    await loadPlaylists();
+    selectPlaylist(id);
+  } catch (e) {
+    if (statusStrip) statusStrip.textContent = `Fehler beim Erstellen: ${e.message}`;
+  }
+}
+
+async function deleteActivePlaylist() {
+  if (!activePlaylistId) return;
+  const pl = activePlaylists.find((p) => p.id === activePlaylistId);
+  if (!pl) return;
+  if (!confirm(`Playlist „${pl.name}" wirklich löschen?`)) return;
+  const root = getVaultRoot();
+  if (!root) return;
+  try {
+    await fetch("mediavault://localhost/api/playlist/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: root, id: activePlaylistId }),
+    });
+    activePlaylistId = null;
+    if (playlistDetailEmpty) playlistDetailEmpty.hidden = false;
+    if (playlistDetailContent) playlistDetailContent.hidden = true;
+    await loadPlaylists();
+  } catch (e) {
+    if (statusStrip) statusStrip.textContent = `Fehler beim Löschen: ${e.message}`;
+  }
+}
+
+function initPlaylists() {
+  if (playlistNew) playlistNew.addEventListener("click", createNewPlaylist);
+  if (playlistDelete) playlistDelete.addEventListener("click", deleteActivePlaylist);
+  if (playlistPlayAll) {
+    playlistPlayAll.addEventListener("click", () => {
+      const pl = activePlaylists.find((p) => p.id === activePlaylistId);
+      if (!pl || !pl.items?.length || !currentPlan) return;
+      const first = currentPlan.items.find((it) => it.source_path === pl.items[0]);
+      if (first) openPlayer(first);
+    });
+  }
 }
 
 // Wire up player controls once DOM is ready.
@@ -4405,6 +4609,9 @@ tabs.forEach((button) => {
     if (tab === "overview") {
       loadDashboard().catch(() => {});
     }
+    if (tab === "playlists") {
+      loadPlaylists().catch(() => {});
+    }
   });
 });
 
@@ -5042,6 +5249,7 @@ populateSelectors();
 renderAuditTrail();
 syncTemplateInputs();
 initPlayer();
+initPlaylists();
 bootstrapVault().catch(() => {
   renderRecentVaults();
   syncVaultHint();
