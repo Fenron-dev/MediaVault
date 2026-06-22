@@ -13,7 +13,7 @@
 use std::time::Duration;
 
 use reqwest::blocking::Client;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::AUTHORIZATION;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, VaultError};
@@ -248,7 +248,6 @@ impl AbsClient {
             .client
             .patch(&url)
             .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .header(CONTENT_TYPE, "application/json")
             .json(&payload)
             .send()
             .map_err(|e| VaultError::ApiError(format!("set_progress failed: {e}")))?;
