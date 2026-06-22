@@ -176,10 +176,9 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_delete_playlist_response(request.body()),
                 ),
-                "/api/playlist/cursor/save" => json_response(
-                    StatusCode::OK,
-                    &build_save_cursor_response(request.body()),
-                ),
+                "/api/playlist/cursor/save" => {
+                    json_response(StatusCode::OK, &build_save_cursor_response(request.body()))
+                }
                 "/api/playlist/cursor/load" => json_response(
                     StatusCode::OK,
                     &build_load_cursor_response(request.uri().query()),
@@ -3203,7 +3202,12 @@ fn build_save_progress_response(body: &[u8]) -> SaveProgressResponse {
         Err(e) => return SaveProgressResponse::error(e.to_string()),
     };
 
-    match save_progress(&vault.progress_dir(), &req.vault_path, req.progress, req.completed) {
+    match save_progress(
+        &vault.progress_dir(),
+        &req.vault_path,
+        req.progress,
+        req.completed,
+    ) {
         Ok(()) => SaveProgressResponse::ok(),
         Err(e) => SaveProgressResponse::error(e.to_string()),
     }
@@ -3212,12 +3216,22 @@ fn build_save_progress_response(body: &[u8]) -> SaveProgressResponse {
 fn build_load_progress_response(query: Option<&str>) -> LoadProgressResponse {
     let query = match query {
         Some(q) => q,
-        None => return LoadProgressResponse { record: None, error: Some("missing query".into()) },
+        None => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some("missing query".into()),
+            }
+        }
     };
 
     let vault_path = match extract_query_value(query, "path") {
         Some(p) => p,
-        None => return LoadProgressResponse { record: None, error: Some("missing path".into()) },
+        None => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some("missing path".into()),
+            }
+        }
     };
 
     let root_override = extract_query_value(query, "root");
@@ -3229,17 +3243,33 @@ fn build_load_progress_response(query: Option<&str>) -> LoadProgressResponse {
                 error: Some("Kein Vault geöffnet.".into()),
             }
         }
-        Err(e) => return LoadProgressResponse { record: None, error: Some(e.to_string()) },
+        Err(e) => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     let vault = match Vault::new(vault_root) {
         Ok(v) => v,
-        Err(e) => return LoadProgressResponse { record: None, error: Some(e.to_string()) },
+        Err(e) => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     match load_progress(&vault.progress_dir(), &vault_path) {
-        Ok(record) => LoadProgressResponse { record, error: None },
-        Err(e) => LoadProgressResponse { record: None, error: Some(e.to_string()) },
+        Ok(record) => LoadProgressResponse {
+            record,
+            error: None,
+        },
+        Err(e) => LoadProgressResponse {
+            record: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -3276,17 +3306,33 @@ fn build_list_progress_response(query: Option<&str>) -> ListProgressResponse {
                 error: Some("Kein Vault geöffnet.".into()),
             }
         }
-        Err(e) => return ListProgressResponse { records: vec![], error: Some(e.to_string()) },
+        Err(e) => {
+            return ListProgressResponse {
+                records: vec![],
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     let vault = match Vault::new(vault_root) {
         Ok(v) => v,
-        Err(e) => return ListProgressResponse { records: vec![], error: Some(e.to_string()) },
+        Err(e) => {
+            return ListProgressResponse {
+                records: vec![],
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     match list_in_progress(&vault.progress_dir()) {
-        Ok(records) => ListProgressResponse { records, error: None },
-        Err(e) => ListProgressResponse { records: vec![], error: Some(e.to_string()) },
+        Ok(records) => ListProgressResponse {
+            records,
+            error: None,
+        },
+        Err(e) => ListProgressResponse {
+            records: vec![],
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -3542,9 +3588,15 @@ fn build_in_progress_response(query: Option<&str>) -> InProgressResponse {
                 .and_then(|name| name.rsplit('.').nth(1).map(|_| name.to_string()))
                 .unwrap_or_else(|| record.vault_path.clone());
             let position_seconds = match &record.progress {
-                MediaProgress::Video { position_seconds, .. }
-                | MediaProgress::Audio { position_seconds, .. } => Some(*position_seconds),
-                MediaProgress::Audiobook { position_seconds, .. } => Some(*position_seconds),
+                MediaProgress::Video {
+                    position_seconds, ..
+                }
+                | MediaProgress::Audio {
+                    position_seconds, ..
+                } => Some(*position_seconds),
+                MediaProgress::Audiobook {
+                    position_seconds, ..
+                } => Some(*position_seconds),
                 _ => None,
             };
             let modified_at = record.last_accessed;
@@ -3704,20 +3756,36 @@ fn build_list_playlists_response(query: Option<&str>) -> ListPlaylistsResponse {
     };
 
     match list_playlists(&vault.system_dir()) {
-        Ok(playlists) => ListPlaylistsResponse { playlists, error: None },
-        Err(e) => ListPlaylistsResponse { playlists: vec![], error: Some(e.to_string()) },
+        Ok(playlists) => ListPlaylistsResponse {
+            playlists,
+            error: None,
+        },
+        Err(e) => ListPlaylistsResponse {
+            playlists: vec![],
+            error: Some(e.to_string()),
+        },
     }
 }
 
 fn build_get_playlist_response(query: Option<&str>) -> GetPlaylistResponse {
     let query = match query {
         Some(q) => q,
-        None => return GetPlaylistResponse { playlist: None, error: Some("missing query".into()) },
+        None => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some("missing query".into()),
+            }
+        }
     };
 
     let id = match extract_query_value(query, "id") {
         Some(id) => id,
-        None => return GetPlaylistResponse { playlist: None, error: Some("missing id".into()) },
+        None => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some("missing id".into()),
+            }
+        }
     };
 
     let root_override = extract_query_value(query, "root");
@@ -3729,17 +3797,33 @@ fn build_get_playlist_response(query: Option<&str>) -> GetPlaylistResponse {
                 error: Some("Kein Vault geöffnet.".into()),
             }
         }
-        Err(e) => return GetPlaylistResponse { playlist: None, error: Some(e.to_string()) },
+        Err(e) => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     let vault = match Vault::new(vault_root) {
         Ok(v) => v,
-        Err(e) => return GetPlaylistResponse { playlist: None, error: Some(e.to_string()) },
+        Err(e) => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     match load_playlist(&vault.system_dir(), &id) {
-        Ok(playlist) => GetPlaylistResponse { playlist, error: None },
-        Err(e) => GetPlaylistResponse { playlist: None, error: Some(e.to_string()) },
+        Ok(playlist) => GetPlaylistResponse {
+            playlist,
+            error: None,
+        },
+        Err(e) => GetPlaylistResponse {
+            playlist: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -3817,12 +3901,22 @@ fn build_save_cursor_response(body: &[u8]) -> SaveCursorResponse {
 fn build_load_cursor_response(query: Option<&str>) -> LoadCursorResponse {
     let query = match query {
         Some(q) => q,
-        None => return LoadCursorResponse { cursor: None, error: Some("missing query".into()) },
+        None => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some("missing query".into()),
+            }
+        }
     };
 
     let id = match extract_query_value(query, "id") {
         Some(id) => id,
-        None => return LoadCursorResponse { cursor: None, error: Some("missing id".into()) },
+        None => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some("missing id".into()),
+            }
+        }
     };
 
     let root_override = extract_query_value(query, "root");
@@ -3834,17 +3928,33 @@ fn build_load_cursor_response(query: Option<&str>) -> LoadCursorResponse {
                 error: Some("Kein Vault geöffnet.".into()),
             }
         }
-        Err(e) => return LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+        Err(e) => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     let vault = match Vault::new(vault_root) {
         Ok(v) => v,
-        Err(e) => return LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+        Err(e) => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some(e.to_string()),
+            }
+        }
     };
 
     match load_cursor(&vault.progress_dir(), &id) {
-        Ok(cursor) => LoadCursorResponse { cursor, error: None },
-        Err(e) => LoadCursorResponse { cursor: None, error: Some(e.to_string()) },
+        Ok(cursor) => LoadCursorResponse {
+            cursor,
+            error: None,
+        },
+        Err(e) => LoadCursorResponse {
+            cursor: None,
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -3963,10 +4073,19 @@ fn build_abs_libraries_response(query: Option<&str>) -> AbsLibrariesResponse {
     let key = extract_query_value(query, "key").unwrap_or_default();
     match AbsClient::new(url, key) {
         Ok(client) => match client.list_libraries() {
-            Ok(libraries) => AbsLibrariesResponse { libraries, error: None },
-            Err(e) => AbsLibrariesResponse { libraries: vec![], error: Some(e.to_string()) },
+            Ok(libraries) => AbsLibrariesResponse {
+                libraries,
+                error: None,
+            },
+            Err(e) => AbsLibrariesResponse {
+                libraries: vec![],
+                error: Some(e.to_string()),
+            },
         },
-        Err(e) => AbsLibrariesResponse { libraries: vec![], error: Some(e.to_string()) },
+        Err(e) => AbsLibrariesResponse {
+            libraries: vec![],
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -4002,9 +4121,15 @@ fn build_abs_library_items_response(query: Option<&str>) -> AbsLibraryItemsRespo
     match AbsClient::new(url, key) {
         Ok(client) => match client.list_library_items(&library_id) {
             Ok(items) => AbsLibraryItemsResponse { items, error: None },
-            Err(e) => AbsLibraryItemsResponse { items: vec![], error: Some(e.to_string()) },
+            Err(e) => AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            },
         },
-        Err(e) => AbsLibraryItemsResponse { items: vec![], error: Some(e.to_string()) },
+        Err(e) => AbsLibraryItemsResponse {
+            items: vec![],
+            error: Some(e.to_string()),
+        },
     }
 }
 
@@ -4015,8 +4140,12 @@ fn build_abs_sync_progress_response(body: &[u8]) -> AbsSyncProgressResponse {
     };
     match AbsClient::new(&req.abs_url, &req.api_key) {
         Ok(client) => {
-            let result =
-                client.set_progress(&req.item_id, req.current_time, req.duration, req.is_finished);
+            let result = client.set_progress(
+                &req.item_id,
+                req.current_time,
+                req.duration,
+                req.is_finished,
+            );
             match result {
                 Ok(()) => AbsSyncProgressResponse::ok(),
                 Err(e) => AbsSyncProgressResponse::error(e.to_string()),

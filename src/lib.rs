@@ -24,8 +24,7 @@ pub use core::playlist::{
     save_playlist, Playlist, PlaylistCursor, PlaylistFilter, PlaylistKind, SortDir, SortRule,
 };
 pub use core::progress::{
-    delete_progress, list_in_progress, load_progress, save_progress, MediaProgress,
-    ProgressRecord,
+    delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
 };
 pub use core::properties::{render_sidecar_yaml, sidecar_path_for};
 pub use core::vault::{RelativePath, Vault};
