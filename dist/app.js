@@ -84,6 +84,7 @@ const inspectorToggle = document.getElementById("inspector-toggle");
 const inspectorTitle = document.getElementById("inspector-title");
 const inspectorProperties = document.getElementById("inspector-properties");
 const inspectorEditToggle = document.getElementById("inspector-edit-toggle");
+const inspectorPlay = document.getElementById("inspector-play");
 const inspectorFetchMetadata = document.getElementById("inspector-fetch-metadata");
 const inspectorNotDuplicate = document.getElementById("inspector-not-duplicate");
 const inspectorTrash = document.getElementById("inspector-trash");
@@ -123,6 +124,26 @@ const imageDialog = document.getElementById("image-dialog");
 const imageDialogTitle = document.getElementById("image-dialog-title");
 const imageDialogPreview = document.getElementById("image-dialog-preview");
 const imageDialogClose = document.getElementById("image-dialog-close");
+
+// Player
+const playerDialog = document.getElementById("player-dialog");
+const playerTitle = document.getElementById("player-title");
+const playerStage = document.getElementById("player-stage");
+const playerVideo = document.getElementById("player-video");
+const playerAudio = document.getElementById("player-audio");
+const playerAudioArt = document.getElementById("player-audio-art");
+const playerCoverArt = document.getElementById("player-cover-art");
+const playerSubtitleDisplay = document.getElementById("player-subtitle-display");
+const playerClose = document.getElementById("player-close");
+const playerPlayPause = document.getElementById("player-play-pause");
+const playerSeek = document.getElementById("player-seek");
+const playerTimeCurrent = document.getElementById("player-time-current");
+const playerTimeTotal = document.getElementById("player-time-total");
+const playerSpeed = document.getElementById("player-speed");
+const playerSleepTimer = document.getElementById("player-sleep-timer");
+const playerSkipBack = document.getElementById("player-skip-back");
+const playerSkipFwd = document.getElementById("player-skip-fwd");
+const playerOpenSystem = document.getElementById("player-open-system");
 
 const storageKey = "mediavault.vaultRoot";
 const recentVaultsKey = "mediavault.recentVaults";
@@ -1768,6 +1789,296 @@ function openImagePreview(item) {
   showModalCard(imageDialog);
 }
 
+// ---------------------------------------------------------------------------
+// Media player
+// ---------------------------------------------------------------------------
+
+const PLAYER_SAVE_INTERVAL_MS = 5000;
+const PLAYER_VIDEO_EXTS = new Set(["mp4", "m4v", "mov", "webm", "ogv"]);
+const PLAYER_AUDIO_EXTS = new Set(["mp3", "m4a", "m4b", "aac", "ogg", "oga", "opus", "flac", "wav", "weba"]);
+// MKV/AVI cannot be played by macOS WKWebView natively.
+const PLAYER_UNSUPPORTED_EXTS = new Set(["mkv", "avi", "ts", "wmv", "rmvb"]);
+
+let playerState = null; // { mediaEl, item, vaultPath, sleepTimerId, saveTimerId, subtitleTrack }
+
+function playerMediaElement() {
+  return playerState?.mediaEl ?? null;
+}
+
+function playerFileExt(path) {
+  return (path || "").split(".").pop().toLowerCase();
+}
+
+function isVideoFile(path) {
+  return PLAYER_VIDEO_EXTS.has(playerFileExt(path));
+}
+
+function isAudioFile(path) {
+  return PLAYER_AUDIO_EXTS.has(playerFileExt(path));
+}
+
+function formatTime(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return "—:——";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+}
+
+function playerUpdateTime(el) {
+  if (!playerTimeCurrent || !playerTimeTotal || !playerSeek) return;
+  const cur = el.currentTime || 0;
+  const dur = el.duration || 0;
+  playerTimeCurrent.textContent = formatTime(cur);
+  playerTimeTotal.textContent = formatTime(dur);
+  if (dur > 0) {
+    playerSeek.value = String(Math.round((cur / dur) * 1000));
+  }
+}
+
+function playerSaveProgress() {
+  if (!playerState) return;
+  const el = playerState.mediaEl;
+  if (!el || !isFinite(el.duration) || el.duration <= 0) return;
+
+  const vaultPath = playerState.vaultPath;
+  const root = getVaultRoot();
+  const completed = el.currentTime / el.duration >= 0.90;
+
+  const progressType = isVideoFile(vaultPath) ? "video" : "audio";
+  const body = JSON.stringify({
+    vault_root: root || null,
+    vault_path: vaultPath,
+    progress: {
+      type: progressType,
+      position_seconds: el.currentTime,
+      duration_seconds: el.duration,
+    },
+    completed,
+  });
+
+  fetch("mediavault://localhost/api/progress/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  }).catch(() => {});
+}
+
+async function playerLoadProgress(vaultPath) {
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  try {
+    const res = await fetch(`mediavault://localhost/api/progress/load?path=${encodeURIComponent(vaultPath)}${rootQuery}`);
+    const data = await res.json();
+    return data?.record ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function playerStop() {
+  if (!playerState) return;
+  const { mediaEl, sleepTimerId, saveTimerId } = playerState;
+
+  playerSaveProgress();
+
+  if (sleepTimerId) clearTimeout(sleepTimerId);
+  if (saveTimerId) clearInterval(saveTimerId);
+
+  if (mediaEl) {
+    mediaEl.pause();
+    mediaEl.src = "";
+    mediaEl.load();
+  }
+
+  if (playerVideo) { playerVideo.src = ""; }
+  if (playerAudio) { playerAudio.src = ""; }
+  if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+
+  playerState = null;
+}
+
+function playerSetPlayPause(el) {
+  if (!playerPlayPause) return;
+  playerPlayPause.textContent = el.paused ? "▶" : "⏸";
+}
+
+async function openPlayer(item) {
+  if (!playerDialog || !item) return;
+
+  playerStop();
+
+  const sourcePath = item.source_path || item.target_path || "";
+  if (!sourcePath) return;
+
+  const ext = playerFileExt(sourcePath);
+  const isVideo = isVideoFile(sourcePath);
+  const isAudio = isAudioFile(sourcePath);
+  const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext);
+
+  if (!isVideo && !isAudio && !unsupported) return;
+
+  const fileUrl = mediaFileUrlFor(item);
+  const title = item.title || fileStem(sourcePath) || "Wiedergabe";
+
+  if (playerTitle) playerTitle.textContent = title;
+
+  const mediaEl = isVideo ? playerVideo : playerAudio;
+  if (!mediaEl) return;
+
+  // Show/hide video stage vs audio art
+  if (playerStage) playerStage.hidden = !isVideo;
+  if (playerAudioArt) playerAudioArt.hidden = isVideo;
+  if (playerCoverArt && !isVideo) {
+    const cover = coverUrlFor(item);
+    playerCoverArt.src = cover || "";
+    playerCoverArt.hidden = !cover;
+  }
+
+  // Show the player fullscreen overlay
+  playerDialog.hidden = false;
+  if (appModal) {
+    appModal.hidden = true; // player sits outside app-modal, don't obscure it
+  }
+
+  if (unsupported) {
+    // Cannot play natively — show open-with-system option prominently
+    if (playerPlayPause) playerPlayPause.disabled = true;
+    if (playerOpenSystem) playerOpenSystem.style.fontWeight = "bold";
+  } else {
+    if (playerPlayPause) playerPlayPause.disabled = false;
+    mediaEl.src = fileUrl;
+    mediaEl.playbackRate = parseFloat(playerSpeed?.value ?? "1");
+
+    const saveTimerId = setInterval(playerSaveProgress, PLAYER_SAVE_INTERVAL_MS);
+    playerState = { mediaEl, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId };
+
+    // Restore resume position
+    const record = await playerLoadProgress(sourcePath);
+    if (record?.progress?.position_seconds && isFinite(record.progress.position_seconds)) {
+      mediaEl.currentTime = record.progress.position_seconds;
+    }
+
+    mediaEl.play().catch(() => {});
+    playerSetPlayPause(mediaEl);
+  }
+}
+
+function closePlayer() {
+  playerStop();
+  if (playerDialog) playerDialog.hidden = true;
+}
+
+// Wire up player controls once DOM is ready.
+function initPlayer() {
+  if (playerClose) {
+    playerClose.addEventListener("click", closePlayer);
+  }
+
+  if (playerPlayPause) {
+    playerPlayPause.addEventListener("click", () => {
+      const el = playerMediaElement();
+      if (!el) return;
+      if (el.paused) { el.play().catch(() => {}); } else { el.pause(); }
+      playerSetPlayPause(el);
+    });
+  }
+
+  if (playerSkipBack) {
+    playerSkipBack.addEventListener("click", () => {
+      const el = playerMediaElement();
+      if (el) el.currentTime = Math.max(0, el.currentTime - 10);
+    });
+  }
+
+  if (playerSkipFwd) {
+    playerSkipFwd.addEventListener("click", () => {
+      const el = playerMediaElement();
+      if (el) el.currentTime = Math.min(el.duration || Infinity, el.currentTime + 30);
+    });
+  }
+
+  if (playerSeek) {
+    playerSeek.addEventListener("input", () => {
+      const el = playerMediaElement();
+      if (!el || !isFinite(el.duration)) return;
+      el.currentTime = (parseInt(playerSeek.value, 10) / 1000) * el.duration;
+    });
+  }
+
+  if (playerSpeed) {
+    playerSpeed.addEventListener("change", () => {
+      const el = playerMediaElement();
+      if (el) el.playbackRate = parseFloat(playerSpeed.value);
+    });
+  }
+
+  if (playerSleepTimer) {
+    playerSleepTimer.addEventListener("change", () => {
+      if (!playerState) return;
+      const { sleepTimerId } = playerState;
+      if (sleepTimerId) clearTimeout(sleepTimerId);
+
+      const minutes = parseInt(playerSleepTimer.value, 10);
+      if (minutes > 0) {
+        playerState.sleepTimerId = setTimeout(() => {
+          const el = playerMediaElement();
+          if (el) el.pause();
+          if (playerPlayPause) playerPlayPause.textContent = "▶";
+          if (playerSleepTimer) playerSleepTimer.value = "0";
+        }, minutes * 60 * 1000);
+      } else {
+        playerState.sleepTimerId = null;
+      }
+    });
+  }
+
+  if (playerOpenSystem) {
+    playerOpenSystem.addEventListener("click", async () => {
+      if (!playerState) return;
+      const root = getVaultRoot();
+      const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+      const path = playerState.vaultPath;
+      try {
+        await fetch(`mediavault://localhost/api/open-external?path=${encodeURIComponent(path)}${rootQuery}`);
+      } catch {
+        // Ignore — the system open is fire-and-forget
+      }
+    });
+  }
+
+  // Keep time display and seek bar in sync.
+  for (const mediaEl of [playerVideo, playerAudio]) {
+    if (!mediaEl) continue;
+    mediaEl.addEventListener("timeupdate", () => playerUpdateTime(mediaEl));
+    mediaEl.addEventListener("loadedmetadata", () => playerUpdateTime(mediaEl));
+    mediaEl.addEventListener("play", () => playerSetPlayPause(mediaEl));
+    mediaEl.addEventListener("pause", () => playerSetPlayPause(mediaEl));
+    mediaEl.addEventListener("ended", () => {
+      if (playerPlayPause) playerPlayPause.textContent = "▶";
+      playerSaveProgress();
+    });
+  }
+
+  // Close on Escape
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && playerDialog && !playerDialog.hidden) {
+      e.preventDefault();
+      closePlayer();
+    }
+    if (playerDialog && !playerDialog.hidden) {
+      if (e.key === " " || e.key === "k") {
+        e.preventDefault();
+        playerPlayPause?.click();
+      }
+      if (e.key === "ArrowLeft") { e.preventDefault(); playerSkipBack?.click(); }
+      if (e.key === "ArrowRight") { e.preventDefault(); playerSkipFwd?.click(); }
+    }
+  });
+}
+
 function selectionSearchTitle(selection) {
   if (!selection) {
     return "";
@@ -2450,6 +2761,12 @@ function renderInspector(value) {
     inspectorEditToggle.disabled = !editable;
     inspectorEditToggle.classList.toggle("is-active", document.body.classList.contains("inspector-editing"));
     inspectorEditToggle.textContent = "✎";
+  }
+  if (inspectorPlay) {
+    const srcPath = item?.source_path || item?.target_path || "";
+    const ext = playerFileExt(srcPath);
+    const playable = isVideoFile(srcPath) || isAudioFile(srcPath) || PLAYER_UNSUPPORTED_EXTS.has(ext);
+    inspectorPlay.hidden = !item || !playable;
   }
   if (inspectorFetchMetadata) {
     inspectorFetchMetadata.disabled = !metadataAllowed;
@@ -4333,6 +4650,13 @@ if (inspectorApply) {
   });
 }
 
+if (inspectorPlay) {
+  inspectorPlay.addEventListener("click", () => {
+    const item = inspectorSelection?.item;
+    if (item) openPlayer(item);
+  });
+}
+
 if (inspectorFetchMetadata) {
   inspectorFetchMetadata.addEventListener("click", async () => {
     if (!selectionSupportsMetadata(inspectorSelection) || !inspectorSelection.item) {
@@ -4573,6 +4897,7 @@ if (collectionBackDashboard) {
 populateSelectors();
 renderAuditTrail();
 syncTemplateInputs();
+initPlayer();
 bootstrapVault().catch(() => {
   renderRecentVaults();
   syncVaultHint();

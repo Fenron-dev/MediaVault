@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
@@ -11,6 +12,9 @@ use crate::core::duplicate::compute_fingerprint_for_file;
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
+};
+use crate::core::progress::{
+    delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
 };
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
@@ -112,7 +116,14 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_vault_root_response(request.uri().query()),
                 ),
-                "/api/media-file" => build_media_file_response(request.uri().query()),
+                "/api/media-file" => {
+                    let range = request
+                        .headers()
+                        .get("range")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    build_media_file_response(request.uri().query(), range.as_deref())
+                }
                 "/api/apply-import" => {
                     json_response(StatusCode::OK, &build_apply_import_response(request.body()))
                 }
@@ -123,6 +134,26 @@ pub(crate) fn run() -> Result<()> {
                 "/api/cleanup-vault" => json_response(
                     StatusCode::OK,
                     &build_cleanup_vault_response(request.uri().query()),
+                ),
+                "/api/progress/save" => json_response(
+                    StatusCode::OK,
+                    &build_save_progress_response(request.body()),
+                ),
+                "/api/progress/load" => json_response(
+                    StatusCode::OK,
+                    &build_load_progress_response(request.uri().query()),
+                ),
+                "/api/progress/delete" => json_response(
+                    StatusCode::OK,
+                    &build_delete_progress_response(request.body()),
+                ),
+                "/api/progress/list" => json_response(
+                    StatusCode::OK,
+                    &build_list_progress_response(request.uri().query()),
+                ),
+                "/api/open-external" => json_response(
+                    StatusCode::OK,
+                    &build_open_external_response(request.uri().query()),
                 ),
                 _ => response(
                     StatusCode::NOT_FOUND,
@@ -278,7 +309,7 @@ fn build_select_folder_response() -> SelectFolderResponse {
     }
 }
 
-fn build_media_file_response(query: Option<&str>) -> Response<Vec<u8>> {
+fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Response<Vec<u8>> {
     let Some(query) = query else {
         return response(
             StatusCode::BAD_REQUEST,
@@ -347,18 +378,109 @@ fn build_media_file_response(query: Option<&str>) -> Response<Vec<u8>> {
         }
     };
 
+    let file_size = match fs::metadata(&absolute) {
+        Ok(m) => m.len(),
+        Err(error) => {
+            return response(
+                StatusCode::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            )
+        }
+    };
+
+    let content_type = media_content_type(&absolute);
+
+    // Serve a partial range when the browser requests one (required for video seeking).
+    if let Some(range_str) = range.and_then(|r| r.strip_prefix("bytes=")) {
+        let (start, end) = parse_byte_range(range_str, file_size);
+
+        if start >= file_size || end >= file_size || start > end {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("Content-Range", format!("bytes */{file_size}"))
+                .body(Vec::new())
+                .expect("range error response should build");
+        }
+
+        let length = end - start + 1;
+
+        let body = match read_file_range(&absolute, start, length) {
+            Ok(b) => b,
+            Err(error) => {
+                return response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "text/plain; charset=utf-8",
+                    &error.to_string(),
+                )
+            }
+        };
+
+        return Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(CONTENT_TYPE, content_type)
+            .header(
+                "Content-Range",
+                format!("bytes {start}-{end}/{file_size}"),
+            )
+            .header("Content-Length", length.to_string())
+            .header("Accept-Ranges", "bytes")
+            .body(body)
+            .expect("partial content response should build");
+    }
+
+    // No Range header — serve the full file, but advertise range support so the
+    // browser knows it can seek without a full reload.
     match fs::read(&absolute) {
         Ok(body) => Response::builder()
             .status(StatusCode::OK)
-            .header(CONTENT_TYPE, media_content_type(&absolute))
+            .header(CONTENT_TYPE, content_type)
+            .header("Content-Length", file_size.to_string())
+            .header("Accept-Ranges", "bytes")
             .body(body)
-            .expect("media response construction should succeed"),
+            .expect("media response should build"),
         Err(error) => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
             &error.to_string(),
         ),
     }
+}
+
+/// Parses a `bytes=start-end` range spec and clamps both ends to `[0, file_size - 1]`.
+fn parse_byte_range(range_str: &str, file_size: u64) -> (u64, u64) {
+    let last = file_size.saturating_sub(1);
+
+    // Suffix form: "-500" means the last 500 bytes.
+    if let Some(suffix) = range_str.strip_prefix('-') {
+        if let Ok(n) = suffix.parse::<u64>() {
+            return (file_size.saturating_sub(n), last);
+        }
+        return (0, last);
+    }
+
+    let mut parts = range_str.splitn(2, '-');
+    let start = parts
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let end = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(last)
+        .min(last);
+
+    (start, end)
+}
+
+/// Reads exactly `length` bytes from `path` starting at byte offset `start`.
+fn read_file_range(path: &Path, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = vec![0u8; length as usize];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
@@ -688,10 +810,11 @@ fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
         fs::create_dir_all(inbox.join(subfolder)).map_err(VaultError::from)?;
     }
 
-    // Create app-internal cache directories up front so cover downloads never need to
-    // check-and-mkdir at call time.
+    // Create app-internal cache directories up front so cover downloads and progress
+    // tracking never need to check-and-mkdir at call time.
     fs::create_dir_all(vault.thumbnails_dir()).map_err(VaultError::from)?;
     fs::create_dir_all(vault.assets_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.progress_dir()).map_err(VaultError::from)?;
 
     fs::canonicalize(&vault_root).map_err(VaultError::from)
 }
@@ -2067,6 +2190,7 @@ fn media_content_type(path: &Path) -> &'static str {
         .map(|extension| extension.to_ascii_lowercase())
         .as_deref()
     {
+        // Images
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -2075,6 +2199,25 @@ fn media_content_type(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("avif") => "image/avif",
         Some("tif" | "tiff") => "image/tiff",
+        // Video (natively supported by macOS WKWebView)
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("ogv") => "video/ogg",
+        Some("avi") => "video/x-msvideo",
+        Some("mkv") => "video/x-matroska",
+        // Audio
+        Some("mp3") => "audio/mpeg",
+        Some("m4a" | "m4b") => "audio/mp4",
+        Some("aac") => "audio/aac",
+        Some("ogg" | "oga") => "audio/ogg",
+        Some("opus") => "audio/opus",
+        Some("flac") => "audio/flac",
+        Some("wav") => "audio/wav",
+        Some("weba") => "audio/webm",
+        // Documents
+        Some("pdf") => "application/pdf",
+        Some("epub") => "application/epub+zip",
         _ => "application/octet-stream",
     }
 }
@@ -2832,4 +2975,222 @@ fn has_season_episode_marker(value: &str) -> bool {
             && window[4].is_ascii_digit()
             && window[5].is_ascii_digit()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Progress API
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SaveProgressRequest {
+    vault_root: Option<String>,
+    vault_path: String,
+    progress: MediaProgress,
+    #[serde(default)]
+    completed: bool,
+}
+
+#[derive(Serialize)]
+struct SaveProgressResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl SaveProgressResponse {
+    fn ok() -> Self {
+        Self { ok: true, error: None }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self { ok: false, error: Some(msg.into()) }
+    }
+}
+
+#[derive(Serialize)]
+struct LoadProgressResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record: Option<ProgressRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteProgressRequest {
+    vault_root: Option<String>,
+    vault_path: String,
+}
+
+#[derive(Serialize)]
+struct DeleteProgressResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl DeleteProgressResponse {
+    fn ok() -> Self {
+        Self { ok: true, error: None }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self { ok: false, error: Some(msg.into()) }
+    }
+}
+
+#[derive(Serialize)]
+struct ListProgressResponse {
+    records: Vec<ProgressRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_save_progress_response(body: &[u8]) -> SaveProgressResponse {
+    let req: SaveProgressRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return SaveProgressResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return SaveProgressResponse::error("Kein Vault geöffnet."),
+        Err(e) => return SaveProgressResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return SaveProgressResponse::error(e.to_string()),
+    };
+
+    match save_progress(&vault.progress_dir(), &req.vault_path, req.progress, req.completed) {
+        Ok(()) => SaveProgressResponse::ok(),
+        Err(e) => SaveProgressResponse::error(e.to_string()),
+    }
+}
+
+fn build_load_progress_response(query: Option<&str>) -> LoadProgressResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return LoadProgressResponse { record: None, error: Some("missing query".into()) },
+    };
+
+    let vault_path = match extract_query_value(query, "path") {
+        Some(p) => p,
+        None => return LoadProgressResponse { record: None, error: Some("missing path".into()) },
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return LoadProgressResponse { record: None, error: Some("Kein Vault geöffnet.".into()) },
+        Err(e) => return LoadProgressResponse { record: None, error: Some(e.to_string()) },
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return LoadProgressResponse { record: None, error: Some(e.to_string()) },
+    };
+
+    match load_progress(&vault.progress_dir(), &vault_path) {
+        Ok(record) => LoadProgressResponse { record, error: None },
+        Err(e) => LoadProgressResponse { record: None, error: Some(e.to_string()) },
+    }
+}
+
+fn build_delete_progress_response(body: &[u8]) -> DeleteProgressResponse {
+    let req: DeleteProgressRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return DeleteProgressResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return DeleteProgressResponse::error("Kein Vault geöffnet."),
+        Err(e) => return DeleteProgressResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return DeleteProgressResponse::error(e.to_string()),
+    };
+
+    match delete_progress(&vault.progress_dir(), &req.vault_path) {
+        Ok(()) => DeleteProgressResponse::ok(),
+        Err(e) => DeleteProgressResponse::error(e.to_string()),
+    }
+}
+
+fn build_list_progress_response(query: Option<&str>) -> ListProgressResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return ListProgressResponse { records: vec![], error: Some("Kein Vault geöffnet.".into()) },
+        Err(e) => return ListProgressResponse { records: vec![], error: Some(e.to_string()) },
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return ListProgressResponse { records: vec![], error: Some(e.to_string()) },
+    };
+
+    match list_in_progress(&vault.progress_dir()) {
+        Ok(records) => ListProgressResponse { records, error: None },
+        Err(e) => ListProgressResponse { records: vec![], error: Some(e.to_string()) },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Open-with-system API
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct OpenExternalResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl OpenExternalResponse {
+    fn ok() -> Self { Self { ok: true, error: None } }
+    fn error(msg: impl Into<String>) -> Self { Self { ok: false, error: Some(msg.into()) } }
+}
+
+fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return OpenExternalResponse::error("missing query"),
+    };
+
+    let path = match extract_query_value(query, "path") {
+        Some(p) => p,
+        None => return OpenExternalResponse::error("missing path"),
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return OpenExternalResponse::error("Kein Vault geöffnet."),
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let relative = match RelativePath::new(&path) {
+        Ok(r) => r,
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let absolute = match vault.resolve(relative.as_path()) {
+        Ok(p) => p,
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    // `open` on macOS launches the file with the default app; equivalent to
+    // double-clicking in Finder. This is fire-and-forget — we only care that
+    // the process started, not how it exits.
+    match std::process::Command::new("open").arg(&absolute).spawn() {
+        Ok(_) => OpenExternalResponse::ok(),
+        Err(e) => OpenExternalResponse::error(format!("open failed: {e}")),
+    }
 }
