@@ -3424,7 +3424,10 @@ fn build_open_vault_root_response(query: Option<&str>) -> OpenExternalResponse {
         "xdg-open"
     };
 
-    match std::process::Command::new(program).arg(vault_root.as_path()).spawn() {
+    match std::process::Command::new(program)
+        .arg(vault_root.as_path())
+        .spawn()
+    {
         Ok(_) => OpenExternalResponse::ok(),
         Err(e) => OpenExternalResponse::error(format!("open failed: {e}")),
     }
