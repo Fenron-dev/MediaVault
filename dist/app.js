@@ -1043,6 +1043,11 @@ function projectItem(item) {
     "episode_title",
     "status",
     "notes",
+    "author",
+    "narrator",
+    "publisher",
+    "audible_asin",
+    "series_sequence",
   ].forEach((field) => {
     if (typeof metadata[field] === "string") {
       effective[field] = metadata[field];
@@ -1325,10 +1330,28 @@ function buildTargetPath(item) {
     return renderPathTemplate(pathTemplates.film, item);
   }
 
-  // Multi-file audiobooks: all parts share a folder named after the audiobook.
-  // Use the parent directory name from source_path as the folder title and keep
-  // each file's original filename so parts don't collide.
+  // Multi-file audiobooks: parts share a folder under Hörbücher.
+  // When Audible metadata is available, build a deep path: Author/Series/NR - Title/file.
+  // Without metadata, fall back to the source folder name.
   if (mediaType === "audiobook" && (item.audiobook_parts?.length > 0 || item.is_audiobook_part)) {
+    const origFilename = basename(item.source_path);
+    const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
+    const author = sanitizeSegment(item.author || "");
+    const series = sanitizeSegment(item.series_title || "");
+    const bookTitle = sanitizeSegment(item.title || "untitled");
+
+    if (author && series) {
+      const seqRaw = item.series_sequence ? parseInt(item.series_sequence, 10) : NaN;
+      const seqStr = !isNaN(seqRaw) ? String(seqRaw).padStart(2, "0") : null;
+      const bookFolder = seqStr ? `${seqStr} - ${bookTitle}` : bookTitle;
+      return `${folderSegment}/${author}/${series}/${bookFolder}/${origFilename}`;
+    }
+
+    if (author) {
+      return `${folderSegment}/${author}/${bookTitle}/${origFilename}`;
+    }
+
+    // No Audible metadata: derive folder name from the source path parent directory.
     const srcParts = (item.source_path || "").split("/");
     const parentName = srcParts.length >= 2 ? srcParts[srcParts.length - 2] : null;
     const INBOX_SEGMENTS = new Set(["inbox", "hörbücher", "horbücher"]);
@@ -1337,8 +1360,6 @@ function buildTargetPath(item) {
         ? parentName
         : item.title || fileStem(item.source_path) || "untitled"
     );
-    const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
-    const origFilename = basename(item.source_path);
     return `${folderSegment}/${audioTitle}${yearSuffix}/${origFilename}`;
   }
 
@@ -4019,11 +4040,24 @@ function collectionNodeKind(node) {
   if (node.path.endsWith("/Serien") || node.path.endsWith("/Filme")) {
     return "group";
   }
-  if (node.path.endsWith("/Hörbücher")) {
+  if (node.path.endsWith("/Hörbücher") || node.path === "Hörbücher") {
     return "group";
   }
-  if (/^Hörbücher\/[^/]+$/.test(node.path)) {
-    return "audiobook";
+  if (node.path.startsWith("Hörbücher/")) {
+    // Leaf node: all direct items are audiobook parts → render as audiobook profile.
+    if (
+      node.directItems.length > 0 &&
+      node.directItems.every(
+        (item) =>
+          item.is_audiobook_part ||
+          item.audiobook_parts?.length > 0 ||
+          canonicalMediaType(mediaSelectionValue(item)) === "audiobook"
+      )
+    ) {
+      return "audiobook";
+    }
+    // Intermediate author/series folder: no direct items, only child nodes.
+    return "group";
   }
   if (sortedChildren(node).some((child) => child.label.startsWith("Staffel "))) {
     return "series";
@@ -4411,7 +4445,8 @@ function renderCollectionProfile(node) {
   clearNode(collectionProfile);
 
   const primary = representativeItem(node);
-  if (!primary || ["root", "group", "folder"].includes(collectionNodeKind(node))) {
+  const nodeKind = collectionNodeKind(node);
+  if (!primary || ["root", "group", "folder"].includes(nodeKind)) {
     return;
   }
 
@@ -4461,7 +4496,9 @@ function renderCollectionProfile(node) {
   description.className = "collection-profile-description";
   description.textContent =
     primary.description?.replace(/<[^>]*>/g, "") ||
-    "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.";
+    (nodeKind === "audiobook"
+      ? "Noch keine Beschreibung vorhanden. Audible-Abgleich in der rechten Seitenleiste starten."
+      : "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.");
 
   const tagBar = document.createElement("div");
   tagBar.className = "media-tagbar";
@@ -4491,7 +4528,6 @@ function renderCollectionProfile(node) {
 
   collectionProfile.appendChild(profile);
 
-  const kind = collectionNodeKind(node);
   const children = sortedChildren(node);
   if (children.length) {
     const stack = document.createElement("div");
@@ -4837,7 +4873,7 @@ function createPosterCard(value, ordinal = null) {
   return button;
 }
 
-function audiobookItemLabel(item) {
+function audiobookItemLabel(item, groupSize = 0) {
   if (item.title && !item.is_audiobook_part) {
     return item.title;
   }
@@ -4845,12 +4881,14 @@ function audiobookItemLabel(item) {
   // Extract trailing number: _001, _1, part01, -01, etc.
   const match = fname.match(/[_\-\s]0*(\d+)\s*$/);
   if (match) {
-    return `Kapitel ${parseInt(match[1], 10)}`;
+    const nr = parseInt(match[1], 10);
+    const padLen = groupSize >= 100 ? 3 : 2;
+    return `Kapitel ${String(nr).padStart(padLen, "0")}`;
   }
   return fname;
 }
 
-function createCollectionItemRow(item) {
+function createCollectionItemRow(item, groupSize = 0) {
   const row = document.createElement("button");
   row.type = "button";
   row.className = "table-row table-row-button";
@@ -4877,7 +4915,7 @@ function createCollectionItemRow(item) {
   });
 
   [
-    audiobookItemLabel(item),
+    audiobookItemLabel(item, groupSize),
     mediaTypeLabel(mediaSelectionValue(item)),
     item.target_path ? basename(item.target_path) : statusLabel(item.status || "inbox"),
   ].forEach((cell) => {
@@ -4923,8 +4961,9 @@ function renderCollectionRows(node) {
   });
 
   if (!sortedChildren(node).length) {
+    const groupSize = node.directItems.length;
     sortedCollectionItems(node.directItems).forEach((item) => {
-      collectionRows.appendChild(createCollectionItemRow(item));
+      collectionRows.appendChild(createCollectionItemRow(item, groupSize));
     });
   }
 

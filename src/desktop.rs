@@ -990,7 +990,7 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
         })
         .collect();
 
-    group_audiobook_folders(&mut plan_items);
+    group_audiobook_folders(&mut plan_items, Some(vault_root.as_path()));
 
     // Append parts list to the sidecar YAML preview for audiobook group representatives.
     for item in &mut plan_items {
@@ -1398,6 +1398,11 @@ struct DemoPlanItem {
     /// are not the group representative.  The UI can collapse these.
     #[serde(default)]
     is_audiobook_part: bool,
+    /// Author name extracted from embedded audio tags (ID3/MP4) or from
+    /// Audible metadata.  Populated before the first Audible sync so the
+    /// collection view already has an author even for unsynced books.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
 }
 
 impl DemoPlanItem {
@@ -1528,6 +1533,7 @@ impl DemoPlanItem {
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
             audiobook_parts: None,
             is_audiobook_part: false,
+            author: None,
         }
     }
 }
@@ -2758,7 +2764,7 @@ fn prettify_folder_title(raw: &str) -> String {
         .join(" ")
 }
 
-fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
+fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Path>) {
     // Group item indices by parent directory, counting only Audiobook items.
     let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -2793,28 +2799,42 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
         // "Part9" sorts before "Part21" even without zero-padding.
         group_indices.sort_by(|&a, &b| natural_cmp(&items[a].source_path, &items[b].source_path));
 
-        // Derive the audiobook folder name from the parent directory of the
-        // first item, so the plan shows the album folder name rather than the
-        // individual track filename as the title.
+        // Try to read embedded audio tags from the first file in the group.
+        // Tags often contain a cleaner title and author than the folder name.
+        let tags = vault_root.and_then(|root| {
+            let rel = &items[group_indices[0]].source_path;
+            let abs = root.join(rel);
+            read_audio_tags(&abs)
+        });
+
+        // Derive the audiobook folder name.  Priority:
+        //   1. Album tag from embedded metadata (clean title)
+        //   2. Parent directory name (prettified hyphens → spaces)
         let (path_segment, display_title) = {
-            let src = &items[group_indices[0]].source_path;
-            let raw = src
-                .rfind('/')
-                .and_then(|end| {
-                    let parent = &src[..end];
-                    parent.rfind('/').map(|start| parent[start + 1..].to_string())
-                })
-                .unwrap_or_else(|| "Unbenannt".to_string());
-            let segment = sanitize_path_segment(&raw);
-            let pretty = prettify_folder_title(&raw);
-            (segment, pretty)
+            if let Some(album) = tags.as_ref().and_then(|t| t.album.as_deref()) {
+                (sanitize_path_segment(album), album.to_string())
+            } else {
+                let src = &items[group_indices[0]].source_path;
+                let raw = src
+                    .rfind('/')
+                    .and_then(|end| {
+                        let parent = &src[..end];
+                        parent.rfind('/').map(|start| parent[start + 1..].to_string())
+                    })
+                    .unwrap_or_else(|| "Unbenannt".to_string());
+                (sanitize_path_segment(&raw), prettify_folder_title(&raw))
+            }
         };
 
-        // Update title on representative and set correct target_path for all
-        // members so they land in the same folder rather than separate ones.
+        // Author from tags, if available.
+        let tag_author = tags.and_then(|t| t.artist);
+
+        // Update representative: title and (if found) author.
         items[group_indices[0]].title = Some(display_title);
+        items[group_indices[0]].author = tag_author;
+
+        // Set correct target_path for all members so they land in the same folder.
         for &idx in &group_indices {
-            // Clone first so the immutable borrow ends before we mutate target_path.
             let src = items[idx].source_path.clone();
             let file_name = match src.rfind('/') {
                 Some(pos) => src[pos + 1..].to_string(),
@@ -2835,6 +2855,270 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
         for &part_idx in &group_indices[1..] {
             items[part_idx].is_audiobook_part = true;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audio tag extraction (ID3v2 + MP4) — no external crate required.
+// ---------------------------------------------------------------------------
+
+/// Album title and artist extracted from embedded audio metadata.
+struct AudioTagData {
+    /// Album title — typically the audiobook or book title.
+    album: Option<String>,
+    /// Album artist or lead artist — typically the author.
+    artist: Option<String>,
+}
+
+/// Reads the first `max_bytes` of a file into a buffer.
+fn read_file_prefix(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = file.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if n < 10 {
+        None
+    } else {
+        Some(buf)
+    }
+}
+
+/// Attempts to read audio metadata tags from the given file.
+///
+/// Recognises ID3v2.3/v2.4 headers (MP3) and MPEG-4 atoms (M4B/M4A/AAC).
+/// Returns `None` if the format is unrecognised or tags are absent.
+fn read_audio_tags(path: &Path) -> Option<AudioTagData> {
+    // 512 KB is enough to cover the ID3 header for most files; for MP4 the
+    // moov metadata box is usually written first (fast-start).
+    let data = read_file_prefix(path, 512 * 1024)?;
+
+    if data.len() >= 10 && &data[0..3] == b"ID3" {
+        return parse_id3v2_tags(&data);
+    }
+
+    // MP4/M4B/M4A: the 4 bytes at offset 4 are the box type; ftyp or moov are
+    // both valid indicators.
+    if data.len() >= 8 && (&data[4..8] == b"ftyp" || &data[4..8] == b"moov") {
+        return parse_mp4_tags(&data);
+    }
+
+    None
+}
+
+// --- ID3v2 ---------------------------------------------------------------
+
+fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
+    if data.len() < 10 {
+        return None;
+    }
+    let version = data[3];
+    // Only handle v2.3 and v2.4; v2.2 uses 3-byte frame IDs (rare today).
+    if version < 3 || version > 4 {
+        return None;
+    }
+    let flags = data[5];
+
+    // Tag size is encoded as a 4-byte synchsafe integer.
+    let tag_size = ((data[6] as usize & 0x7F) << 21)
+        | ((data[7] as usize & 0x7F) << 14)
+        | ((data[8] as usize & 0x7F) << 7)
+        | (data[9] as usize & 0x7F);
+    let tag_end = (10 + tag_size).min(data.len());
+
+    // Skip optional extended header (flag bit 6).
+    let mut pos = 10;
+    if (flags & 0x40) != 0 && pos + 4 <= tag_end {
+        let ext_size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                as usize;
+        pos += ext_size;
+    }
+
+    let mut album: Option<String> = None;
+    let mut album_artist: Option<String> = None;
+    let mut lead_artist: Option<String> = None;
+
+    while pos + 10 < tag_end {
+        // Null padding marks end of frames.
+        if data[pos] == 0 {
+            break;
+        }
+        let frame_id = &data[pos..pos + 4];
+
+        let frame_size = if version == 4 {
+            // ID3v2.4: frame size is also synchsafe.
+            ((data[pos + 4] as usize & 0x7F) << 21)
+                | ((data[pos + 5] as usize & 0x7F) << 14)
+                | ((data[pos + 6] as usize & 0x7F) << 7)
+                | (data[pos + 7] as usize & 0x7F)
+        } else {
+            u32::from_be_bytes([
+                data[pos + 4],
+                data[pos + 5],
+                data[pos + 6],
+                data[pos + 7],
+            ]) as usize
+        };
+
+        if frame_size == 0 {
+            pos += 10;
+            continue;
+        }
+        if pos + 10 + frame_size > tag_end {
+            break;
+        }
+
+        let content = &data[pos + 10..pos + 10 + frame_size];
+        if frame_id == b"TALB" {
+            album = decode_id3_text(content);
+        } else if frame_id == b"TPE2" {
+            album_artist = decode_id3_text(content);
+        } else if frame_id == b"TPE1" {
+            lead_artist = decode_id3_text(content);
+        }
+
+        pos += 10 + frame_size;
+    }
+
+    Some(AudioTagData {
+        album,
+        artist: album_artist.or(lead_artist),
+    })
+}
+
+/// Decodes an ID3 text frame.  The first byte is the encoding flag:
+/// 0 = ISO-8859-1, 1/2 = UTF-16 (with/without BOM), 3 = UTF-8.
+fn decode_id3_text(data: &[u8]) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    let encoding = data[0];
+    let text = &data[1..];
+    let result: String = match encoding {
+        // ISO-8859-1: map bytes directly to char (valid for ASCII range)
+        0 => text
+            .iter()
+            .map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' })
+            .collect(),
+        // UTF-16 with or without BOM
+        1 | 2 => {
+            if text.len() < 2 {
+                return None;
+            }
+            let units: Vec<u16> = if text[0] == 0xFF && text[1] == 0xFE {
+                text[2..]
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect()
+            } else if text[0] == 0xFE && text[1] == 0xFF {
+                text[2..]
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect()
+            } else {
+                // No BOM — assume little-endian (most common on Windows/iTunes)
+                text.chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect()
+            };
+            String::from_utf16_lossy(&units).into_owned()
+        }
+        // UTF-8
+        3 => String::from_utf8_lossy(text).into_owned(),
+        _ => return None,
+    };
+    let cleaned = result.trim_matches('\0').trim().to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+// --- MPEG-4 atoms (M4B / M4A / AAC) -------------------------------------
+
+/// Returns `(content_start, content_end)` for the first atom named `target`
+/// found by scanning `data[from..to]`.
+fn find_mp4_atom(data: &[u8], target: &[u8], from: usize, to: usize) -> Option<(usize, usize)> {
+    let mut pos = from;
+    let limit = to.min(data.len());
+    while pos + 8 <= limit {
+        let size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+            as usize;
+        if size < 8 {
+            break;
+        }
+        let end = pos + size;
+        if end > data.len() {
+            break;
+        }
+        if &data[pos + 4..pos + 8] == target {
+            return Some((pos + 8, end));
+        }
+        pos = end;
+    }
+    None
+}
+
+fn parse_mp4_tags(data: &[u8]) -> Option<AudioTagData> {
+    let (moov_s, moov_e) = find_mp4_atom(data, b"moov", 0, data.len())?;
+
+    // Locate ilst: try moov→udta→meta→ilst, then moov→meta→ilst.
+    let ilst = locate_mp4_ilst(data, moov_s, moov_e)
+        .or_else(|| {
+            // Fallback: meta directly inside moov (some encoders skip udta)
+            let (meta_s, meta_e) = find_mp4_atom(data, b"meta", moov_s, moov_e)?;
+            // meta is a FullBox: skip 4-byte version/flags
+            let adj = (meta_s + 4).min(meta_e);
+            let (ilst_s, ilst_e) = find_mp4_atom(data, b"ilst", adj, meta_e)?;
+            Some((ilst_s, ilst_e))
+        })?;
+
+    let (ilst_s, ilst_e) = ilst;
+
+    let album = read_mp4_string_item(data, b"\xa9alb", ilst_s, ilst_e);
+    let album_artist = read_mp4_string_item(data, b"aART", ilst_s, ilst_e);
+    let artist = read_mp4_string_item(data, b"\xa9ART", ilst_s, ilst_e);
+
+    Some(AudioTagData {
+        album,
+        artist: album_artist.or(artist),
+    })
+}
+
+fn locate_mp4_ilst(data: &[u8], moov_s: usize, moov_e: usize) -> Option<(usize, usize)> {
+    let (udta_s, udta_e) = find_mp4_atom(data, b"udta", moov_s, moov_e)?;
+    let (meta_s, meta_e) = find_mp4_atom(data, b"meta", udta_s, udta_e)?;
+    // meta FullBox: skip 4-byte version/flags
+    let adj = (meta_s + 4).min(meta_e);
+    let (ilst_s, ilst_e) = find_mp4_atom(data, b"ilst", adj, meta_e)?;
+    Some((ilst_s, ilst_e))
+}
+
+/// Reads the string value of an iTunes-style item atom (e.g. `©alb`) from ilst.
+fn read_mp4_string_item(
+    data: &[u8],
+    item_name: &[u8],
+    ilst_s: usize,
+    ilst_e: usize,
+) -> Option<String> {
+    let (item_s, item_e) = find_mp4_atom(data, item_name, ilst_s, ilst_e)?;
+    // Inside the item atom is a 'data' atom: header(8) + type(4) + locale(4) + string
+    let (data_s, data_e) = find_mp4_atom(data, b"data", item_s, item_e)?;
+    let payload_start = data_s + 8; // skip type(4) + locale(4)
+    if payload_start >= data_e {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&data[payload_start..data_e]).into_owned();
+    let cleaned = text.trim_matches('\0').trim().to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
     }
 }
 
