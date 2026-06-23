@@ -2191,11 +2191,14 @@ async function openPlayer(item) {
 
   if (playerTitle) playerTitle.textContent = title;
 
-  // Show the player fullscreen overlay
-  playerDialog.hidden = false;
-  if (appModal) {
+  // Show the player — it lives outside #app-modal so it is always visible
+  // regardless of whether any other modal is open. Close any other open
+  // modal card so the two overlays don't stack.
+  if (appModal && !appModal.hidden) {
     appModal.hidden = true;
+    appModal.classList.remove("is-active");
   }
+  playerDialog.hidden = false;
 
   // ── PDF ──────────────────────────────────────────────────────────────────
   if (isPdf) {
@@ -2243,6 +2246,8 @@ async function openPlayer(item) {
   if (unsupported) {
     if (playerPlayPause) playerPlayPause.disabled = true;
     if (playerOpenSystem) playerOpenSystem.style.fontWeight = "bold";
+    // Store state so "Mit System öffnen" knows which path to open.
+    playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
   } else {
     if (playerPlayPause) playerPlayPause.disabled = false;
     mediaEl.src = fileUrl;
