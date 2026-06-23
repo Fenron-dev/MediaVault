@@ -288,6 +288,17 @@ function setActiveTab(tab, options = {}) {
   }
   document.body.classList.toggle("is-collections", tab === "collections");
 
+  // Hide the right-hand inspector on tabs that don't use it so they get
+  // the full workspace width.  Restore it when switching to collections.
+  const noInspector = tab === "inbox" || tab === "review";
+  document.body.classList.toggle("inspector-hidden", noInspector);
+
+  // Clear the inspector when leaving the collections tab so stale
+  // property values don't bleed through to other tabs.
+  if (noInspector) {
+    renderInspector(null);
+  }
+
   if (statusStrip) {
     statusStrip.textContent = `Ansicht gewechselt: ${labels[tab] ?? tab}.`;
   }
@@ -3171,7 +3182,9 @@ function renderInboxRows(items) {
     const target = item.duplicate_of || item.needs_review
       ? "Inbox/_review_queue"
       : item.target_path ?? "Inbox/_review_queue";
-    inboxRows.appendChild(createRow(item, [item.source_path, status, target], false));
+    const displayName = item.title || basename(item.source_path);
+    const displayTarget = target.startsWith("Inbox/") ? target : basename(target);
+    inboxRows.appendChild(createRow(item, [displayName, status, displayTarget], false));
   });
 }
 
@@ -3194,7 +3207,7 @@ function renderReviewRows(items) {
       : "Prüfung";
     const action = item.steps[item.steps.length - 1] ?? "Prüfen";
     reviewRows.appendChild(
-      createRow(item, [item.source_path, status, action], item.source_path === selectedItemKey)
+      createRow(item, [item.title || basename(item.source_path), status, action], item.source_path === selectedItemKey)
     );
   });
 

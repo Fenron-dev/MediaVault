@@ -592,6 +592,10 @@ h3 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.panel-grid.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .panel {
   padding: 18px;
 }
@@ -771,7 +775,7 @@ h3 {
 }
 
 .review-grid {
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 0.55fr) minmax(0, 1.45fr);
 }
 
 .review-layout {
@@ -1681,6 +1685,15 @@ h3 {
 
 .yaml-editor:disabled {
   color: var(--muted);
+}
+
+/* Inspector hidden automatically on Inbox and Review tabs */
+.inspector-hidden .app-shell {
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.inspector-hidden .inspector {
+  display: none;
 }
 
 .inspector-collapsed .app-shell {
