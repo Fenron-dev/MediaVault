@@ -2663,6 +2663,49 @@ const AUDIOBOOK_AUDIO_EXTS: &[&str] = &[
     "mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "weba",
 ];
 
+/// Numeric-aware string comparison so that "Part9" sorts before "Part21".
+///
+/// Splits each string into runs of digits and non-digits and compares runs
+/// of digits numerically rather than lexicographically.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, _) => return std::cmp::Ordering::Less,
+            (_, None) => return std::cmp::Ordering::Greater,
+            (ac, bc) => {
+                if ac.is_ascii_digit() && bc.is_ascii_digit() {
+                    let mut an = String::new();
+                    while ai.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        an.push(ai.next().unwrap());
+                    }
+                    let mut bn = String::new();
+                    while bi.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        bn.push(bi.next().unwrap());
+                    }
+                    let av: u64 = an.parse().unwrap_or(0);
+                    let bv: u64 = bn.parse().unwrap_or(0);
+                    match av.cmp(&bv) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+                } else {
+                    ai.next();
+                    bi.next();
+                    let ac_lo: char = ac.to_lowercase().next().unwrap_or(ac);
+                    let bc_lo: char = bc.to_lowercase().next().unwrap_or(bc);
+                    match ac_lo.cmp(&bc_lo) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Post-processes a flat list of plan items to detect multi-file audiobook groups.
 ///
 /// Rule: if every audio file in a directory is classified as `Audiobook`, they
@@ -2702,8 +2745,9 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
             continue; // Single file — not a multi-part audiobook
         }
 
-        // Sort indices by source_path so parts are in alphabetical (track) order.
-        group_indices.sort_by(|&a, &b| items[a].source_path.cmp(&items[b].source_path));
+        // Sort indices by source_path using numeric-aware comparison so that
+        // "Part9" sorts before "Part21" even without zero-padding.
+        group_indices.sort_by(|&a, &b| natural_cmp(&items[a].source_path, &items[b].source_path));
 
         // Derive the audiobook folder name from the parent directory of the
         // first item, so the plan shows the album folder name rather than the
@@ -3007,17 +3051,29 @@ fn classify_from_inbox_folder(path: &str) -> Option<FileClassification> {
     None
 }
 
+/// Image extensions that should never be classified as Audiobook even when
+/// placed inside `Inbox/Hörbücher/`.  These are cover-art files that happen
+/// to live next to the audio tracks.
+const IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif",
+];
+
 fn detect_classification(relative_path: &RelativePath) -> Option<FileClassification> {
     let path = relative_path.to_string().to_lowercase();
-
-    // Inbox subfolder takes highest priority — the user explicitly sorted it there.
-    if let Some(cls) = classify_from_inbox_folder(&path) {
-        return Some(cls);
-    }
 
     let extension = relative_path
         .extension()
         .map(|ext| ext.to_string_lossy().to_lowercase());
+
+    // Inbox subfolder takes highest priority — the user explicitly sorted it there.
+    // Exception: image files in audiobook folders are artwork, not audio items.
+    if let Some(cls) = classify_from_inbox_folder(&path) {
+        let is_image = IMAGE_EXTS.contains(&extension.as_deref().unwrap_or(""));
+        if is_image && cls.media_type == MediaType::Audiobook {
+            return None; // leave unclassified; will stay in Inbox
+        }
+        return Some(cls);
+    }
 
     match extension.as_deref() {
         Some("mkv" | "mp4" | "avi" | "mov" | "webm") => {

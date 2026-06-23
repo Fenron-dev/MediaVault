@@ -546,6 +546,26 @@ function renderRecentVaults() {
   });
 }
 
+// Numeric-aware sort so "Part9" comes before "Part21".
+function naturalCompare(a, b) {
+  const re = /(\d+)|(\D+)/g;
+  const at = String(a).match(re) ?? [];
+  const bt = String(b).match(re) ?? [];
+  for (let i = 0; i < Math.max(at.length, bt.length); i++) {
+    const as = at[i] ?? "";
+    const bs = bt[i] ?? "";
+    const an = parseInt(as, 10);
+    const bn = parseInt(bs, 10);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) {
+      if (an !== bn) return an - bn;
+    } else {
+      const c = as.localeCompare(bs, "de");
+      if (c !== 0) return c;
+    }
+  }
+  return 0;
+}
+
 function sanitizeSegment(value) {
   return String(value)
     .replace(/[\\/:"*?<>|]/g, " ")
@@ -3616,14 +3636,9 @@ function findCollectionNode(root, path) {
 }
 
 function sortedChildren(node) {
-  return Array.from(node.children.values()).sort((left, right) => {
-    const leftSeason = left.label.match(/^Staffel\s+(\d+)$/i);
-    const rightSeason = right.label.match(/^Staffel\s+(\d+)$/i);
-    if (leftSeason && rightSeason) {
-      return Number.parseInt(leftSeason[1], 10) - Number.parseInt(rightSeason[1], 10);
-    }
-    return left.label.localeCompare(right.label, "de");
-  });
+  return Array.from(node.children.values()).sort((left, right) =>
+    naturalCompare(left.label, right.label)
+  );
 }
 
 function parentPath(path) {
@@ -4468,9 +4483,9 @@ function createCollectionItemRow(item) {
   });
 
   [
-    item.source_path,
+    item.title || basename(item.source_path),
     mediaTypeLabel(mediaSelectionValue(item)),
-    item.target_path || statusLabel(item.status || "inbox"),
+    item.target_path ? basename(item.target_path) : statusLabel(item.status || "inbox"),
   ].forEach((cell) => {
     const span = document.createElement("span");
     span.textContent = cell;
@@ -4571,7 +4586,10 @@ function compareCollectionItem(left, right) {
     return leftEpisode - rightEpisode;
   }
 
-  return String(left.title || left.source_path).localeCompare(String(right.title || right.source_path), "de");
+  return naturalCompare(
+    left.title || basename(left.source_path),
+    right.title || basename(right.source_path)
+  );
 }
 
 function sortedCollectionItems(items) {
