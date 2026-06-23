@@ -1276,6 +1276,23 @@ function buildTargetPath(item) {
     return renderPathTemplate(pathTemplates.film, item);
   }
 
+  // Multi-file audiobooks: all parts share a folder named after the audiobook.
+  // Use the parent directory name from source_path as the folder title and keep
+  // each file's original filename so parts don't collide.
+  if (mediaType === "audiobook" && (item.audiobook_parts?.length > 0 || item.is_audiobook_part)) {
+    const srcParts = (item.source_path || "").split("/");
+    const parentName = srcParts.length >= 2 ? srcParts[srcParts.length - 2] : null;
+    const INBOX_SEGMENTS = new Set(["inbox", "hörbücher", "horbücher"]);
+    const audioTitle = sanitizeSegment(
+      parentName && !INBOX_SEGMENTS.has(parentName.toLowerCase())
+        ? parentName
+        : item.title || fileStem(item.source_path) || "untitled"
+    );
+    const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
+    const origFilename = basename(item.source_path);
+    return `${folderSegment}/${audioTitle}${yearSuffix}/${origFilename}`;
+  }
+
   const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
   const filename = extension ? `${title}${yearSuffix}.${extension}` : `${title}${yearSuffix}`;
   return `${folderSegment}/${title}${yearSuffix}/${filename}`;
@@ -2186,6 +2203,17 @@ async function openPlayer(item) {
 
   if (!isVideo && !isAudio && !isPdf && !isImage && !unsupported) return;
 
+  // Unsupported formats (MKV, AVI, TS, ePub…): open directly in system player
+  // without showing the internal player dialog.
+  if (unsupported) {
+    const root = getVaultRoot();
+    const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+    fetch(
+      `mediavault://localhost/api/open-external?path=${encodeURIComponent(sourcePath)}${rootQuery}`
+    ).catch(() => {});
+    return;
+  }
+
   const fileUrl = mediaFileUrlFor(item);
   const title = item.title || fileStem(sourcePath) || "Wiedergabe";
 
@@ -2239,39 +2267,69 @@ async function openPlayer(item) {
   if (playerMangaStage) playerMangaStage.hidden = true;
   if (playerCoverArt && !isVideo) {
     const cover = coverUrlFor(item);
-    playerCoverArt.src = cover || "";
-    playerCoverArt.hidden = !cover;
+    if (cover) {
+      playerCoverArt.src = cover;
+      playerCoverArt.hidden = false;
+      playerCoverArt.onerror = () => {
+        playerCoverArt.hidden = true;
+        playerCoverArt.onerror = null;
+      };
+    } else {
+      // Fall back to cover image files in the same directory
+      const root = getVaultRoot();
+      const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+      const dir = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+      const candidates = dir
+        ? ["cover.jpg", "folder.jpg", "cover.png", "poster.jpg"].map(
+            (n) =>
+              `mediavault://localhost/api/media-file?path=${encodeURIComponent(
+                dir + "/" + n
+              )}${rootQuery}`
+          )
+        : [];
+      if (candidates.length > 0) {
+        let ci = 0;
+        const tryNextCover = () => {
+          if (ci < candidates.length) {
+            playerCoverArt.src = candidates[ci++];
+          } else {
+            playerCoverArt.src = "";
+            playerCoverArt.hidden = true;
+            playerCoverArt.onerror = null;
+          }
+        };
+        playerCoverArt.hidden = false;
+        playerCoverArt.onerror = tryNextCover;
+        tryNextCover();
+      } else {
+        playerCoverArt.src = "";
+        playerCoverArt.hidden = true;
+      }
+    }
   }
 
-  if (unsupported) {
-    if (playerPlayPause) playerPlayPause.disabled = true;
-    if (playerOpenSystem) playerOpenSystem.style.fontWeight = "bold";
-    // Store state so "Mit System öffnen" knows which path to open.
-    playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
-  } else {
-    if (playerPlayPause) playerPlayPause.disabled = false;
-    mediaEl.src = fileUrl;
-    mediaEl.playbackRate = parseFloat(playerSpeed?.value ?? "1");
+  if (playerPlayPause) playerPlayPause.disabled = false;
+  mediaEl.src = fileUrl;
+  mediaEl.playbackRate = parseFloat(playerSpeed?.value ?? "1");
 
-    const saveTimerId = setInterval(playerSaveProgress, PLAYER_SAVE_INTERVAL_MS);
-    playerState = { mediaEl, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId };
+  const saveTimerId = setInterval(playerSaveProgress, PLAYER_SAVE_INTERVAL_MS);
+  playerState = { mediaEl, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId };
 
-    // Restore resume position
-    const record = await playerLoadProgress(sourcePath);
-    if (record?.progress?.position_seconds && isFinite(record.progress.position_seconds)) {
-      mediaEl.currentTime = record.progress.position_seconds;
-    }
-
-    // Load .srt subtitle companion for video files
-    if (isVideo) {
-      loadSubtitles(sourcePath).then(() => {
-        if (playerState && subtitleCues.length > 0) startSubtitleLoop(mediaEl);
-      });
-    }
-
-    mediaEl.play().catch(() => {});
-    playerSetPlayPause(mediaEl);
+  // Restore resume position
+  const record = await playerLoadProgress(sourcePath);
+  if (record?.progress?.position_seconds && isFinite(record.progress.position_seconds)) {
+    mediaEl.currentTime = record.progress.position_seconds;
   }
+
+  // Load .srt subtitle companion for video files
+  if (isVideo) {
+    loadSubtitles(sourcePath).then(() => {
+      if (playerState && subtitleCues.length > 0) startSubtitleLoop(mediaEl);
+    });
+  }
+
+  mediaEl.play().catch(() => {});
+  playerSetPlayPause(mediaEl);
 }
 
 function closePlayer() {

@@ -2705,6 +2705,34 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
         // Sort indices by source_path so parts are in alphabetical (track) order.
         group_indices.sort_by(|&a, &b| items[a].source_path.cmp(&items[b].source_path));
 
+        // Derive the audiobook folder name from the parent directory of the
+        // first item, so the plan shows the album folder name rather than the
+        // individual track filename as the title.
+        let folder_name = {
+            let src = &items[group_indices[0]].source_path;
+            src.rfind('/')
+                .and_then(|end| {
+                    let parent = &src[..end];
+                    parent
+                        .rfind('/')
+                        .map(|start| sanitize_path_segment(&parent[start + 1..]))
+                })
+                .unwrap_or_else(|| "Unbenannt".to_string())
+        };
+
+        // Update title on representative and set correct target_path for all
+        // members so they land in the same folder rather than separate ones.
+        items[group_indices[0]].title = Some(folder_name.clone());
+        for &idx in &group_indices {
+            // Clone first so the immutable borrow ends before we mutate target_path.
+            let src = items[idx].source_path.clone();
+            let file_name = match src.rfind('/') {
+                Some(pos) => src[pos + 1..].to_string(),
+                None => src,
+            };
+            items[idx].target_path = Some(format!("Hörbücher/{}/{}", folder_name, file_name));
+        }
+
         let part_paths: Vec<String> = group_indices
             .iter()
             .map(|&idx| items[idx].source_path.clone())
