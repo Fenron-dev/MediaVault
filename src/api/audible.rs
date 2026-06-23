@@ -177,43 +177,50 @@ impl AudibleClient {
         Ok(Self { client })
     }
 
-    /// Searches Audible for audiobooks matching `title`.
+    /// Searches Audible for audiobooks matching `title` and optionally `author`.
     ///
     /// Tries the German store first. If it returns no results, retries on the
     /// US store as fallback so obscure titles are still found.
     ///
     /// # Parameters
-    /// - `title` – search string (book title, author, or combination)
+    /// - `title` – book title (required)
+    /// - `author` – optional author name to narrow results
     /// - `limit` – maximum number of results to return
     ///
     /// # Errors
     /// - Returns `VaultError::ExternalApi` if both regions fail.
-    pub fn search(&self, title: &str, limit: usize) -> Result<Vec<AudibleProduct>> {
-        match self.search_region(title, limit, "de") {
+    pub fn search(&self, title: &str, author: Option<&str>, limit: usize) -> Result<Vec<AudibleProduct>> {
+        match self.search_region(title, author, limit, "de") {
             Ok(results) if !results.is_empty() => return Ok(results),
             _ => {}
         }
-        self.search_region(title, limit, "com")
+        self.search_region(title, author, limit, "com")
     }
 
     fn search_region(
         &self,
         title: &str,
+        author: Option<&str>,
         limit: usize,
         tld: &str,
     ) -> Result<Vec<AudibleProduct>> {
         let url = format!("https://api.audible.{tld}/1.0/catalog/products");
         let limit_str = limit.to_string();
 
+        let mut params: Vec<(&str, &str)> = vec![
+            ("title", title),
+            ("num_results", limit_str.as_str()),
+            ("response_groups", RESPONSE_GROUPS),
+            ("image_sizes", IMAGE_SIZE),
+        ];
+        if let Some(auth) = author {
+            params.push(("author", auth));
+        }
+
         let resp = self
             .client
             .get(&url)
-            .query(&[
-                ("title", title),
-                ("num_results", limit_str.as_str()),
-                ("response_groups", RESPONSE_GROUPS),
-                ("image_sizes", IMAGE_SIZE),
-            ])
+            .query(&params)
             .send()
             .map_err(|e| {
                 VaultError::ExternalApi(format!(

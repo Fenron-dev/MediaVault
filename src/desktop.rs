@@ -291,6 +291,7 @@ fn build_audible_search_response(query: Option<&str>) -> AudibleSearchResponse {
         return AudibleSearchResponse::error("missing title".to_string());
     };
 
+    let author = extract_query_value(query, "author");
     let limit = extract_query_value(query, "limit")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(8);
@@ -300,7 +301,7 @@ fn build_audible_search_response(query: Option<&str>) -> AudibleSearchResponse {
         Err(e) => return AudibleSearchResponse::error(e.to_string()),
     };
 
-    match client.search(&title, limit) {
+    match client.search(&title, author.as_deref(), limit) {
         Ok(results) => AudibleSearchResponse {
             metadata: results.first().cloned(),
             results,
@@ -2746,6 +2747,17 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
 /// others are flagged as `is_audiobook_part = true`.
 ///
 /// Items that don't belong to a multi-file group are left unchanged.
+/// Converts a hyphen-separated folder name to a human-readable display title.
+///
+/// Example: `"Listening-to-Bone-Lord--Scribd"` → `"Listening to Bone Lord Scribd"`
+fn prettify_folder_title(raw: &str) -> String {
+    raw.replace("--", " ")
+        .replace('-', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
     // Group item indices by parent directory, counting only Audiobook items.
     let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
@@ -2784,21 +2796,23 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
         // Derive the audiobook folder name from the parent directory of the
         // first item, so the plan shows the album folder name rather than the
         // individual track filename as the title.
-        let folder_name = {
+        let (path_segment, display_title) = {
             let src = &items[group_indices[0]].source_path;
-            src.rfind('/')
+            let raw = src
+                .rfind('/')
                 .and_then(|end| {
                     let parent = &src[..end];
-                    parent
-                        .rfind('/')
-                        .map(|start| sanitize_path_segment(&parent[start + 1..]))
+                    parent.rfind('/').map(|start| parent[start + 1..].to_string())
                 })
-                .unwrap_or_else(|| "Unbenannt".to_string())
+                .unwrap_or_else(|| "Unbenannt".to_string());
+            let segment = sanitize_path_segment(&raw);
+            let pretty = prettify_folder_title(&raw);
+            (segment, pretty)
         };
 
         // Update title on representative and set correct target_path for all
         // members so they land in the same folder rather than separate ones.
-        items[group_indices[0]].title = Some(folder_name.clone());
+        items[group_indices[0]].title = Some(display_title);
         for &idx in &group_indices {
             // Clone first so the immutable borrow ends before we mutate target_path.
             let src = items[idx].source_path.clone();
@@ -2806,7 +2820,8 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>) {
                 Some(pos) => src[pos + 1..].to_string(),
                 None => src,
             };
-            items[idx].target_path = Some(format!("Hörbücher/{}/{}", folder_name, file_name));
+            items[idx].target_path =
+                Some(format!("Hörbücher/{}/{}", path_segment, file_name));
         }
 
         let part_paths: Vec<String> = group_indices

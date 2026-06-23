@@ -124,6 +124,7 @@ const anilistDialogResults = document.getElementById("anilist-dialog-results");
 const audibleDialog = document.getElementById("audible-dialog");
 const audibleDialogTitle = document.getElementById("audible-dialog-title");
 const audibleDialogQuery = document.getElementById("audible-dialog-query");
+const audibleDialogAuthor = document.getElementById("audible-dialog-author");
 const audibleDialogSearch = document.getElementById("audible-dialog-search");
 const audibleDialogCancel = document.getElementById("audible-dialog-cancel");
 const audibleDialogFeedback = document.getElementById("audible-dialog-feedback");
@@ -980,6 +981,13 @@ function collectionPathFor(item) {
 
   if (item.media_type === "film") {
     return pathWithoutFilename(renderPathTemplate(pathTemplates.film, item));
+  }
+
+  // Audiobook multi-file items (representative with audiobook_parts, and each part with
+  // is_audiobook_part) must all share the same collection node. target_path is
+  // "Hörbücher/{folder}/{filename}" for all of them — strip the filename to get the node path.
+  if ((item.audiobook_parts || item.is_audiobook_part) && item.target_path) {
+    return pathWithoutFilename(item.target_path);
   }
 
   const folder = item.folder_segment ?? folderSegmentFor(item.media_type);
@@ -3269,6 +3277,9 @@ function openAudibleDialog(selection, feedbackNode = null, targetItems = []) {
   if (audibleDialogQuery) {
     audibleDialogQuery.value = selectionSearchTitle(resolvedSelection);
   }
+  if (audibleDialogAuthor) {
+    audibleDialogAuthor.value = resolvedSelection.item?.author ?? "";
+  }
   if (audibleDialogFeedback) {
     audibleDialogFeedback.textContent = "";
     audibleDialogFeedback.className = "api-feedback";
@@ -3296,13 +3307,19 @@ async function runAudibleDialogSearch() {
     return;
   }
 
+  const author = audibleDialogAuthor?.value.trim() || "";
   if (statusStrip) {
-    statusStrip.textContent = `Audible-Suche läuft für: ${query}`;
+    statusStrip.textContent = `Audible-Suche läuft für: ${query}${author ? ` von ${author}` : ""}`;
   }
-  setApiFeedback(audibleDialogFeedback, `Suche Audible für "${query}"...`, "loading");
+  setApiFeedback(
+    audibleDialogFeedback,
+    `Suche Audible für "${query}"${author ? ` von ${author}` : ""}...`,
+    "loading"
+  );
 
+  const authorParam = author ? `&author=${encodeURIComponent(author)}` : "";
   const response = await fetch(
-    `/api/audible-search?title=${encodeURIComponent(query)}&limit=10`
+    `/api/audible-search?title=${encodeURIComponent(query)}${authorParam}&limit=10`
   );
   if (!response.ok) {
     throw new Error(`HTTP ${response.status}`);
@@ -3607,6 +3624,12 @@ function renderDetail(item) {
   if (detailStatus) detailStatus.value = item.status ?? (needsReviewInUi(item) ? "needs-review" : "inbox");
   if (detailNotes) detailNotes.value = item.notes ?? "";
   if (detailSidecarPreview) detailSidecarPreview.textContent = item.sidecar_preview;
+  if (detailFetchMetadata) {
+    detailFetchMetadata.textContent =
+      canonicalMediaType(mediaSelectionValue(item)) === "audiobook"
+        ? "Audible abrufen"
+        : "AniList abrufen";
+  }
   if (currentActiveTab() !== "collections") {
     renderInspector(item);
   }
@@ -3862,6 +3885,10 @@ function renderInspector(value) {
   }
   if (inspectorFetchMetadata) {
     inspectorFetchMetadata.disabled = !metadataAllowed;
+    inspectorFetchMetadata.textContent =
+      canonicalMediaType(item ? mediaSelectionValue(item) : "") === "audiobook"
+        ? "Audible abrufen"
+        : "AniList abrufen";
   }
   if (inspectorNotDuplicate) {
     const duplicateRelevant = selectionHasDuplicateFlag(selection) || selectionHasDuplicateOverride(selection);
@@ -4810,6 +4837,19 @@ function createPosterCard(value, ordinal = null) {
   return button;
 }
 
+function audiobookItemLabel(item) {
+  if (item.title && !item.is_audiobook_part) {
+    return item.title;
+  }
+  const fname = fileStem(basename(item.source_path));
+  // Extract trailing number: _001, _1, part01, -01, etc.
+  const match = fname.match(/[_\-\s]0*(\d+)\s*$/);
+  if (match) {
+    return `Kapitel ${parseInt(match[1], 10)}`;
+  }
+  return fname;
+}
+
 function createCollectionItemRow(item) {
   const row = document.createElement("button");
   row.type = "button";
@@ -4837,7 +4877,7 @@ function createCollectionItemRow(item) {
   });
 
   [
-    item.title || basename(item.source_path),
+    audiobookItemLabel(item),
     mediaTypeLabel(mediaSelectionValue(item)),
     item.target_path ? basename(item.target_path) : statusLabel(item.status || "inbox"),
   ].forEach((cell) => {
