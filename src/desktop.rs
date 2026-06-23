@@ -2675,7 +2675,7 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
             (None, None) => return std::cmp::Ordering::Equal,
             (None, _) => return std::cmp::Ordering::Less,
             (_, None) => return std::cmp::Ordering::Greater,
-            (ac, bc) => {
+            (Some(ac), Some(bc)) => {
                 if ac.is_ascii_digit() && bc.is_ascii_digit() {
                     let mut an = String::new();
                     while ai.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
@@ -2694,8 +2694,8 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
                 } else {
                     ai.next();
                     bi.next();
-                    let ac_lo: char = ac.to_lowercase().next().unwrap_or(ac);
-                    let bc_lo: char = bc.to_lowercase().next().unwrap_or(bc);
+                    let ac_lo = ac.to_lowercase().next().unwrap_or(ac);
+                    let bc_lo = bc.to_lowercase().next().unwrap_or(bc);
                     match ac_lo.cmp(&bc_lo) {
                         std::cmp::Ordering::Equal => {}
                         other => return other,
@@ -3054,9 +3054,7 @@ fn classify_from_inbox_folder(path: &str) -> Option<FileClassification> {
 /// Image extensions that should never be classified as Audiobook even when
 /// placed inside `Inbox/Hörbücher/`.  These are cover-art files that happen
 /// to live next to the audio tracks.
-const IMAGE_EXTS: &[&str] = &[
-    "jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif",
-];
+const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"];
 
 fn detect_classification(relative_path: &RelativePath) -> Option<FileClassification> {
     let path = relative_path.to_string().to_lowercase();
