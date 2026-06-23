@@ -160,6 +160,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_open_external_response(request.uri().query()),
                 ),
+                "/api/open-vault-root" => json_response(
+                    StatusCode::OK,
+                    &build_open_vault_root_response(request.uri().query()),
+                ),
                 "/api/playlist/list" => json_response(
                     StatusCode::OK,
                     &build_list_playlists_response(request.uri().query()),
@@ -3404,6 +3408,28 @@ fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {
     }
 }
 
+fn build_open_vault_root_response(query: Option<&str>) -> OpenExternalResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return OpenExternalResponse::error("Kein Vault geöffnet."),
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+
+    match std::process::Command::new(program).arg(vault_root.as_path()).spawn() {
+        Ok(_) => OpenExternalResponse::ok(),
+        Err(e) => OpenExternalResponse::error(format!("open failed: {e}")),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard APIs
 // ---------------------------------------------------------------------------
@@ -3441,6 +3467,59 @@ struct InProgressResponse {
 }
 
 const DASHBOARD_LIMIT: usize = 24;
+
+/// Standard filenames to look for when searching for a cover image.
+const COVER_FILENAMES: &[&str] = &[
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "cover.webp",
+    "folder.jpg",
+    "folder.jpeg",
+    "folder.png",
+    "poster.jpg",
+    "poster.jpeg",
+    "poster.png",
+];
+
+/// Searches the media file's directory (and its parent) for a cover image.
+///
+/// Returns a `/api/media-file?path=...&root=...` URL suitable for the frontend
+/// to use directly as an `<img src>`.
+fn find_cover_url(vault: &Vault, relative_path: &str) -> Option<String> {
+    use std::path::Path;
+
+    let file_path = Path::new(relative_path);
+    let dir = file_path.parent()?;
+    let vault_root = vault.root().to_string_lossy();
+    let vault_root_enc = urlencoding::encode(&vault_root);
+
+    let parent_dir = dir.parent();
+    let mut dirs_to_check: Vec<&Path> = vec![dir];
+    if let Some(p) = parent_dir {
+        // Only check parent if it is not the vault root itself (empty string = root)
+        if p != Path::new("") {
+            dirs_to_check.push(p);
+        }
+    }
+
+    for check_dir in dirs_to_check {
+        for name in COVER_FILENAMES {
+            let candidate_rel = check_dir.join(name);
+            let candidate_abs = vault.root().join(&candidate_rel);
+            if candidate_abs.exists() {
+                let rel_str = candidate_rel.to_string_lossy().replace('\\', "/");
+                return Some(format!(
+                    "/api/media-file?path={}&root={}",
+                    urlencoding::encode(&rel_str),
+                    vault_root_enc,
+                ));
+            }
+        }
+    }
+
+    None
+}
 
 fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
     let root_override = query.and_then(|q| extract_query_value(q, "root"));
@@ -3523,12 +3602,13 @@ fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
                 .as_ref()
                 .and_then(|m| m.year)
                 .or_else(|| file.sidecar.as_ref().and_then(|s| s.year));
+            let cover_url = find_cover_url(&vault, &file.incoming.source_path.to_string());
             DashboardItem {
                 vault_path: file.incoming.source_path.to_string(),
                 title,
                 media_type,
                 year,
-                cover_url: None,
+                cover_url,
                 progress_fraction: None,
                 position_seconds: None,
                 modified_at: mtime,
@@ -3600,12 +3680,13 @@ fn build_in_progress_response(query: Option<&str>) -> InProgressResponse {
                 _ => None,
             };
             let modified_at = record.last_accessed;
+            let cover_url = find_cover_url(&vault, &record.vault_path);
             DashboardItem {
                 vault_path: record.vault_path.clone(),
                 title,
                 media_type: "unknown".to_string(),
                 year: None,
-                cover_url: None,
+                cover_url,
                 progress_fraction: record.fraction(),
                 position_seconds,
                 modified_at,

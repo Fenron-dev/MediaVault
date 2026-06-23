@@ -83,6 +83,7 @@
           <div class="toolbar">
             <button class="action-button primary" id="run-demo">Vault scannen</button>
             <button class="action-button primary subtle" id="apply-import">Import anwenden</button>
+            <button class="action-button" id="open-vault-folder">Im Finder öffnen</button>
             <button class="action-button" data-tab="settings">Konfiguration</button>
           </div>
         </header>
@@ -619,6 +620,19 @@
         </div>
         <div class="api-feedback" id="anilist-dialog-feedback"></div>
         <div class="anilist-results" id="anilist-dialog-results"></div>
+      </section>
+
+      <section class="panel modal-card" id="playlist-create-dialog" hidden>
+        <p class="panel-label">Neue Playlist</p>
+        <h3>Playlist erstellen</h3>
+        <label class="field">
+          <span>Name</span>
+          <input id="playlist-create-name" type="text" placeholder="z.B. Meine Lieblingsfilme" />
+        </label>
+        <div class="toolbar">
+          <button class="action-button primary" id="playlist-create-confirm">Erstellen</button>
+          <button class="action-button" id="playlist-create-cancel">Abbrechen</button>
+        </div>
       </section>
 
       <section class="panel modal-card image-modal" id="image-dialog" hidden>

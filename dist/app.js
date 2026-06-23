@@ -9,6 +9,7 @@ const title = document.getElementById("view-title");
 const statusStrip = document.getElementById("status-strip");
 const demoButton = document.getElementById("run-demo");
 const applyImportButton = document.getElementById("apply-import");
+const openVaultFolderButton = document.getElementById("open-vault-folder");
 const inboxRows = document.getElementById("inbox-rows");
 const reviewRows = document.getElementById("review-rows");
 const metricInbox = document.getElementById("metric-inbox");
@@ -147,6 +148,10 @@ const playlistPlayAll = document.getElementById("playlist-play-all");
 const playlistDelete = document.getElementById("playlist-delete");
 const playlistItemsRows = document.getElementById("playlist-items-rows");
 const playlistItemsHint = document.getElementById("playlist-items-hint");
+const playlistCreateDialog = document.getElementById("playlist-create-dialog");
+const playlistCreateName = document.getElementById("playlist-create-name");
+const playlistCreateConfirm = document.getElementById("playlist-create-confirm");
+const playlistCreateCancel = document.getElementById("playlist-create-cancel");
 
 // Player
 const playerDialog = document.getElementById("player-dialog");
@@ -614,6 +619,7 @@ function isLocalImageItem(item) {
 
 function coverUrlFor(item) {
   return (
+    item?.cover_url ||
     item?.cover_image_extra_large ||
     item?.cover_image_large ||
     item?.cover_image_medium ||
@@ -1908,8 +1914,7 @@ async function loadDashboard() {
       if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
       data.items.forEach((item) => {
         const card = createDashboardCard(item, (it) => {
-          const planItem = currentPlan?.items.find((p) => p.source_path === it.vault_path);
-          if (planItem) openPlayer(planItem);
+          openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
         });
         dashboardResumeCards?.appendChild(card);
       });
@@ -1930,17 +1935,9 @@ async function loadDashboard() {
       if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
       data.items.forEach((item) => {
         const card = createDashboardCard(item, (it) => {
-          const planItem = currentPlan?.items.find((p) => p.source_path === it.vault_path);
-          if (planItem) {
-            const ext = playerFileExt(it.vault_path);
-            if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
-              openPlayer(planItem);
-            } else {
-              selectedItemKey = it.vault_path;
-              setActiveTab("inbox");
-              renderPlan(currentPlan);
-              renderDetail(planItem);
-            }
+          const ext = playerFileExt(it.vault_path);
+          if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
+            openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
           }
         });
         dashboardRecentCards?.appendChild(card);
@@ -2506,9 +2503,7 @@ function renderPlaylistDetail(pl) {
     playBtn.title = "Abspielen";
     playBtn.textContent = "▶";
     playBtn.addEventListener("click", () => {
-      if (!currentPlan) return;
-      const item = currentPlan.items.find((it) => it.source_path === vaultPath);
-      if (item) openPlayer(item);
+      openPlayer({ source_path: vaultPath, target_path: vaultPath });
     });
 
     row.append(nameSpan, typeSpan, playBtn);
@@ -2516,9 +2511,7 @@ function renderPlaylistDetail(pl) {
   }
 }
 
-async function createNewPlaylist() {
-  const name = prompt("Name der neuen Playlist:");
-  if (!name?.trim()) return;
+async function saveNewPlaylist(name) {
   const root = getVaultRoot();
   if (!root) return;
   const id = `pl_${Date.now()}`;
@@ -2540,6 +2533,14 @@ async function createNewPlaylist() {
     selectPlaylist(id);
   } catch (e) {
     if (statusStrip) statusStrip.textContent = `Fehler beim Erstellen: ${e.message}`;
+  }
+}
+
+function createNewPlaylist() {
+  if (playlistCreateDialog) {
+    if (playlistCreateName) playlistCreateName.value = "";
+    showModalCard(playlistCreateDialog);
+    setTimeout(() => playlistCreateName?.focus(), 50);
   }
 }
 
@@ -2571,9 +2572,36 @@ function initPlaylists() {
   if (playlistPlayAll) {
     playlistPlayAll.addEventListener("click", () => {
       const pl = activePlaylists.find((p) => p.id === activePlaylistId);
-      if (!pl || !pl.items?.length || !currentPlan) return;
-      const first = currentPlan.items.find((it) => it.source_path === pl.items[0]);
-      if (first) openPlayer(first);
+      if (!pl || !pl.items?.length) return;
+      openPlayer({ source_path: pl.items[0], target_path: pl.items[0] });
+    });
+  }
+
+  if (playlistCreateConfirm) {
+    playlistCreateConfirm.addEventListener("click", async () => {
+      const name = playlistCreateName?.value.trim();
+      if (!name) return;
+      hideModalCards();
+      await saveNewPlaylist(name);
+    });
+  }
+
+  if (playlistCreateCancel) {
+    playlistCreateCancel.addEventListener("click", () => {
+      hideModalCards();
+    });
+  }
+
+  if (playlistCreateName) {
+    playlistCreateName.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        const name = playlistCreateName.value.trim();
+        if (!name) return;
+        hideModalCards();
+        await saveNewPlaylist(name);
+      } else if (e.key === "Escape") {
+        hideModalCards();
+      }
     });
   }
 }
@@ -4300,6 +4328,16 @@ function createPosterCard(value, ordinal = null) {
       selectedCollectionItemKey = item.source_path;
       renderInspector(item);
       renderCollectionRows(findCollectionNode(buildCollectionTree(currentPlan?.items ?? []), selectedCollectionKey));
+      const srcPath = item.source_path || item.target_path || "";
+      const cardExt = playerFileExt(srcPath);
+      const cardPlayable =
+        isVideoFile(srcPath) ||
+        isAudioFile(srcPath) ||
+        PLAYER_UNSUPPORTED_EXTS.has(cardExt) ||
+        PLAYER_PDF_EXTS.has(cardExt) ||
+        PLAYER_IMAGE_EXTS.has(cardExt) ||
+        PLAYER_EPUB_EXTS.has(cardExt);
+      if (cardPlayable) openPlayer(item);
     }
   });
 
@@ -4375,6 +4413,28 @@ function createCollectionItemRow(item) {
     span.textContent = cell;
     row.appendChild(span);
   });
+
+  const rowSrcPath = item.source_path || item.target_path || "";
+  const rowExt = playerFileExt(rowSrcPath);
+  const rowPlayable =
+    isVideoFile(rowSrcPath) ||
+    isAudioFile(rowSrcPath) ||
+    PLAYER_UNSUPPORTED_EXTS.has(rowExt) ||
+    PLAYER_PDF_EXTS.has(rowExt) ||
+    PLAYER_IMAGE_EXTS.has(rowExt) ||
+    PLAYER_EPUB_EXTS.has(rowExt);
+  if (rowPlayable) {
+    const playCell = document.createElement("button");
+    playCell.type = "button";
+    playCell.className = "action-button compact icon-button";
+    playCell.textContent = "▶";
+    playCell.title = "Abspielen";
+    playCell.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openPlayer(item);
+    });
+    row.appendChild(playCell);
+  }
 
   return row;
 }
@@ -4961,6 +5021,18 @@ if (applyImportButton) {
       if (statusStrip) {
         statusStrip.textContent = `Import konnte nicht angewendet werden: ${error.message}`;
       }
+    }
+  });
+}
+
+if (openVaultFolderButton) {
+  openVaultFolderButton.addEventListener("click", async () => {
+    const root = getVaultRoot();
+    if (!root) return;
+    try {
+      await fetch(`mediavault://localhost/api/open-vault-root?root=${encodeURIComponent(root)}`);
+    } catch {
+      // fire-and-forget
     }
   });
 }
