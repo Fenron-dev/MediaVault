@@ -7,6 +7,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
+use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
@@ -109,6 +110,10 @@ pub(crate) fn run() -> Result<()> {
                 "/api/anilist-search" => json_response(
                     StatusCode::OK,
                     &build_anilist_search_response(request.uri().query()),
+                ),
+                "/api/audible-search" => json_response(
+                    StatusCode::OK,
+                    &build_audible_search_response(request.uri().query()),
                 ),
                 "/api/select-folder" => {
                     json_response(StatusCode::OK, &build_select_folder_response())
@@ -275,6 +280,33 @@ fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
             "Kein Vault gefunden, daher Demo-Daten angezeigt.".to_string(),
         )),
         Err(error) => build_error_plan(format!("Vault-Erkennung fehlgeschlagen: {error}"), None),
+    }
+}
+
+fn build_audible_search_response(query: Option<&str>) -> AudibleSearchResponse {
+    let Some(query) = query else {
+        return AudibleSearchResponse::error("missing query".to_string());
+    };
+    let Some(title) = extract_query_value(query, "title") else {
+        return AudibleSearchResponse::error("missing title".to_string());
+    };
+
+    let limit = extract_query_value(query, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8);
+
+    let client = match AudibleClient::new() {
+        Ok(c) => c,
+        Err(e) => return AudibleSearchResponse::error(e.to_string()),
+    };
+
+    match client.search(&title, limit) {
+        Ok(results) => AudibleSearchResponse {
+            metadata: results.first().cloned(),
+            results,
+            error: None,
+        },
+        Err(error) => AudibleSearchResponse::error(error.to_string()),
     }
 }
 

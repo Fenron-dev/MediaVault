@@ -121,6 +121,13 @@ const anilistDialogSearch = document.getElementById("anilist-dialog-search");
 const anilistDialogCancel = document.getElementById("anilist-dialog-cancel");
 const anilistDialogFeedback = document.getElementById("anilist-dialog-feedback");
 const anilistDialogResults = document.getElementById("anilist-dialog-results");
+const audibleDialog = document.getElementById("audible-dialog");
+const audibleDialogTitle = document.getElementById("audible-dialog-title");
+const audibleDialogQuery = document.getElementById("audible-dialog-query");
+const audibleDialogSearch = document.getElementById("audible-dialog-search");
+const audibleDialogCancel = document.getElementById("audible-dialog-cancel");
+const audibleDialogFeedback = document.getElementById("audible-dialog-feedback");
+const audibleDialogResults = document.getElementById("audible-dialog-results");
 const imageDialog = document.getElementById("image-dialog");
 const imageDialogTitle = document.getElementById("image-dialog-title");
 const imageDialogPreview = document.getElementById("image-dialog-preview");
@@ -260,6 +267,9 @@ let pendingTrashSelection = null;
 let pendingAniListSelection = null;
 let pendingAniListTargets = [];
 let pendingAniListFeedback = null;
+let pendingAudibleSelection = null;
+let pendingAudibleTargets = [];
+let pendingAudibleFeedback = null;
 
 function setActiveTab(tab, options = {}) {
   document.body.classList.remove("inspector-editing", "property-add-open");
@@ -1830,6 +1840,9 @@ function closeActionModal() {
   pendingAniListSelection = null;
   pendingAniListTargets = [];
   pendingAniListFeedback = null;
+  pendingAudibleSelection = null;
+  pendingAudibleTargets = [];
+  pendingAudibleFeedback = null;
 
   hideModalCards();
   if (appModal) {
@@ -1839,7 +1852,7 @@ function closeActionModal() {
 }
 
 function hideModalCards() {
-  [trashDialog, anilistDialog, imageDialog].forEach((dialog) => {
+  [trashDialog, anilistDialog, audibleDialog, imageDialog].forEach((dialog) => {
     if (dialog) {
       dialog.hidden = true;
     }
@@ -3083,6 +3096,305 @@ function applyAniListResult(metadata) {
   closeActionModal();
 }
 
+// ─── Audible dialog ────────────────────────────────────────────────────────
+
+function audibleDisplayTitle(result) {
+  return result.title || "Unbekannter Titel";
+}
+
+function audibleSummary(meta) {
+  const parts = [meta.title];
+  if (meta.author) {
+    parts.push(`von ${meta.author}`);
+  }
+  if (meta.year) {
+    parts.push(String(meta.year));
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
+function normalizeAudibleMetadata(result) {
+  const authors = Array.isArray(result.authors) ? result.authors.map((a) => a.name).filter(Boolean) : [];
+  const narrators = Array.isArray(result.narrators)
+    ? result.narrators.map((n) => n.name).filter(Boolean)
+    : [];
+  const series = Array.isArray(result.series) ? result.series[0] : null;
+  const year = result.release_date ? parseInt(result.release_date.slice(0, 4), 10) : null;
+
+  const coverImages = result.product_images ?? {};
+  const coverUrl = coverImages["1024"] || coverImages["500"] || null;
+
+  const genres = [];
+  if (Array.isArray(result.category_ladders) && result.category_ladders.length) {
+    const ladder = result.category_ladders[0].ladder ?? [];
+    ladder.forEach((rung) => {
+      if (rung.name && !genres.includes(rung.name)) {
+        genres.push(rung.name);
+      }
+    });
+  }
+
+  const description = result.publisher_summary
+    ? result.publisher_summary.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+    : null;
+
+  const normalized = {
+    title: result.title || null,
+    media_type: "audiobook",
+    author: authors[0] || null,
+    authors: authors.length > 1 ? authors : undefined,
+    narrator: narrators[0] || null,
+    narrators: narrators.length > 1 ? narrators : undefined,
+    publisher: result.publisher_name || null,
+    description: description || null,
+    year: year || null,
+    runtime_minutes: result.runtime_length_min || null,
+    series_title: series?.title || null,
+    series_sequence: series?.sequence || null,
+    audible_asin: result.asin || null,
+    genres: genres.length ? genres : undefined,
+    cover_image_extra_large: coverUrl,
+  };
+
+  Object.keys(normalized).forEach((key) => {
+    if (
+      normalized[key] === null ||
+      normalized[key] === "" ||
+      normalized[key] === undefined ||
+      (Array.isArray(normalized[key]) && !normalized[key].length)
+    ) {
+      delete normalized[key];
+    }
+  });
+
+  return normalized;
+}
+
+function showAudibleResults(results, query) {
+  if (!audibleDialogResults) {
+    return;
+  }
+
+  clearNode(audibleDialogResults);
+  const list = Array.isArray(results) ? results : [];
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "anilist-empty";
+    empty.textContent = `Keine Treffer für "${query}". Titel anpassen und erneut suchen.`;
+    audibleDialogResults.appendChild(empty);
+    return;
+  }
+
+  list.forEach((result) => {
+    const card = document.createElement("article");
+    card.className = "anilist-result";
+
+    const cover = document.createElement("div");
+    cover.className = "anilist-result-cover";
+    const coverImages = result.product_images ?? {};
+    const coverUrl = coverImages["500"] || coverImages["1024"] || null;
+    if (coverUrl) {
+      const image = document.createElement("img");
+      image.src = coverUrl;
+      image.alt = audibleDisplayTitle(result);
+      cover.appendChild(image);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "anilist-result-meta";
+    const title = document.createElement("strong");
+    title.textContent = audibleDisplayTitle(result);
+
+    const authors = Array.isArray(result.authors) ? result.authors.map((a) => a.name).join(", ") : "";
+    const narrators = Array.isArray(result.narrators)
+      ? result.narrators.map((n) => n.name).join(", ")
+      : "";
+    const subtitle = document.createElement("span");
+    subtitle.textContent = [
+      authors ? `von ${authors}` : "",
+      narrators ? `Sprecher: ${narrators}` : "",
+      result.runtime_length_min ? `${result.runtime_length_min} min` : "",
+      result.release_date ? result.release_date.slice(0, 4) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    const description = document.createElement("p");
+    description.textContent = String(result.publisher_summary || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+
+    meta.appendChild(title);
+    meta.appendChild(subtitle);
+    if (description.textContent) {
+      meta.appendChild(description);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "anilist-result-actions";
+    const applyButton = document.createElement("button");
+    applyButton.type = "button";
+    applyButton.className = "action-button primary";
+    applyButton.textContent = "Übernehmen";
+    applyButton.addEventListener("click", () => {
+      applyAudibleResult(result);
+    });
+    actions.appendChild(applyButton);
+
+    card.appendChild(cover);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    audibleDialogResults.appendChild(card);
+  });
+}
+
+function openAudibleDialog(selection, feedbackNode = null, targetItems = []) {
+  const resolvedSelection =
+    selection && Array.isArray(selection.items) && typeof selection.key === "string"
+      ? selection
+      : normalizeSelection(selection);
+  if (!resolvedSelection || !resolvedSelection.item) {
+    return;
+  }
+
+  pendingAudibleSelection = resolvedSelection;
+  pendingAudibleTargets = targetItems.length ? targetItems : resolvedSelection.items;
+  pendingAudibleFeedback = feedbackNode;
+
+  if (audibleDialogTitle) {
+    audibleDialogTitle.textContent = `Audible-Treffer für ${selectionTitle(resolvedSelection)}`;
+  }
+  if (audibleDialogQuery) {
+    audibleDialogQuery.value = selectionSearchTitle(resolvedSelection);
+  }
+  if (audibleDialogFeedback) {
+    audibleDialogFeedback.textContent = "";
+    audibleDialogFeedback.className = "api-feedback";
+  }
+  if (audibleDialogResults) {
+    clearNode(audibleDialogResults);
+  }
+  if (trashDialog) {
+    trashDialog.hidden = true;
+  }
+  showModalCard(audibleDialog);
+  if (statusStrip) {
+    statusStrip.textContent = `Audible-Treffer für ${selectionTitle(resolvedSelection)} werden geladen.`;
+  }
+}
+
+async function runAudibleDialogSearch() {
+  if (!pendingAudibleSelection) {
+    return;
+  }
+
+  const query = audibleDialogQuery?.value.trim() || "";
+  if (!query) {
+    setApiFeedback(audibleDialogFeedback, "Bitte zuerst einen Suchbegriff eintragen.", "error");
+    return;
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `Audible-Suche läuft für: ${query}`;
+  }
+  setApiFeedback(audibleDialogFeedback, `Suche Audible für "${query}"...`, "loading");
+
+  const response = await fetch(
+    `/api/audible-search?title=${encodeURIComponent(query)}&limit=10`
+  );
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  showAudibleResults(results, query);
+
+  if (!results.length) {
+    setApiFeedback(
+      audibleDialogFeedback,
+      `Keine Treffer für "${query}". Titel korrigieren und erneut suchen.`,
+      "error"
+    );
+    return;
+  }
+
+  setApiFeedback(audibleDialogFeedback, `${results.length} Treffer gefunden`, "success");
+}
+
+function applyAudibleResult(result) {
+  if (!pendingAudibleSelection) {
+    return;
+  }
+
+  const normalized = normalizeAudibleMetadata(result);
+  pendingAudibleTargets.forEach((target) => {
+    apiMetadata[target.source_path] = normalized;
+  });
+  saveStoredJson(metadataKey, apiMetadata);
+  currentPlan = projectPlan(sourcePlan);
+
+  const firstTarget = pendingAudibleTargets[0];
+  if (pendingAudibleSelection.type === "node") {
+    selectedCollectionKey = pendingAudibleSelection.node?.path || selectedCollectionKey;
+    selectedItemKey = "";
+    selectedCollectionItemKey = "";
+  } else if (firstTarget?.source_path) {
+    selectedItemKey = firstTarget.source_path;
+    selectedCollectionItemKey = firstTarget.source_path;
+  }
+  renderPlan(currentPlan);
+  setApiFeedback(
+    pendingAudibleFeedback,
+    `Audible übernommen: ${audibleSummary(normalized)}`,
+    "success"
+  );
+  updateAuditTrail(
+    `Audible-Metadaten übernommen für ${selectionTitle(pendingAudibleSelection)}.`
+  );
+  void persistSidecarsForItems(
+    pendingAudibleTargets
+      .map((target) => currentPlan.items.find((item) => item.source_path === target.source_path))
+      .filter(Boolean)
+  ).catch((error) => {
+    if (statusStrip) {
+      statusStrip.textContent = `Audible übernommen, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+    }
+  });
+  closeActionModal();
+}
+
+async function fetchAudibleForItem(item, feedbackNode = null, targetItems = [item], selection = null) {
+  const resolvedSelection =
+    selection && Array.isArray(selection.items) && typeof selection.key === "string"
+      ? selection
+      : selection
+        ? normalizeSelection(selection)
+        : normalizeSelection(item);
+  if (!resolvedSelection) {
+    throw new Error("Kein gültiger Eintrag für Audible vorhanden");
+  }
+
+  openAudibleDialog(resolvedSelection, feedbackNode, targetItems);
+  try {
+    await runAudibleDialogSearch();
+  } catch (error) {
+    setApiFeedback(
+      audibleDialogFeedback,
+      `Audible konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut suchen.`,
+      "error"
+    );
+    if (statusStrip) {
+      statusStrip.textContent = `Audible konnte keine Daten liefern: ${error.message}`;
+    }
+    throw error;
+  }
+}
+
+// ─── End Audible dialog ─────────────────────────────────────────────────────
+
 function updateAuditTrail(message) {
   const entry = {
     at: new Date().toISOString(),
@@ -3442,6 +3754,13 @@ function propertyEntriesFor(value) {
     ["reviews", item.reviews],
     ["cover_image_extra_large", item.cover_image_extra_large],
     ["banner_image", item.banner_image],
+    ["audible_asin", item.audible_asin],
+    ["author", item.author],
+    ["narrator", item.narrator],
+    ["publisher", item.publisher],
+    ["runtime_minutes", item.runtime_minutes],
+    ["series_title", item.series_title],
+    ["series_sequence", item.series_sequence],
   ].filter(([, entryValue]) => {
     if (Array.isArray(entryValue)) {
       return entryValue.length;
@@ -3673,6 +3992,12 @@ function collectionNodeKind(node) {
   if (node.path.endsWith("/Serien") || node.path.endsWith("/Filme")) {
     return "group";
   }
+  if (node.path.endsWith("/Hörbücher")) {
+    return "group";
+  }
+  if (/^Hörbücher\/[^/]+$/.test(node.path)) {
+    return "audiobook";
+  }
   if (sortedChildren(node).some((child) => child.label.startsWith("Staffel "))) {
     return "series";
   }
@@ -3690,6 +4015,8 @@ function nodeTypeLabel(node) {
       return "Staffel";
     case "movie":
       return "Film";
+    case "audiobook":
+      return "Hörbuch";
     case "group":
       return "Ordner";
     default:
@@ -3709,7 +4036,11 @@ function nodeDisplayTitle(node, item = null) {
 }
 
 function representativeItem(node) {
-  return node.items.find((item) => item.anilist_id || item.series_title) ?? node.items[0] ?? null;
+  return (
+    node.items.find((item) => item.anilist_id || item.audible_asin || item.series_title) ??
+    node.items[0] ??
+    null
+  );
 }
 
 function normalizeSelection(value) {
@@ -3755,7 +4086,7 @@ function selectionEditable(selection) {
     return true;
   }
   const kind = collectionNodeKind(selection.node);
-  return ["series", "season", "movie"].includes(kind);
+  return ["series", "season", "movie", "audiobook"].includes(kind);
 }
 
 function selectionSupportsMetadata(selection) {
@@ -3860,6 +4191,13 @@ function selectionYamlPreview(selection) {
   appendYamlValue(lines, "year", primary.year);
   appendYamlValue(lines, "anilist_id", primary.anilist_id);
   appendYamlValue(lines, "anilist_url", primary.anilist_url);
+  appendYamlValue(lines, "audible_asin", primary.audible_asin);
+  appendYamlValue(lines, "author", primary.author);
+  appendYamlValue(lines, "narrator", primary.narrator);
+  appendYamlValue(lines, "publisher", primary.publisher);
+  appendYamlValue(lines, "runtime_minutes", primary.runtime_minutes);
+  appendYamlValue(lines, "series_title", primary.series_title);
+  appendYamlValue(lines, "series_sequence", primary.series_sequence);
   appendYamlValue(lines, "genres", primary.genres);
   appendYamlValue(lines, "tags", primary.tags);
   appendYamlValue(lines, "cover_image_extra_large", primary.cover_image_extra_large);
@@ -3881,6 +4219,9 @@ function collectionDescriptionFor(node) {
   }
   if (kind === "movie") {
     return "Filmübersicht. Die zugehörige Datei kann unten ausgewählt und korrigiert werden.";
+  }
+  if (kind === "audiobook") {
+    return "Hörbuch mit mehreren Teilen. Metadaten über den Audible-Button abrufen.";
   }
   return "Ordneransicht innerhalb der geplanten Vault-Struktur.";
 }
@@ -5299,6 +5640,9 @@ if (detailFetchMetadata) {
       return;
     }
 
+    const mediaType = canonicalMediaType(detailMediaTypeInput?.value || item.media_type);
+    const isAudiobook = mediaType === "audiobook";
+
     try {
       upsertCorrection(item);
       const draft = {
@@ -5307,15 +5651,20 @@ if (detailFetchMetadata) {
         series_title: detailTitle?.value.trim() || item.series_title,
         media_type: detailMediaTypeInput?.value || item.media_type,
       };
-      await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
+      if (isAudiobook) {
+        await fetchAudibleForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
+      } else {
+        await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
+      }
     } catch (error) {
+      const provider = isAudiobook ? "Audible" : "AniList";
       setApiFeedback(
         detailApiFeedback,
-        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        `${provider} konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
         "error"
       );
       if (statusStrip) {
-        statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
+        statusStrip.textContent = `${provider} konnte keine Daten liefern: ${error.message}`;
       }
     }
   });
@@ -5486,6 +5835,11 @@ if (inspectorFetchMetadata) {
       return;
     }
 
+    const mediaType = canonicalMediaType(
+      inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item)
+    );
+    const isAudiobook = mediaType === "audiobook";
+
     try {
       upsertSelectionCorrection(inspectorSelection);
       const inspectorDraft = {
@@ -5496,21 +5850,29 @@ if (inspectorFetchMetadata) {
       };
       const selectionForSearch =
         inspectorSelection.type === "node"
-          ? {
-              ...inspectorSelection,
-              item: inspectorDraft,
-            }
+          ? { ...inspectorSelection, item: inspectorDraft }
           : normalizeSelection(inspectorDraft);
-      await fetchAniListForItem(
-        inspectorDraft,
-        inspectorApiFeedback,
-        inspectorSelection.items,
-        selectionForSearch
-      );
+
+      if (isAudiobook) {
+        await fetchAudibleForItem(
+          inspectorDraft,
+          inspectorApiFeedback,
+          inspectorSelection.items,
+          selectionForSearch
+        );
+      } else {
+        await fetchAniListForItem(
+          inspectorDraft,
+          inspectorApiFeedback,
+          inspectorSelection.items,
+          selectionForSearch
+        );
+      }
     } catch (error) {
+      const provider = isAudiobook ? "Audible" : "AniList";
       setApiFeedback(
         inspectorApiFeedback,
-        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        `${provider} konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
         "error"
       );
     }
@@ -5587,6 +5949,41 @@ if (anilistDialogSearch) {
 if (anilistDialogCancel) {
   anilistDialogCancel.addEventListener("click", () => {
     closeActionModal();
+  });
+}
+
+if (audibleDialogSearch) {
+  audibleDialogSearch.addEventListener("click", async () => {
+    try {
+      await runAudibleDialogSearch();
+    } catch (error) {
+      setApiFeedback(
+        audibleDialogFeedback,
+        `Audible konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut suchen.`,
+        "error"
+      );
+      if (statusStrip) {
+        statusStrip.textContent = `Audible konnte keine Daten liefern: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (audibleDialogCancel) {
+  audibleDialogCancel.addEventListener("click", () => {
+    closeActionModal();
+  });
+}
+
+if (audibleDialogQuery) {
+  audibleDialogQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      audibleDialogSearch?.click();
+    }
+    if (event.key === "Escape") {
+      closeActionModal();
+    }
   });
 }
 
