@@ -11,6 +11,8 @@ const demoButton = document.getElementById("run-demo");
 const applyImportButton = document.getElementById("apply-import");
 const openVaultFolderButton = document.getElementById("open-vault-folder");
 const inboxRows = document.getElementById("inbox-rows");
+const inboxMultiToggle = document.getElementById("inbox-multi-toggle");
+const inboxDeleteSelected = document.getElementById("inbox-delete-selected");
 const reviewRows = document.getElementById("review-rows");
 const metricInbox = document.getElementById("metric-inbox");
 const metricReview = document.getElementById("metric-review");
@@ -109,6 +111,12 @@ const inspectorYamlHint = document.getElementById("inspector-yaml-hint");
 const inspectorYamlPanel = document.getElementById("inspector-yaml-panel");
 const auditTrailNode = document.getElementById("audit-trail");
 const appModal = document.getElementById("app-modal");
+const conflictDialog = document.getElementById("conflict-dialog");
+const conflictDialogBody = document.getElementById("conflict-dialog-body");
+const conflictDialogList = document.getElementById("conflict-dialog-list");
+const conflictDialogOverwrite = document.getElementById("conflict-dialog-overwrite");
+const conflictDialogSkip = document.getElementById("conflict-dialog-skip");
+const conflictDialogCancel = document.getElementById("conflict-dialog-cancel");
 const trashDialog = document.getElementById("trash-dialog");
 const trashDialogTitle = document.getElementById("trash-dialog-title");
 const trashDialogBody = document.getElementById("trash-dialog-body");
@@ -264,6 +272,9 @@ let recentCollections = loadStoredJson(recentCollectionsKey, []);
 let trashedEntries = loadStoredJson(trashKey, {});
 let isMultiEdit = false;
 let multiSelectedKeys = new Set();
+let isInboxMultiEdit = false;
+let inboxSelectedKeys = new Set();
+let pendingConflictResolve = null;
 let pendingTrashSelection = null;
 let pendingAniListSelection = null;
 let pendingAniListTargets = [];
@@ -1183,7 +1194,7 @@ function isReadyForImport(item) {
   return !String(item.target_path).startsWith("Inbox/");
 }
 
-function buildApplyImportItem(item) {
+function buildApplyImportItem(item, overwrite = false) {
   const prepared = {
     ...item,
     status: effectiveAppliedStatus(item),
@@ -1195,6 +1206,7 @@ function buildApplyImportItem(item) {
     source_path: item.source_path,
     target_path: prepared.target_path,
     sidecar_preview: prepared.sidecar_preview,
+    overwrite,
   };
 }
 
@@ -1253,6 +1265,30 @@ function clearAppliedLocalState(sourcePaths) {
   saveStoredJson(trashKey, trashedEntries);
 }
 
+async function postApplyImport(items, dryRun) {
+  const response = await fetch("/api/apply-import", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      vault_root: getVaultRoot(),
+      items,
+      dry_run: dryRun,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+  return result;
+}
+
 async function applyReadyImports() {
   const readyItems = (currentPlan?.items ?? []).filter((item) => isReadyForImport(item));
   if (!readyItems.length) {
@@ -1271,28 +1307,44 @@ async function applyReadyImports() {
   }
 
   if (statusStrip) {
+    statusStrip.textContent = `Prüfe ${readyItems.length} Eintrag(e) auf Konflikte...`;
+  }
+
+  // Step 1 — dry-run preflight: detect targets that already exist on disk.
+  const preflight = await postApplyImport(
+    readyItems.map((item) => buildApplyImportItem(item)),
+    true
+  );
+  const conflicts = Array.isArray(preflight.conflicts) ? preflight.conflicts : [];
+
+  // Step 2 — if conflicts exist, ask the user how to proceed.
+  let overwritePaths = new Set();
+  if (conflicts.length) {
+    const decision = await showImportConflictDialog(conflicts);
+    if (decision === "cancel") {
+      if (statusStrip) {
+        statusStrip.textContent = "Import abgebrochen.";
+      }
+      return;
+    }
+    if (decision === "overwrite") {
+      overwritePaths = new Set(conflicts.map((c) => c.source_path));
+    }
+    // decision === "skip": leave overwritePaths empty → conflicting files are
+    // skipped by the backend (target exists, overwrite=false).
+  }
+
+  if (statusStrip) {
     statusStrip.textContent = `${readyItems.length} Eintrag(e) werden verschoben...`;
   }
 
-  const response = await fetch("/api/apply-import", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      vault_root: getVaultRoot(),
-      items: readyItems.map((item) => buildApplyImportItem(item)),
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`);
-  }
-
-  const result = await response.json();
-  if (result.error) {
-    throw new Error(result.error);
-  }
+  // Step 3 — real apply with per-item overwrite flags.
+  const result = await postApplyImport(
+    readyItems.map((item) =>
+      buildApplyImportItem(item, overwritePaths.has(item.source_path))
+    ),
+    false
+  );
 
   const applied = Array.isArray(result.applied) ? result.applied : [];
   const skipped = Array.isArray(result.skipped) ? result.skipped : [];
@@ -1309,6 +1361,78 @@ async function applyReadyImports() {
   }
 
   await loadPlan();
+}
+
+// Shows the import conflict dialog and resolves with the user's choice:
+// "overwrite" | "skip" | "cancel".
+function showImportConflictDialog(conflicts) {
+  return new Promise((resolve) => {
+    if (!conflictDialog || !conflictDialogList) {
+      resolve("cancel");
+      return;
+    }
+
+    if (conflictDialogBody) {
+      conflictDialogBody.textContent =
+        `${conflicts.length} Datei(en) existieren bereits am Zielort. ` +
+        `Überschreiben löscht die vorhandene Datei und ersetzt sie durch die Inbox-Datei. ` +
+        `Überspringen lässt diese Dateien in der Inbox liegen, damit du sie manuell prüfen kannst.`;
+    }
+
+    clearNode(conflictDialogList);
+    conflicts.forEach((conflict) => {
+      const row = document.createElement("div");
+      row.className = "conflict-row";
+
+      const name = document.createElement("strong");
+      name.textContent = basename(conflict.target_path);
+
+      const target = document.createElement("span");
+      target.className = "conflict-path";
+      target.textContent = `Ziel: ${conflict.target_path}`;
+
+      const sizes = document.createElement("span");
+      sizes.className = "conflict-sizes";
+      const same = Number(conflict.source_size) === Number(conflict.target_size);
+      sizes.textContent =
+        `Inbox: ${formatBytes(conflict.source_size)} · Vorhanden: ${formatBytes(conflict.target_size)}` +
+        (same ? " · vermutlich identisch" : " · unterschiedlich groß!");
+      if (!same) {
+        sizes.classList.add("is-warning");
+      }
+
+      row.appendChild(name);
+      row.appendChild(target);
+      row.appendChild(sizes);
+      conflictDialogList.appendChild(row);
+    });
+
+    const cleanup = () => {
+      conflictDialogOverwrite?.removeEventListener("click", onOverwrite);
+      conflictDialogSkip?.removeEventListener("click", onSkip);
+      conflictDialogCancel?.removeEventListener("click", onCancel);
+    };
+    // Resolver wrapper so closeActionModal (backdrop/Escape) can cancel us too.
+    pendingConflictResolve = (choice) => {
+      cleanup();
+      resolve(choice);
+    };
+    const finish = (choice) => {
+      const settle = pendingConflictResolve;
+      pendingConflictResolve = null;
+      closeActionModal();
+      settle?.(choice);
+    };
+    const onOverwrite = () => finish("overwrite");
+    const onSkip = () => finish("skip");
+    const onCancel = () => finish("cancel");
+
+    conflictDialogOverwrite?.addEventListener("click", onOverwrite);
+    conflictDialogSkip?.addEventListener("click", onSkip);
+    conflictDialogCancel?.addEventListener("click", onCancel);
+
+    showModalCard(conflictDialog);
+  });
 }
 
 function buildTargetPath(item) {
@@ -1876,6 +2000,14 @@ function closeActionModal() {
   pendingAudibleTargets = [];
   pendingAudibleFeedback = null;
 
+  // If a conflict dialog is awaiting a decision and the modal is closed by other
+  // means (backdrop click, Escape), resolve it as a cancel so the caller unblocks.
+  if (pendingConflictResolve) {
+    const resolve = pendingConflictResolve;
+    pendingConflictResolve = null;
+    resolve("cancel");
+  }
+
   hideModalCards();
   if (appModal) {
     appModal.classList.remove("is-active");
@@ -1884,7 +2016,7 @@ function closeActionModal() {
 }
 
 function hideModalCards() {
-  [trashDialog, anilistDialog, audibleDialog, imageDialog].forEach((dialog) => {
+  [trashDialog, anilistDialog, audibleDialog, imageDialog, conflictDialog].forEach((dialog) => {
     if (dialog) {
       dialog.hidden = true;
     }
@@ -3486,11 +3618,14 @@ function renderAuditTrail() {
   });
 }
 
-function createRow(item, cells, selected) {
+function createRow(item, cells, selected, allowMultiSelect = false) {
   const row = document.createElement("button");
   row.type = "button";
   row.className = "table-row table-row-button";
   row.classList.toggle("is-selected", selected);
+  if (allowMultiSelect && isInboxMultiEdit) {
+    row.classList.toggle("is-bulk-selected", inboxSelectedKeys.has(item.source_path));
+  }
   row.dataset.sourcePath = item.source_path;
 
   cells.forEach((cell) => {
@@ -3502,6 +3637,10 @@ function createRow(item, cells, selected) {
   });
 
   row.addEventListener("click", () => {
+    if (allowMultiSelect && isInboxMultiEdit) {
+      toggleInboxItem(item);
+      return;
+    }
     selectedItemKey = item.source_path;
     setActiveTab("review");
     renderPlan(currentPlan);
@@ -3546,8 +3685,100 @@ function renderInboxRows(items) {
       : item.target_path ?? "Inbox/_review_queue";
     const displayName = item.title || basename(item.source_path);
     const displayTarget = target.startsWith("Inbox/") ? target : basename(target);
-    inboxRows.appendChild(createRow(item, [displayName, status, displayTarget], false));
+    inboxRows.appendChild(createRow(item, [displayName, status, displayTarget], false, true));
   });
+}
+
+function toggleInboxItem(item) {
+  if (inboxSelectedKeys.has(item.source_path)) {
+    inboxSelectedKeys.delete(item.source_path);
+  } else {
+    inboxSelectedKeys.add(item.source_path);
+  }
+  syncInboxMultiUi();
+  renderInboxRows(currentPlan?.items ?? []);
+}
+
+function syncInboxMultiUi() {
+  if (inboxMultiToggle) {
+    inboxMultiToggle.classList.toggle("is-active", isInboxMultiEdit);
+    inboxMultiToggle.textContent = isInboxMultiEdit
+      ? `Auswahl beenden (${inboxSelectedKeys.size})`
+      : "Mehrfachauswahl";
+  }
+  if (inboxDeleteSelected) {
+    inboxDeleteSelected.hidden = !isInboxMultiEdit;
+    inboxDeleteSelected.disabled = inboxSelectedKeys.size === 0;
+    inboxDeleteSelected.textContent =
+      inboxSelectedKeys.size > 0
+        ? `Auswahl löschen (${inboxSelectedKeys.size})`
+        : "Auswahl löschen";
+  }
+}
+
+async function deleteSelectedInboxFiles() {
+  if (!inboxSelectedKeys.size) {
+    return;
+  }
+
+  // Expand audiobook group representatives to include all their parts so the
+  // whole book is removed, not just the first file.
+  const selectedItems = (currentPlan?.items ?? []).filter((item) =>
+    inboxSelectedKeys.has(item.source_path)
+  );
+  const paths = new Set();
+  selectedItems.forEach((item) => {
+    paths.add(item.source_path);
+    if (Array.isArray(item.audiobook_parts)) {
+      item.audiobook_parts.forEach((p) => paths.add(p));
+    }
+  });
+
+  const count = paths.size;
+  const confirmed = window.confirm(
+    `${count} Datei(en) werden in den .trash-Ordner des Vaults verschoben. Fortfahren?`
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `${count} Datei(en) werden gelöscht...`;
+  }
+
+  const response = await fetch("/api/delete-files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vault_root: getVaultRoot(),
+      paths: Array.from(paths),
+      permanent: false,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  clearAppliedLocalState(deleted);
+  inboxSelectedKeys.clear();
+  isInboxMultiEdit = false;
+  syncInboxMultiUi();
+  updateAuditTrail(`${deleted.length} Datei(en) in den .trash verschoben.`);
+
+  if (statusStrip) {
+    statusStrip.textContent = skipped.length
+      ? `${deleted.length} gelöscht, ${skipped.length} übersprungen.`
+      : `${deleted.length} Datei(en) gelöscht.`;
+  }
+
+  await loadPlan();
 }
 
 function renderReviewRows(items) {
@@ -5561,6 +5792,29 @@ if (applyImportButton) {
     } catch (error) {
       if (statusStrip) {
         statusStrip.textContent = `Import konnte nicht angewendet werden: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (inboxMultiToggle) {
+  inboxMultiToggle.addEventListener("click", () => {
+    isInboxMultiEdit = !isInboxMultiEdit;
+    if (!isInboxMultiEdit) {
+      inboxSelectedKeys.clear();
+    }
+    syncInboxMultiUi();
+    renderInboxRows(currentPlan?.items ?? []);
+  });
+}
+
+if (inboxDeleteSelected) {
+  inboxDeleteSelected.addEventListener("click", async () => {
+    try {
+      await deleteSelectedInboxFiles();
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
       }
     }
   });

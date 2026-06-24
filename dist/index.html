@@ -153,6 +153,12 @@
             <section class="panel">
               <p class="panel-label">Inbox-Queue</p>
               <h3>Neue Dateien warten auf Zuordnung</h3>
+              <div class="toolbar">
+                <button class="action-button" id="inbox-multi-toggle">Mehrfachauswahl</button>
+                <button class="action-button danger" id="inbox-delete-selected" hidden>
+                  Auswahl löschen
+                </button>
+              </div>
               <div class="table">
                 <div class="table-row table-head">
                   <span>Datei</span>
@@ -639,6 +645,20 @@
         </div>
         <div class="api-feedback" id="audible-dialog-feedback"></div>
         <div class="anilist-results" id="audible-dialog-results"></div>
+      </section>
+
+      <section class="panel modal-card" id="conflict-dialog" hidden>
+        <p class="panel-label">Konflikte</p>
+        <h3 id="conflict-dialog-title">Dateien existieren bereits</h3>
+        <p class="body-copy" id="conflict-dialog-body">
+          Am Zielort existieren bereits gleichnamige Dateien. Bitte wähle, wie verfahren werden soll.
+        </p>
+        <div class="conflict-list" id="conflict-dialog-list"></div>
+        <div class="toolbar">
+          <button class="action-button danger" id="conflict-dialog-overwrite">Überschreiben (alte löschen)</button>
+          <button class="action-button" id="conflict-dialog-skip">Konflikte überspringen</button>
+          <button class="action-button" id="conflict-dialog-cancel">Abbrechen</button>
+        </div>
       </section>
 
       <section class="panel modal-card" id="playlist-create-dialog" hidden>

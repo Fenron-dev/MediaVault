@@ -141,6 +141,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_save_sidecars_response(request.body()),
                 ),
+                "/api/delete-files" => json_response(
+                    StatusCode::OK,
+                    &build_delete_files_response(request.body()),
+                ),
                 "/api/cleanup-vault" => json_response(
                     StatusCode::OK,
                     &build_cleanup_vault_response(request.uri().query()),
@@ -600,6 +604,28 @@ fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
         }
     };
 
+    // Dry-run: report conflicts (existing targets) without moving anything.
+    if request.dry_run {
+        let mut conflicts = Vec::new();
+        let mut skipped = Vec::new();
+        for item in &request.items {
+            match detect_import_conflict(&vault, item) {
+                Ok(Some(conflict)) => conflicts.push(conflict),
+                Ok(None) => {}
+                Err(error) => skipped.push(ApplyImportSkipped {
+                    source_path: item.source_path.clone(),
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        return ApplyImportResponse {
+            applied: Vec::new(),
+            skipped,
+            conflicts,
+            error: None,
+        };
+    }
+
     let mut applied = Vec::new();
     let mut skipped = Vec::new();
 
@@ -618,8 +644,45 @@ fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
     ApplyImportResponse {
         applied,
         skipped,
+        conflicts: Vec::new(),
         error: None,
     }
+}
+
+/// Checks whether applying `item` would overwrite an existing target file.
+///
+/// Returns `Ok(Some(conflict))` when the resolved target exists and differs from
+/// the source, `Ok(None)` when there is no conflict, and `Err` when the source
+/// is missing or paths are invalid.
+fn detect_import_conflict(
+    vault: &Vault,
+    item: &ApplyImportItem,
+) -> Result<Option<ApplyImportConflict>> {
+    let source_relative = RelativePath::new(&item.source_path)?;
+    let target_relative = RelativePath::new(&item.target_path)?;
+    let source_absolute = vault.resolve(source_relative.as_path())?;
+    let target_absolute = vault.resolve(target_relative.as_path())?;
+
+    if !source_absolute.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Quelldatei nicht gefunden: {}",
+            source_relative
+        )));
+    }
+
+    if source_absolute == target_absolute || !target_absolute.exists() {
+        return Ok(None);
+    }
+
+    let source_size = fs::metadata(&source_absolute).map(|m| m.len()).unwrap_or(0);
+    let target_size = fs::metadata(&target_absolute).map(|m| m.len()).unwrap_or(0);
+
+    Ok(Some(ApplyImportConflict {
+        source_path: item.source_path.clone(),
+        target_path: item.target_path.clone(),
+        target_size,
+        source_size,
+    }))
 }
 
 fn build_save_sidecars_response(body: &[u8]) -> SaveSidecarsResponse {
@@ -657,6 +720,81 @@ fn build_save_sidecars_response(body: &[u8]) -> SaveSidecarsResponse {
         skipped,
         error: None,
     }
+}
+
+fn build_delete_files_response(body: &[u8]) -> DeleteFilesResponse {
+    let request: DeleteFilesRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return DeleteFilesResponse::error(format!("ungültiger Request: {error}")),
+    };
+
+    let vault_root = match resolve_vault_root(request.vault_root.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => return DeleteFilesResponse::error("kein Vault ausgewählt".to_string()),
+        Err(error) => return DeleteFilesResponse::error(error.to_string()),
+    };
+
+    let vault = match Vault::new(&vault_root) {
+        Ok(vault) => vault,
+        Err(error) => return DeleteFilesResponse::error(error.to_string()),
+    };
+
+    let mut deleted = Vec::new();
+    let mut skipped = Vec::new();
+
+    for path in request.paths {
+        match delete_vault_file(&vault, &path, request.permanent) {
+            Ok(()) => deleted.push(path),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: path,
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    DeleteFilesResponse {
+        deleted,
+        skipped,
+        error: None,
+    }
+}
+
+/// Deletes a single vault file plus its sidecar.
+///
+/// When `permanent` is false the file is moved into the vault `.trash` folder
+/// (reversible). When true it is removed from disk. The accompanying
+/// `.mediavault.yaml` sidecar, if present, is removed alongside.
+fn delete_vault_file(vault: &Vault, path: &str, permanent: bool) -> Result<()> {
+    let relative = RelativePath::new(path)?;
+    let absolute = vault.resolve(relative.as_path())?;
+
+    if !absolute.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Datei nicht gefunden: {relative}"
+        )));
+    }
+
+    if permanent {
+        fs::remove_file(&absolute).map_err(VaultError::from)?;
+    } else {
+        // Move to .trash/<original relative path> so structure is preserved and
+        // name collisions across folders are avoided.
+        let trash_target = vault.root().join(".trash").join(relative.as_path());
+        if let Some(parent) = trash_target.parent() {
+            fs::create_dir_all(parent).map_err(VaultError::from)?;
+        }
+        move_file_with_fallback(&absolute, &trash_target)?;
+    }
+
+    // Remove the sidecar if it exists (best effort — never fail the delete).
+    if let Ok(sidecar_relative) = sidecar_path_for(&relative) {
+        if let Ok(sidecar_absolute) = vault.resolve(sidecar_relative.as_path()) {
+            let _ = fs::remove_file(sidecar_absolute);
+        }
+    }
+
+    prune_empty_inbox_dirs(vault, absolute.parent());
+    Ok(())
 }
 
 fn build_cleanup_vault_response(query: Option<&str>) -> CleanupVaultResponse {
@@ -1299,6 +1437,10 @@ struct ParsedSidecar {
 struct ApplyImportRequest {
     vault_root: Option<String>,
     items: Vec<ApplyImportItem>,
+    /// When true, no files are moved — the response only reports which targets
+    /// already exist (conflicts) so the UI can ask the user how to proceed.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1306,6 +1448,10 @@ struct ApplyImportItem {
     source_path: String,
     target_path: String,
     sidecar_preview: String,
+    /// When true, an existing target file is deleted before the move so the
+    /// inbox copy can replace it (resolves the "file in both places" case).
+    #[serde(default)]
+    overwrite: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1326,10 +1472,25 @@ struct ApplyImportSkipped {
     reason: String,
 }
 
+/// A target path that already exists on disk — reported during a dry-run so the
+/// user can decide whether to overwrite or skip.
+#[derive(Debug, Clone, Serialize)]
+struct ApplyImportConflict {
+    source_path: String,
+    target_path: String,
+    /// Size in bytes of the existing target file (helps the user judge whether
+    /// it is the same file).
+    target_size: u64,
+    /// Size in bytes of the inbox source file.
+    source_size: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ApplyImportResponse {
     applied: Vec<String>,
     skipped: Vec<ApplyImportSkipped>,
+    #[serde(default)]
+    conflicts: Vec<ApplyImportConflict>,
     error: Option<String>,
 }
 
@@ -1338,6 +1499,7 @@ impl ApplyImportResponse {
         Self {
             applied: Vec::new(),
             skipped: Vec::new(),
+            conflicts: Vec::new(),
             error: Some(error),
         }
     }
@@ -1354,6 +1516,34 @@ impl SaveSidecarsResponse {
     fn error(error: String) -> Self {
         Self {
             saved: Vec::new(),
+            skipped: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeleteFilesRequest {
+    vault_root: Option<String>,
+    /// Vault-relative paths of files to delete.
+    paths: Vec<String>,
+    /// When false (default), files are moved to the vault `.trash` folder so the
+    /// action is reversible. When true, files are removed permanently.
+    #[serde(default)]
+    permanent: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeleteFilesResponse {
+    deleted: Vec<String>,
+    skipped: Vec<ApplyImportSkipped>,
+    error: Option<String>,
+}
+
+impl DeleteFilesResponse {
+    fn error(error: String) -> Self {
+        Self {
+            deleted: Vec::new(),
             skipped: Vec::new(),
             error: Some(error),
         }
@@ -2360,10 +2550,16 @@ fn apply_import_item(vault: &Vault, item: &ApplyImportItem) -> Result<()> {
 
     if source_absolute != target_absolute {
         if target_absolute.exists() {
-            return Err(VaultError::InvalidVaultPath(format!(
-                "Zieldatei existiert bereits: {}",
-                target_relative
-            )));
+            if item.overwrite {
+                // User confirmed overwrite: remove the existing target so the
+                // inbox copy replaces it and no duplicate remains.
+                fs::remove_file(&target_absolute).map_err(VaultError::from)?;
+            } else {
+                return Err(VaultError::InvalidVaultPath(format!(
+                    "Zieldatei existiert bereits: {}",
+                    target_relative
+                )));
+            }
         }
         move_file_with_fallback(&source_absolute, &target_absolute)?;
     }

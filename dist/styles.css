@@ -191,6 +191,39 @@ body:not(.is-vault-open) .app-shell {
   gap: 12px;
 }
 
+.conflict-list {
+  display: grid;
+  gap: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 12px 0;
+}
+
+.conflict-row {
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-strong);
+  padding: 10px 12px;
+}
+
+.conflict-path {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.conflict-sizes {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.conflict-sizes.is-warning {
+  color: var(--accent-strong);
+  font-weight: 600;
+}
+
 .anilist-result {
   display: grid;
   grid-template-columns: 72px minmax(0, 1fr) auto;
