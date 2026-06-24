@@ -983,10 +983,10 @@ function collectionPathFor(item) {
     return pathWithoutFilename(renderPathTemplate(pathTemplates.film, item));
   }
 
-  // Audiobook multi-file items (representative with audiobook_parts, and each part with
-  // is_audiobook_part) must all share the same collection node. target_path is
-  // "Hörbücher/{folder}/{filename}" for all of them — strip the filename to get the node path.
-  if ((item.audiobook_parts || item.is_audiobook_part) && item.target_path) {
+  // Audiobooks (single file or multi-part) derive their collection node from the
+  // computed target_path so they share the deep Author/Series/Book structure.
+  // buildTargetPath runs before this in projectItem, so target_path is current.
+  if (item.media_type === "audiobook" && item.target_path) {
     return pathWithoutFilename(item.target_path);
   }
 
@@ -1136,8 +1136,11 @@ function projectItem(item) {
       effective.folder_segment = folderSegmentFor(effective.media_type);
     }
   }
-  effective.collection_path = collectionPathFor(effective);
+  // target_path must be computed first: collectionPathFor derives the audiobook
+  // collection node from the (possibly deep) target_path, so a stale target_path
+  // would yield the old flat Hörbücher/<book> node instead of Author/Series/Book.
   effective.target_path = buildTargetPath(effective);
+  effective.collection_path = collectionPathFor(effective);
   effective.sidecar_path = buildSidecarPath(effective.target_path);
   effective.sidecar_preview = yamlOverrides[item.source_path] || buildSidecarPreview(effective);
   return effective;
@@ -1330,10 +1333,10 @@ function buildTargetPath(item) {
     return renderPathTemplate(pathTemplates.film, item);
   }
 
-  // Multi-file audiobooks: parts share a folder under Hörbücher.
-  // When Audible metadata is available, build a deep path: Author/Series/NR - Title/file.
-  // Without metadata, fall back to the source folder name.
-  if (mediaType === "audiobook" && (item.audiobook_parts?.length > 0 || item.is_audiobook_part)) {
+  // Audiobooks (single file or multi-part). When Audible metadata is available,
+  // build a deep path: Author/Series/NR - Title/file. Without metadata, fall back
+  // to the source folder name. Original filenames are kept so parts don't collide.
+  if (mediaType === "audiobook") {
     const origFilename = basename(item.source_path);
     const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
     const author = sanitizeSegment(item.author || "");

@@ -23,9 +23,11 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, VaultError};
 
 const REQUEST_TIMEOUT_SECS: u64 = 15;
+// `media` is required so the API returns the `product_images` map.
 const RESPONSE_GROUPS: &str =
-    "product_desc,product_attrs,contributors,rating,series,category_ladders";
-const IMAGE_SIZE: &str = "500";
+    "product_desc,product_attrs,contributors,rating,series,category_ladders,media";
+// Request both sizes the frontend consumes (grid thumbnail + large cover).
+const IMAGE_SIZE: &str = "500,1024";
 
 // ---------------------------------------------------------------------------
 // Response types (deserialized from Audible JSON)
