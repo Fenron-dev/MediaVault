@@ -184,6 +184,7 @@ const playerAudio = document.getElementById("player-audio");
 const playerAudioArt = document.getElementById("player-audio-art");
 const playerCoverArt = document.getElementById("player-cover-art");
 const playerSubtitleDisplay = document.getElementById("player-subtitle-display");
+const playerSubtitleSelect = document.getElementById("player-subtitle-select");
 const playerPdfStage = document.getElementById("player-pdf-stage");
 const playerPdfFrame = document.getElementById("player-pdf-frame");
 const playerMangaStage = document.getElementById("player-manga-stage");
@@ -2205,26 +2206,10 @@ async function loadDashboard() {
 
   const rootQuery = `root=${encodeURIComponent(root)}`;
 
-  // Load in-progress items
-  try {
-    const res = await fetch(`mediavault://localhost/api/in-progress?${rootQuery}`);
-    const data = await res.json();
-    if (dashboardResumeCards) clearNode(dashboardResumeCards);
-    if (data.items && data.items.length > 0) {
-      if (dashboardResumeSection) dashboardResumeSection.hidden = false;
-      if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
-      data.items.forEach((item) => {
-        const card = createDashboardCard(item, (it) => {
-          openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
-        });
-        dashboardResumeCards?.appendChild(card);
-      });
-    } else {
-      if (dashboardResumeSection) dashboardResumeSection.hidden = true;
-    }
-  } catch {
-    if (dashboardResumeSection) dashboardResumeSection.hidden = true;
-  }
+  // In-progress ("Weitermachen") now lives under Wiedergabelisten → Verlauf,
+  // so it no longer fills the overview. Keep the section hidden here.
+  if (dashboardResumeSection) dashboardResumeSection.hidden = true;
+  if (dashboardResumeCards) clearNode(dashboardResumeCards);
 
   // Load recent items
   try {
@@ -2245,6 +2230,7 @@ async function loadDashboard() {
       });
     } else {
       if (dashboardRecentSection) dashboardRecentSection.hidden = true;
+      if (dashboardEmptyHint) dashboardEmptyHint.hidden = false;
     }
   } catch {
     if (dashboardRecentSection) dashboardRecentSection.hidden = true;
@@ -2364,6 +2350,11 @@ function playerStop() {
 
   if (playerVideo) { playerVideo.src = ""; }
   if (playerAudio) { playerAudio.src = ""; }
+  if (subtitleRafId) {
+    cancelAnimationFrame(subtitleRafId);
+    subtitleRafId = null;
+  }
+  subtitleCues = [];
   if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
   if (playerPdfFrame) playerPdfFrame.src = "";
   if (playerPdfStage) playerPdfStage.hidden = true;
@@ -2416,21 +2407,119 @@ function startSubtitleLoop(mediaEl) {
   subtitleRafId = requestAnimationFrame(tick);
 }
 
-async function loadSubtitles(vaultPath) {
+// Parses WebVTT — same cue structure as SRT but with a header and "." for ms.
+function parseVtt(text) {
+  const body = text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
+  // Drop the WEBVTT header line/block.
+  const stripped = body.replace(/^WEBVTT[^\n]*\n/, "");
+  return parseSrt(stripped);
+}
+
+// Parses the Dialogue lines of an ASS/SSA subtitle file (text only, tags removed).
+function parseAss(text) {
+  const cues = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const toSec = (ts) => {
+    // ASS time format: H:MM:SS.cc
+    const m = ts.trim().match(/(\d+):(\d{2}):(\d{2})[.,](\d{1,3})/);
+    if (!m) return null;
+    return (
+      Number(m[1]) * 3600 +
+      Number(m[2]) * 60 +
+      Number(m[3]) +
+      Number(`0.${m[4]}`)
+    );
+  };
+  for (const line of lines) {
+    if (!line.startsWith("Dialogue:")) continue;
+    // Format: Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+    const parts = line.slice("Dialogue:".length).split(",");
+    if (parts.length < 10) continue;
+    const start = toSec(parts[1]);
+    const end = toSec(parts[2]);
+    if (start === null || end === null) continue;
+    const raw = parts.slice(9).join(",");
+    const cueText = raw
+      .replace(/\{[^}]*\}/g, "") // override tags
+      .replace(/\\N/gi, "\n")
+      .trim();
+    if (cueText) cues.push({ start, end, text: cueText });
+  }
+  cues.sort((a, b) => a.start - b.start);
+  return cues;
+}
+
+function parseSubtitleByExt(text, path) {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  if (ext === "vtt") return parseVtt(text);
+  if (ext === "ass" || ext === "ssa") return parseAss(text);
+  return parseSrt(text);
+}
+
+// Loads a specific subtitle file by vault path and starts the render loop.
+async function loadSubtitleFile(subtitlePath) {
   subtitleCues = [];
-  const srtPath = vaultPath.replace(/\.[^.]+$/, ".srt");
+  if (!subtitlePath) {
+    if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+    return;
+  }
   const root = getVaultRoot();
   const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
   try {
     const res = await fetch(
-      `mediavault://localhost/api/media-file?path=${encodeURIComponent(srtPath)}${rootQuery}`
+      `mediavault://localhost/api/media-file?path=${encodeURIComponent(subtitlePath)}${rootQuery}`
     );
     if (!res.ok) return;
     const text = await res.text();
-    subtitleCues = parseSrt(text);
+    subtitleCues = parseSubtitleByExt(text, subtitlePath);
+    if (playerState?.mediaEl && subtitleCues.length > 0) {
+      startSubtitleLoop(playerState.mediaEl);
+    }
   } catch {
     subtitleCues = [];
   }
+}
+
+// Discovers subtitle tracks near the video and populates the player selector.
+async function loadSubtitles(vaultPath) {
+  subtitleCues = [];
+  if (!playerSubtitleSelect) return;
+
+  // Reset selector to just "off" while we fetch.
+  playerSubtitleSelect.innerHTML = '<option value="">Untertitel: Aus</option>';
+  playerSubtitleSelect.hidden = true;
+
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  let tracks = [];
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/list-subtitles?path=${encodeURIComponent(vaultPath)}${rootQuery}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      tracks = Array.isArray(data.subtitles) ? data.subtitles : [];
+    }
+  } catch {
+    tracks = [];
+  }
+
+  if (!tracks.length) {
+    return;
+  }
+
+  tracks.forEach((track) => {
+    const option = document.createElement("option");
+    option.value = track.path;
+    option.textContent = track.label;
+    playerSubtitleSelect.appendChild(option);
+  });
+  playerSubtitleSelect.hidden = false;
+
+  // Auto-select the first track (backend sorts best matches first).
+  const first = tracks[0].path;
+  playerSubtitleSelect.value = first;
+  await loadSubtitleFile(first);
 }
 
 // ── Manga/image sequence ────────────────────────────────────────────────────
@@ -2605,11 +2694,12 @@ async function openPlayer(item) {
     mediaEl.currentTime = record.progress.position_seconds;
   }
 
-  // Load .srt subtitle companion for video files
+  // Discover and load subtitle tracks for video files. Audio hides the selector.
   if (isVideo) {
-    loadSubtitles(sourcePath).then(() => {
-      if (playerState && subtitleCues.length > 0) startSubtitleLoop(mediaEl);
-    });
+    loadSubtitles(sourcePath);
+  } else if (playerSubtitleSelect) {
+    playerSubtitleSelect.hidden = true;
+    subtitleCues = [];
   }
 
   mediaEl.play().catch(() => {});
@@ -2736,6 +2826,25 @@ function initAbsSettings() {
 
 let activePlaylists = [];
 let activePlaylistId = null;
+let historyViewActive = false;
+let historyItems = [];
+
+// Maps a vault-relative path to a coarse media type via its top folder segment.
+function mediaTypeFromVaultPath(path) {
+  const top = String(path || "").split("/")[0] || "";
+  const map = {
+    Filme: "Filme",
+    Serien: "Serien",
+    Anime: "Anime",
+    Hörbücher: "Hörbücher",
+    Musik: "Musik",
+    Bücher: "Bücher",
+    Manga: "Manga",
+    Comics: "Comics",
+    Games: "Games",
+  };
+  return map[top] || "Sonstige";
+}
 
 function playlistKindLabel(kind) {
   if (kind === "smart") return "Smart Playlist";
@@ -2758,6 +2867,7 @@ async function loadPlaylists() {
     );
     const data = await res.json();
     activePlaylists = data.playlists || [];
+    historyItems = await fetchHistoryItems();
     renderPlaylistList();
   } catch {
     activePlaylists = [];
@@ -2767,6 +2877,23 @@ async function loadPlaylists() {
 function renderPlaylistList() {
   if (!playlistList) return;
   playlistList.innerHTML = "";
+
+  // Special "Verlauf" entry at the top: shows in-progress media grouped by type.
+  const historyRow = document.createElement("div");
+  historyRow.className = "playlist-row" + (historyViewActive ? " is-active" : "");
+  const historyIcon = document.createElement("span");
+  historyIcon.className = "playlist-row-icon";
+  historyIcon.textContent = "↺";
+  const historyName = document.createElement("span");
+  historyName.className = "playlist-row-name";
+  historyName.textContent = "Verlauf";
+  const historyCount = document.createElement("span");
+  historyCount.className = "playlist-row-count";
+  historyCount.textContent = historyItems.length || "";
+  historyRow.append(historyIcon, historyName, historyCount);
+  historyRow.addEventListener("click", () => selectHistory());
+  playlistList.appendChild(historyRow);
+
   if (activePlaylists.length === 0) {
     const hint = document.createElement("p");
     hint.className = "body-copy";
@@ -2800,11 +2927,168 @@ function renderPlaylistList() {
 }
 
 function selectPlaylist(id) {
+  historyViewActive = false;
   activePlaylistId = id;
   renderPlaylistList();
   const pl = activePlaylists.find((p) => p.id === id);
   if (!pl) return;
   renderPlaylistDetail(pl);
+}
+
+async function fetchHistoryItems() {
+  const root = getVaultRoot();
+  if (!root) return [];
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/in-progress?root=${encodeURIComponent(root)}`
+    );
+    const data = await res.json();
+    return Array.isArray(data.items) ? data.items : [];
+  } catch {
+    return [];
+  }
+}
+
+async function selectHistory() {
+  historyViewActive = true;
+  activePlaylistId = null;
+  historyItems = await fetchHistoryItems();
+  renderPlaylistList();
+  renderHistoryDetail();
+}
+
+function renderHistoryDetail() {
+  if (!playlistDetailEmpty || !playlistDetailContent) return;
+  playlistDetailEmpty.hidden = true;
+  playlistDetailContent.hidden = false;
+
+  if (playlistDetailKindLabel) playlistDetailKindLabel.textContent = "Wiedergabeverlauf";
+  if (playlistDetailTitle) playlistDetailTitle.textContent = "Verlauf";
+  const total = historyItems.length;
+  if (playlistDetailCount) {
+    playlistDetailCount.textContent = `${total} Eintr${total === 1 ? "ag" : "äge"}`;
+  }
+  if (playlistPlayAll) playlistPlayAll.hidden = true;
+  if (playlistDelete) {
+    playlistDelete.hidden = total === 0;
+    playlistDelete.textContent = "Verlauf löschen";
+  }
+  if (playlistItemsHint) {
+    playlistItemsHint.hidden = total > 0;
+    playlistItemsHint.textContent =
+      "Noch kein Verlauf. Sobald du etwas abspielst, erscheint es hier.";
+  }
+
+  if (!playlistItemsRows) return;
+  playlistItemsRows.innerHTML = "";
+  if (!total) return;
+
+  // Group by media type.
+  const groups = new Map();
+  historyItems.forEach((item) => {
+    const type = mediaTypeFromVaultPath(item.vault_path);
+    if (!groups.has(type)) groups.set(type, []);
+    groups.get(type).push(item);
+  });
+
+  for (const [type, items] of groups) {
+    const header = document.createElement("div");
+    header.className = "history-group-header";
+    header.textContent = `${type} (${items.length})`;
+    playlistItemsRows.appendChild(header);
+
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "playlist-item-row";
+
+      const nameSpan = document.createElement("span");
+      nameSpan.style.fontSize = "0.875rem";
+      nameSpan.style.overflow = "hidden";
+      nameSpan.style.textOverflow = "ellipsis";
+      nameSpan.style.whiteSpace = "nowrap";
+      const stem = item.title || item.vault_path.split("/").pop()?.replace(/\.[^.]+$/, "") || item.vault_path;
+      const pct = Math.round((item.progress_fraction || 0) * 100);
+      nameSpan.textContent = pct > 0 ? `${stem} · ${pct}%` : stem;
+      nameSpan.title = item.vault_path;
+
+      const typeSpan = document.createElement("span");
+      typeSpan.style.fontSize = "0.75rem";
+      typeSpan.style.color = "var(--text-muted)";
+      const ext = item.vault_path.split(".").pop()?.toLowerCase() || "";
+      typeSpan.textContent = ext.toUpperCase();
+
+      const actions = document.createElement("span");
+      actions.style.display = "flex";
+      actions.style.gap = "4px";
+
+      const playBtn = document.createElement("button");
+      playBtn.className = "action-button icon-button playlist-item-play";
+      playBtn.title = "Fortsetzen";
+      playBtn.textContent = "▶";
+      playBtn.addEventListener("click", () => {
+        openPlayer({ source_path: item.vault_path, target_path: item.vault_path, title: item.title });
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "action-button icon-button danger";
+      delBtn.title = "Aus Verlauf entfernen";
+      delBtn.textContent = "✕";
+      delBtn.addEventListener("click", async () => {
+        await deleteHistoryEntry(item.vault_path);
+      });
+
+      actions.append(playBtn, delBtn);
+      row.append(nameSpan, typeSpan, actions);
+      playlistItemsRows.appendChild(row);
+    });
+  }
+}
+
+async function deleteHistoryEntry(vaultPath) {
+  const root = getVaultRoot();
+  if (!root) return;
+  try {
+    await fetch("mediavault://localhost/api/progress/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: root, vault_path: vaultPath }),
+    });
+  } catch {
+    // ignore — re-fetch reflects actual state
+  }
+  historyItems = await fetchHistoryItems();
+  renderPlaylistList();
+  renderHistoryDetail();
+}
+
+async function clearHistory() {
+  const total = historyItems.length;
+  if (!total) return;
+  const confirmed = await showConfirmDialog({
+    label: "Verlauf",
+    title: "Verlauf löschen?",
+    body: `Alle ${total} Verlaufseinträge werden entfernt. Die Mediendateien selbst bleiben erhalten.`,
+    confirmLabel: "Verlauf löschen",
+    danger: true,
+  });
+  if (!confirmed) return;
+
+  const root = getVaultRoot();
+  if (!root) return;
+  for (const item of historyItems) {
+    try {
+      await fetch("mediavault://localhost/api/progress/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vault_root: root, vault_path: item.vault_path }),
+      });
+    } catch {
+      // continue deleting the rest
+    }
+  }
+  historyItems = [];
+  renderPlaylistList();
+  renderHistoryDetail();
 }
 
 function renderPlaylistDetail(pl) {
@@ -2892,10 +3176,22 @@ function createNewPlaylist() {
 }
 
 async function deleteActivePlaylist() {
+  // In history view the same button clears the playback history instead.
+  if (historyViewActive) {
+    await clearHistory();
+    return;
+  }
   if (!activePlaylistId) return;
   const pl = activePlaylists.find((p) => p.id === activePlaylistId);
   if (!pl) return;
-  if (!confirm(`Playlist „${pl.name}" wirklich löschen?`)) return;
+  const confirmed = await showConfirmDialog({
+    label: "Playlist",
+    title: "Playlist löschen?",
+    body: `Playlist „${pl.name}" wirklich löschen?`,
+    confirmLabel: "Löschen",
+    danger: true,
+  });
+  if (!confirmed) return;
   const root = getVaultRoot();
   if (!root) return;
   try {
@@ -2994,6 +3290,12 @@ function initPlayer() {
     playerSpeed.addEventListener("change", () => {
       const el = playerMediaElement();
       if (el) el.playbackRate = parseFloat(playerSpeed.value);
+    });
+  }
+
+  if (playerSubtitleSelect) {
+    playerSubtitleSelect.addEventListener("change", () => {
+      loadSubtitleFile(playerSubtitleSelect.value);
     });
   }
 

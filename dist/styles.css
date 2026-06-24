@@ -2223,6 +2223,17 @@ h3 {
   border-bottom: 1px solid var(--line);
 }
 
+.history-group-header {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent-strong);
+  font-weight: 600;
+  padding: 12px 0 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 2px;
+}
+
 .playlist-item-row:last-child {
   border-bottom: none;
 }

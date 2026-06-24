@@ -220,6 +220,10 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_in_progress_response(request.uri().query()),
                 ),
+                "/api/list-subtitles" => json_response(
+                    StatusCode::OK,
+                    &build_list_subtitles_response(request.uri().query()),
+                ),
                 _ => response(
                     StatusCode::NOT_FOUND,
                     "text/plain; charset=utf-8",
@@ -4307,6 +4311,161 @@ fn build_in_progress_response(query: Option<&str>) -> InProgressResponse {
         .collect();
 
     InProgressResponse { items, error: None }
+}
+
+// ---------------------------------------------------------------------------
+// Subtitle discovery
+// ---------------------------------------------------------------------------
+
+/// Subtitle file extensions the in-app player can parse.
+const SUBTITLE_EXTS: &[&str] = &["srt", "vtt", "ass", "ssa"];
+
+#[derive(Debug, Clone, Serialize)]
+struct SubtitleTrack {
+    /// Vault-relative path to the subtitle file.
+    path: String,
+    /// Human-readable label (filename, with any language hint).
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListSubtitlesResponse {
+    subtitles: Vec<SubtitleTrack>,
+    error: Option<String>,
+}
+
+/// Lists subtitle files near a video so the player can offer track selection.
+///
+/// Searches the video's own directory and common `Subs` / `Subtitles`
+/// subfolders. Files whose stem starts with the video stem are listed first so
+/// the best match is auto-selected by the frontend.
+fn build_list_subtitles_response(query: Option<&str>) -> ListSubtitlesResponse {
+    let video_path = match query.and_then(|q| extract_query_value(q, "path")) {
+        Some(p) => p,
+        None => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some("Kein Pfad angegeben.".into()),
+            }
+        }
+    };
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let relative = match RelativePath::new(&video_path) {
+        Ok(r) => r,
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+    let absolute = match vault.resolve(relative.as_path()) {
+        Ok(a) => a,
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let video_dir = match absolute.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: None,
+            }
+        }
+    };
+    let video_stem = absolute
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Directories to scan: the video's folder plus optional subtitle subfolders.
+    let mut dirs = vec![video_dir.clone()];
+    for sub in ["Subs", "Subtitles", "subs", "subtitles"] {
+        let candidate = video_dir.join(sub);
+        if candidate.is_dir() {
+            dirs.push(candidate);
+        }
+    }
+
+    let mut matching = Vec::new();
+    let mut others = Vec::new();
+    for dir in dirs {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if !SUBTITLE_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+            let Ok(rel) = vault.relative_from_absolute(&path) else {
+                continue;
+            };
+            let file_stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let track = SubtitleTrack {
+                path: rel.to_string(),
+                label: file_stem.clone(),
+            };
+            // Files whose stem starts with the video stem are the best match.
+            if !video_stem.is_empty() && file_stem.to_lowercase().starts_with(&video_stem) {
+                matching.push(track);
+            } else {
+                others.push(track);
+            }
+        }
+    }
+
+    matching.sort_by(|a, b| a.label.cmp(&b.label));
+    others.sort_by(|a, b| a.label.cmp(&b.label));
+    matching.extend(others);
+
+    ListSubtitlesResponse {
+        subtitles: matching,
+        error: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
