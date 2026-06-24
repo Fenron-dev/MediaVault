@@ -3025,7 +3025,7 @@ fn decode_id3_text(data: &[u8]) -> Option<String> {
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
                     .collect()
             };
-            String::from_utf16_lossy(&units).into_owned()
+            String::from_utf16_lossy(&units)
         }
         // UTF-8
         3 => String::from_utf8_lossy(text).into_owned(),
