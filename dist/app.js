@@ -3376,7 +3376,16 @@ function applyAudibleResult(result) {
 
   const firstTarget = pendingAudibleTargets[0];
   if (pendingAudibleSelection.type === "node") {
-    selectedCollectionKey = pendingAudibleSelection.node?.path || selectedCollectionKey;
+    // After applying metadata, target_path and collection_path are recomputed
+    // (author + series produce a deeper path). Use the updated collection_path
+    // so the UI navigates to the new node rather than the now-gone old one.
+    const updatedRep = firstTarget
+      ? currentPlan.items.find((item) => item.source_path === firstTarget.source_path)
+      : null;
+    selectedCollectionKey =
+      updatedRep?.collection_path ||
+      pendingAudibleSelection.node?.path ||
+      selectedCollectionKey;
     selectedItemKey = "";
     selectedCollectionItemKey = "";
   } else if (firstTarget?.source_path) {
@@ -4697,22 +4706,37 @@ function createMediaSection(title, subtitle = "") {
 function createDetailsGrid(item) {
   const grid = document.createElement("div");
   grid.className = "media-details-grid";
-  [
-    ["Typ", item.format || mediaTypeLabel(mediaSelectionValue(item))],
-    ["Status", item.status ? statusLabel(item.status) : "-"],
-    ["Staffel", item.airing_season || "-"],
-    ["Ausgestrahlt", [datePartsLabel(item.start_date), datePartsLabel(item.end_date)].filter(Boolean).join(" - ")],
-    ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
-    ["Score", typeof item.average_score === "number" ? scoreLabel(item.average_score) : "-"],
-    [
-      "Studios",
-      (item.studios || [])
-        .map((studio) => (typeof studio === "string" ? studio : studio?.name))
-        .filter(Boolean)
-        .join(", "),
-    ],
-    ["Synonyme", (item.synonyms || []).slice(0, 4).join(", ")],
-  ].forEach(([label, value]) => {
+  const isAudiobook = canonicalMediaType(mediaSelectionValue(item)) === "audiobook";
+
+  const rows = isAudiobook
+    ? [
+        ["Typ", "Hörbuch"],
+        ["Status", item.status ? statusLabel(item.status) : "-"],
+        ["Sprecher", item.narrator || "-"],
+        ["Veröffentlicht", item.year ? String(item.year) : (datePartsLabel(item.start_date) || "-")],
+        ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
+        ["Verlag", item.publisher || "-"],
+        ["Autor", item.author || "-"],
+        ["Serie", item.series_title ? `${item.series_title}${item.series_sequence ? ` #${item.series_sequence}` : ""}` : "-"],
+      ]
+    : [
+        ["Typ", item.format || mediaTypeLabel(mediaSelectionValue(item))],
+        ["Status", item.status ? statusLabel(item.status) : "-"],
+        ["Staffel", item.airing_season || "-"],
+        ["Ausgestrahlt", [datePartsLabel(item.start_date), datePartsLabel(item.end_date)].filter(Boolean).join(" - ")],
+        ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
+        ["Score", typeof item.average_score === "number" ? scoreLabel(item.average_score) : "-"],
+        [
+          "Studios",
+          (item.studios || [])
+            .map((studio) => (typeof studio === "string" ? studio : studio?.name))
+            .filter(Boolean)
+            .join(", "),
+        ],
+        ["Synonyme", (item.synonyms || []).slice(0, 4).join(", ")],
+      ];
+
+  rows.forEach(([label, value]) => {
     const block = document.createElement("div");
     const span = document.createElement("span");
     span.textContent = label;
