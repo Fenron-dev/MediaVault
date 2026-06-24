@@ -111,6 +111,12 @@ const inspectorYamlHint = document.getElementById("inspector-yaml-hint");
 const inspectorYamlPanel = document.getElementById("inspector-yaml-panel");
 const auditTrailNode = document.getElementById("audit-trail");
 const appModal = document.getElementById("app-modal");
+const confirmDialog = document.getElementById("confirm-dialog");
+const confirmDialogLabel = document.getElementById("confirm-dialog-label");
+const confirmDialogTitle = document.getElementById("confirm-dialog-title");
+const confirmDialogBody = document.getElementById("confirm-dialog-body");
+const confirmDialogConfirm = document.getElementById("confirm-dialog-confirm");
+const confirmDialogCancel = document.getElementById("confirm-dialog-cancel");
 const conflictDialog = document.getElementById("conflict-dialog");
 const conflictDialogBody = document.getElementById("conflict-dialog-body");
 const conflictDialogList = document.getElementById("conflict-dialog-list");
@@ -275,6 +281,7 @@ let multiSelectedKeys = new Set();
 let isInboxMultiEdit = false;
 let inboxSelectedKeys = new Set();
 let pendingConflictResolve = null;
+let pendingConfirmResolve = null;
 let pendingTrashSelection = null;
 let pendingAniListSelection = null;
 let pendingAniListTargets = [];
@@ -1306,6 +1313,26 @@ async function applyReadyImports() {
     return;
   }
 
+  // If some items still need review, confirm that we only move the ready ones.
+  const pendingReview = (currentPlan?.items ?? []).filter((item) => needsReviewInUi(item)).length;
+  if (pendingReview > 0) {
+    const proceed = await showConfirmDialog({
+      label: "Teilimport",
+      title: "Noch nicht alle Dateien zugewiesen",
+      body:
+        `${readyItems.length} Datei(en) sind bereit und werden verschoben. ` +
+        `${pendingReview} Eintrag(e) warten noch auf Prüfung und bleiben in der Inbox. ` +
+        `Möchtest du die bereits klaren Dateien jetzt verschieben?`,
+      confirmLabel: `${readyItems.length} verschieben`,
+    });
+    if (!proceed) {
+      if (statusStrip) {
+        statusStrip.textContent = "Import abgebrochen.";
+      }
+      return;
+    }
+  }
+
   if (statusStrip) {
     statusStrip.textContent = `Prüfe ${readyItems.length} Eintrag(e) auf Konflikte...`;
   }
@@ -1361,6 +1388,48 @@ async function applyReadyImports() {
   }
 
   await loadPlan();
+}
+
+// Generic in-app confirmation dialog (replaces window.confirm, which does not
+// work reliably inside the Tauri WebView). Resolves to true/false.
+function showConfirmDialog({ title, body, confirmLabel = "Fortfahren", label = "Bestätigen", danger = false } = {}) {
+  return new Promise((resolve) => {
+    if (!confirmDialog) {
+      resolve(false);
+      return;
+    }
+
+    if (confirmDialogLabel) confirmDialogLabel.textContent = label;
+    if (confirmDialogTitle) confirmDialogTitle.textContent = title || "Bist du sicher?";
+    if (confirmDialogBody) confirmDialogBody.textContent = body || "";
+    if (confirmDialogConfirm) {
+      confirmDialogConfirm.textContent = confirmLabel;
+      confirmDialogConfirm.classList.toggle("danger", danger);
+      confirmDialogConfirm.classList.toggle("primary", !danger);
+    }
+
+    const cleanup = () => {
+      confirmDialogConfirm?.removeEventListener("click", onConfirm);
+      confirmDialogCancel?.removeEventListener("click", onCancel);
+    };
+    pendingConfirmResolve = (value) => {
+      cleanup();
+      resolve(value);
+    };
+    const finish = (value) => {
+      const settle = pendingConfirmResolve;
+      pendingConfirmResolve = null;
+      closeActionModal();
+      settle?.(value);
+    };
+    const onConfirm = () => finish(true);
+    const onCancel = () => finish(false);
+
+    confirmDialogConfirm?.addEventListener("click", onConfirm);
+    confirmDialogCancel?.addEventListener("click", onCancel);
+
+    showModalCard(confirmDialog);
+  });
 }
 
 // Shows the import conflict dialog and resolves with the user's choice:
@@ -2007,6 +2076,11 @@ function closeActionModal() {
     pendingConflictResolve = null;
     resolve("cancel");
   }
+  if (pendingConfirmResolve) {
+    const resolve = pendingConfirmResolve;
+    pendingConfirmResolve = null;
+    resolve(false);
+  }
 
   hideModalCards();
   if (appModal) {
@@ -2016,11 +2090,13 @@ function closeActionModal() {
 }
 
 function hideModalCards() {
-  [trashDialog, anilistDialog, audibleDialog, imageDialog, conflictDialog].forEach((dialog) => {
-    if (dialog) {
-      dialog.hidden = true;
+  [trashDialog, anilistDialog, audibleDialog, imageDialog, conflictDialog, confirmDialog].forEach(
+    (dialog) => {
+      if (dialog) {
+        dialog.hidden = true;
+      }
     }
-  });
+  );
 }
 
 function showModalCard(dialog) {
@@ -3636,7 +3712,15 @@ function createRow(item, cells, selected, allowMultiSelect = false) {
     row.appendChild(span);
   });
 
+  if (allowMultiSelect) {
+    installInboxLongPressSelection(row, item);
+  }
+
   row.addEventListener("click", () => {
+    if (row.dataset.longPressFired === "true") {
+      row.dataset.longPressFired = "";
+      return;
+    }
     if (allowMultiSelect && isInboxMultiEdit) {
       toggleInboxItem(item);
       return;
@@ -3648,6 +3732,33 @@ function createRow(item, cells, selected, allowMultiSelect = false) {
   });
 
   return row;
+}
+
+// Long-press a row to enter inbox multi-select mode and select it. Subsequent
+// taps/clicks then toggle selection (like file managers on touch/trackpad).
+function installInboxLongPressSelection(element, item) {
+  let timer = null;
+  const clearTimer = () => {
+    if (timer) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  element.addEventListener("pointerdown", () => {
+    if (!item?.source_path) {
+      return;
+    }
+    clearTimer();
+    timer = window.setTimeout(() => {
+      isInboxMultiEdit = true;
+      element.dataset.longPressFired = "true";
+      toggleInboxItem(item);
+    }, 450);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach((eventName) => {
+    element.addEventListener(eventName, clearTimer);
+  });
 }
 
 function getSelectedItem() {
@@ -3735,9 +3846,13 @@ async function deleteSelectedInboxFiles() {
   });
 
   const count = paths.size;
-  const confirmed = window.confirm(
-    `${count} Datei(en) werden in den .trash-Ordner des Vaults verschoben. Fortfahren?`
-  );
+  const confirmed = await showConfirmDialog({
+    label: "Löschen",
+    title: `${count} Datei(en) löschen?`,
+    body: `Die ausgewählten Dateien werden in den .trash-Ordner des Vaults verschoben. Du kannst sie dort später wiederherstellen oder endgültig entfernen.`,
+    confirmLabel: "In .trash verschieben",
+    danger: true,
+  });
   if (!confirmed) {
     return;
   }
