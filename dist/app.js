@@ -14,6 +14,8 @@ const inboxRows = document.getElementById("inbox-rows");
 const inboxMultiToggle = document.getElementById("inbox-multi-toggle");
 const inboxDeleteSelected = document.getElementById("inbox-delete-selected");
 const reviewRows = document.getElementById("review-rows");
+const reviewMultiToggle = document.getElementById("review-multi-toggle");
+const reviewDeleteSelected = document.getElementById("review-delete-selected");
 const metricInbox = document.getElementById("metric-inbox");
 const metricReview = document.getElementById("metric-review");
 const metricDuplicates = document.getElementById("metric-duplicates");
@@ -281,6 +283,8 @@ let isMultiEdit = false;
 let multiSelectedKeys = new Set();
 let isInboxMultiEdit = false;
 let inboxSelectedKeys = new Set();
+let isReviewMultiEdit = false;
+let reviewSelectedKeys = new Set();
 let pendingConflictResolve = null;
 let pendingConfirmResolve = null;
 let pendingTrashSelection = null;
@@ -3996,13 +4000,45 @@ function renderAuditTrail() {
   });
 }
 
-function createRow(item, cells, selected, allowMultiSelect = false) {
+// Multi-select state accessor for the inbox/review row contexts.
+function multiCtx(context) {
+  if (context === "inbox") {
+    return {
+      get edit() {
+        return isInboxMultiEdit;
+      },
+      set edit(v) {
+        isInboxMultiEdit = v;
+      },
+      keys: inboxSelectedKeys,
+      sync: syncInboxMultiUi,
+      rerender: () => renderInboxRows(currentPlan?.items ?? []),
+    };
+  }
+  if (context === "review") {
+    return {
+      get edit() {
+        return isReviewMultiEdit;
+      },
+      set edit(v) {
+        isReviewMultiEdit = v;
+      },
+      keys: reviewSelectedKeys,
+      sync: syncReviewMultiUi,
+      rerender: () => renderReviewRows(currentPlan?.items ?? []),
+    };
+  }
+  return null;
+}
+
+function createRow(item, cells, selected, multiContext = null) {
+  const ctx = multiContext ? multiCtx(multiContext) : null;
   const row = document.createElement("button");
   row.type = "button";
   row.className = "table-row table-row-button";
   row.classList.toggle("is-selected", selected);
-  if (allowMultiSelect && isInboxMultiEdit) {
-    row.classList.toggle("is-bulk-selected", inboxSelectedKeys.has(item.source_path));
+  if (ctx && ctx.edit) {
+    row.classList.toggle("is-bulk-selected", ctx.keys.has(item.source_path));
   }
   row.dataset.sourcePath = item.source_path;
 
@@ -4014,8 +4050,8 @@ function createRow(item, cells, selected, allowMultiSelect = false) {
     row.appendChild(span);
   });
 
-  if (allowMultiSelect) {
-    installInboxLongPressSelection(row, item);
+  if (multiContext) {
+    installRowLongPressSelection(row, item, multiContext);
   }
 
   row.addEventListener("click", () => {
@@ -4023,8 +4059,8 @@ function createRow(item, cells, selected, allowMultiSelect = false) {
       row.dataset.longPressFired = "";
       return;
     }
-    if (allowMultiSelect && isInboxMultiEdit) {
-      toggleInboxItem(item);
+    if (ctx && ctx.edit) {
+      toggleMultiItem(multiContext, item);
       return;
     }
     selectedItemKey = item.source_path;
@@ -4036,9 +4072,21 @@ function createRow(item, cells, selected, allowMultiSelect = false) {
   return row;
 }
 
-// Long-press a row to enter inbox multi-select mode and select it. Subsequent
+function toggleMultiItem(context, item) {
+  const ctx = multiCtx(context);
+  if (!ctx) return;
+  if (ctx.keys.has(item.source_path)) {
+    ctx.keys.delete(item.source_path);
+  } else {
+    ctx.keys.add(item.source_path);
+  }
+  ctx.sync();
+  ctx.rerender();
+}
+
+// Long-press a row to enter multi-select mode and select it. Subsequent
 // taps/clicks then toggle selection (like file managers on touch/trackpad).
-function installInboxLongPressSelection(element, item) {
+function installRowLongPressSelection(element, item, context) {
   let timer = null;
   const clearTimer = () => {
     if (timer) {
@@ -4053,9 +4101,11 @@ function installInboxLongPressSelection(element, item) {
     }
     clearTimer();
     timer = window.setTimeout(() => {
-      isInboxMultiEdit = true;
+      const ctx = multiCtx(context);
+      if (!ctx) return;
+      ctx.edit = true;
       element.dataset.longPressFired = "true";
-      toggleInboxItem(item);
+      toggleMultiItem(context, item);
     }, 450);
   });
   ["pointerup", "pointerleave", "pointercancel"].forEach((eventName) => {
@@ -4081,7 +4131,12 @@ function renderInboxRows(items) {
 
   clearNode(inboxRows);
 
+  // Only files that physically live in the Inbox belong here. Items already
+  // moved into collections (Serien/, Hörbücher/, …) must not show up.
   items.forEach((item) => {
+    if (!String(item.source_path || "").startsWith("Inbox/")) {
+      return;
+    }
     // Audiobook sub-parts are hidden by default under their group representative.
     if (item.is_audiobook_part) {
       return;
@@ -4098,46 +4153,41 @@ function renderInboxRows(items) {
       : item.target_path ?? "Inbox/_review_queue";
     const displayName = item.title || basename(item.source_path);
     const displayTarget = target.startsWith("Inbox/") ? target : basename(target);
-    inboxRows.appendChild(createRow(item, [displayName, status, displayTarget], false, true));
+    inboxRows.appendChild(createRow(item, [displayName, status, displayTarget], false, "inbox"));
   });
 }
 
-function toggleInboxItem(item) {
-  if (inboxSelectedKeys.has(item.source_path)) {
-    inboxSelectedKeys.delete(item.source_path);
-  } else {
-    inboxSelectedKeys.add(item.source_path);
+function syncMultiUi(toggleBtn, deleteBtn, edit, keys) {
+  if (toggleBtn) {
+    toggleBtn.classList.toggle("is-active", edit);
+    toggleBtn.textContent = edit ? `Auswahl beenden (${keys.size})` : "Mehrfachauswahl";
   }
-  syncInboxMultiUi();
-  renderInboxRows(currentPlan?.items ?? []);
+  if (deleteBtn) {
+    deleteBtn.hidden = !edit;
+    deleteBtn.disabled = keys.size === 0;
+    deleteBtn.textContent = keys.size > 0 ? `Auswahl löschen (${keys.size})` : "Auswahl löschen";
+  }
 }
 
 function syncInboxMultiUi() {
-  if (inboxMultiToggle) {
-    inboxMultiToggle.classList.toggle("is-active", isInboxMultiEdit);
-    inboxMultiToggle.textContent = isInboxMultiEdit
-      ? `Auswahl beenden (${inboxSelectedKeys.size})`
-      : "Mehrfachauswahl";
-  }
-  if (inboxDeleteSelected) {
-    inboxDeleteSelected.hidden = !isInboxMultiEdit;
-    inboxDeleteSelected.disabled = inboxSelectedKeys.size === 0;
-    inboxDeleteSelected.textContent =
-      inboxSelectedKeys.size > 0
-        ? `Auswahl löschen (${inboxSelectedKeys.size})`
-        : "Auswahl löschen";
-  }
+  syncMultiUi(inboxMultiToggle, inboxDeleteSelected, isInboxMultiEdit, inboxSelectedKeys);
 }
 
-async function deleteSelectedInboxFiles() {
-  if (!inboxSelectedKeys.size) {
+function syncReviewMultiUi() {
+  syncMultiUi(reviewMultiToggle, reviewDeleteSelected, isReviewMultiEdit, reviewSelectedKeys);
+}
+
+// Moves the selected files (inbox or review context) to the vault .trash.
+async function deleteSelectedFiles(context) {
+  const ctx = multiCtx(context);
+  if (!ctx || !ctx.keys.size) {
     return;
   }
 
   // Expand audiobook group representatives to include all their parts so the
   // whole book is removed, not just the first file.
   const selectedItems = (currentPlan?.items ?? []).filter((item) =>
-    inboxSelectedKeys.has(item.source_path)
+    ctx.keys.has(item.source_path)
   );
   const paths = new Set();
   selectedItems.forEach((item) => {
@@ -4184,9 +4234,9 @@ async function deleteSelectedInboxFiles() {
   const deleted = Array.isArray(result.deleted) ? result.deleted : [];
   const skipped = Array.isArray(result.skipped) ? result.skipped : [];
   clearAppliedLocalState(deleted);
-  inboxSelectedKeys.clear();
-  isInboxMultiEdit = false;
-  syncInboxMultiUi();
+  ctx.keys.clear();
+  ctx.edit = false;
+  ctx.sync();
   updateAuditTrail(`${deleted.length} Datei(en) in den .trash verschoben.`);
 
   if (statusStrip) {
@@ -4217,7 +4267,12 @@ function renderReviewRows(items) {
       : "Prüfung";
     const action = item.steps[item.steps.length - 1] ?? "Prüfen";
     reviewRows.appendChild(
-      createRow(item, [item.title || basename(item.source_path), status, action], item.source_path === selectedItemKey)
+      createRow(
+        item,
+        [item.title || basename(item.source_path), status, action],
+        item.source_path === selectedItemKey,
+        "review"
+      )
     );
   });
 
@@ -6228,7 +6283,30 @@ if (inboxMultiToggle) {
 if (inboxDeleteSelected) {
   inboxDeleteSelected.addEventListener("click", async () => {
     try {
-      await deleteSelectedInboxFiles();
+      await deleteSelectedFiles("inbox");
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (reviewMultiToggle) {
+  reviewMultiToggle.addEventListener("click", () => {
+    isReviewMultiEdit = !isReviewMultiEdit;
+    if (!isReviewMultiEdit) {
+      reviewSelectedKeys.clear();
+    }
+    syncReviewMultiUi();
+    renderReviewRows(currentPlan?.items ?? []);
+  });
+}
+
+if (reviewDeleteSelected) {
+  reviewDeleteSelected.addEventListener("click", async () => {
+    try {
+      await deleteSelectedFiles("review");
     } catch (error) {
       if (statusStrip) {
         statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
