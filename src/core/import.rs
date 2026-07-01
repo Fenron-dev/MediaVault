@@ -225,11 +225,17 @@ impl ImportPlanner {
                     prompt: UserPrompt {
                         field_name: "media_type".to_string(),
                         message: "Kategorie oder Genre bestätigen".to_string(),
-                        options: MediaType::all().iter().map(|value| value.to_string()).collect(),
+                        options: MediaType::all()
+                            .iter()
+                            .map(|value| value.to_string())
+                            .collect(),
                     },
                 });
                 steps.push(PlannedImportStep::QueueReview {
-                    reason: format!("confidence below threshold: {:.2}", classification.confidence),
+                    reason: format!(
+                        "confidence below threshold: {:.2}",
+                        classification.confidence
+                    ),
                 });
             } else if classification.confidence < self.config.high_confidence_threshold {
                 steps.push(PlannedImportStep::QueueReview {
@@ -245,7 +251,10 @@ impl ImportPlanner {
                 prompt: UserPrompt {
                     field_name: "media_type".to_string(),
                     message: "Kategorie, Genre oder Name eintragen".to_string(),
-                    options: MediaType::all().iter().map(|value| value.to_string()).collect(),
+                    options: MediaType::all()
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect(),
                 },
             });
             steps.push(PlannedImportStep::QueueReview {

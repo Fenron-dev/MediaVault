@@ -17,3 +17,6 @@ target/
 *.secret
 *.key
 api_keys.toml
+
+# Claude Code local settings
+.claude/

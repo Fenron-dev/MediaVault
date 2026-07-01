@@ -55,8 +55,13 @@
           <button class="nav-item" data-tab="inbox">Inbox</button>
           <button class="nav-item" data-tab="review">Prüfung</button>
           <button class="nav-item" data-tab="collections">Sammlungen</button>
+          <button class="nav-item" data-tab="playlists">Wiedergabelisten</button>
           <button class="nav-item" data-tab="settings">Einstellungen</button>
         </nav>
+
+        <button class="action-button vault-switch-btn" id="vault-switch" title="Anderen Vault öffnen oder neuen erstellen">
+          ← Vault wechseln
+        </button>
 
         <section class="collection-sidebar" id="collection-sidebar" aria-label="Sammlungen">
           <button class="action-button collection-back" id="collection-back-dashboard">
@@ -78,6 +83,7 @@
           <div class="toolbar">
             <button class="action-button primary" id="run-demo">Vault scannen</button>
             <button class="action-button primary subtle" id="apply-import">Import anwenden</button>
+            <button class="action-button" id="open-vault-folder">Im Finder öffnen</button>
             <button class="action-button" data-tab="settings">Konfiguration</button>
           </div>
         </header>
@@ -106,7 +112,19 @@
             </article>
           </div>
 
-          <div class="panel-grid">
+          <!-- Dashboard: Weitermachen -->
+          <section class="dashboard-section" id="dashboard-resume-section" hidden>
+            <h3 class="dashboard-section-title">Weitermachen</h3>
+            <div class="dashboard-scroll" id="dashboard-resume-cards"></div>
+          </section>
+
+          <!-- Dashboard: Neu hinzugefügt -->
+          <section class="dashboard-section" id="dashboard-recent-section" hidden>
+            <h3 class="dashboard-section-title">Neu hinzugefügt</h3>
+            <div class="dashboard-scroll" id="dashboard-recent-cards"></div>
+          </section>
+
+          <div class="panel-grid" id="dashboard-empty-hint">
             <section class="panel">
               <p class="panel-label">Import-Pipeline</p>
               <h3>Vom Inbox-Ordner zur sauberen Struktur</h3>
@@ -135,6 +153,12 @@
             <section class="panel">
               <p class="panel-label">Inbox-Queue</p>
               <h3>Neue Dateien warten auf Zuordnung</h3>
+              <div class="toolbar">
+                <button class="action-button" id="inbox-multi-toggle">Mehrfachauswahl</button>
+                <button class="action-button danger" id="inbox-delete-selected" hidden>
+                  Auswahl löschen
+                </button>
+              </div>
               <div class="table">
                 <div class="table-row table-head">
                   <span>Datei</span>
@@ -153,6 +177,12 @@
               <section class="panel">
                 <p class="panel-label">Manuelle Klärung</p>
                 <h3>Wenn Inhalt oder Zusammengehörigkeit unklar sind</h3>
+                <div class="toolbar">
+                  <button class="action-button" id="review-multi-toggle">Mehrfachauswahl</button>
+                  <button class="action-button danger" id="review-delete-selected" hidden>
+                    Auswahl löschen
+                  </button>
+                </div>
                 <div class="table">
                   <div class="table-row table-head">
                     <span>Fall</span>
@@ -359,6 +389,47 @@
           </div>
         </section>
 
+        <section class="view" data-view="playlists">
+          <div class="playlists-layout">
+            <aside class="panel playlists-sidebar">
+              <div class="playlists-sidebar-header">
+                <p class="panel-label">Wiedergabelisten</p>
+                <button class="action-button primary compact" id="playlist-new">+ Neue Liste</button>
+              </div>
+              <div id="playlist-list"></div>
+            </aside>
+            <section class="panel playlists-detail">
+              <div id="playlist-detail-empty" class="playlists-empty-hint">
+                <p class="body-copy">Wähle eine Playlist aus oder erstelle eine neue.</p>
+              </div>
+              <div id="playlist-detail-content" hidden>
+                <div class="playlists-detail-header">
+                  <div>
+                    <p class="panel-label" id="playlist-detail-kind-label">Manuell</p>
+                    <h3 id="playlist-detail-title">—</h3>
+                    <p class="body-copy" id="playlist-detail-count">0 Einträge</p>
+                  </div>
+                  <div class="playlists-detail-actions">
+                    <button class="action-button primary" id="playlist-play-all" hidden>▶ Alle abspielen</button>
+                    <button class="action-button danger" id="playlist-delete">Löschen</button>
+                  </div>
+                </div>
+                <div class="table" id="playlist-items-table">
+                  <div class="table-row table-head">
+                    <span>Titel</span>
+                    <span>Typ</span>
+                    <span></span>
+                  </div>
+                  <div id="playlist-items-rows"></div>
+                </div>
+                <p class="body-copy playlist-items-hint" id="playlist-items-hint" hidden>
+                  Noch keine Einträge. Öffne eine Datei über die Sammlungen und füge sie hier hinzu.
+                </p>
+              </div>
+            </section>
+          </div>
+        </section>
+
         <section class="view" data-view="settings">
           <div class="panel-grid">
             <section class="panel">
@@ -423,6 +494,43 @@
                 </p>
               </div>
             </section>
+            <section class="panel">
+              <p class="panel-label">Audiobookshelf Sync</p>
+              <h3>ABS-Server verbinden</h3>
+              <p class="body-copy">
+                Fortschritt zwischen MediaVault und einem lokalen Audiobookshelf-Server synchronisieren.
+              </p>
+              <div class="stack">
+                <label class="field">
+                  <span>Server-URL</span>
+                  <input
+                    id="abs-url-input"
+                    type="text"
+                    placeholder="http://localhost:13378"
+                  />
+                </label>
+                <label class="field">
+                  <span>API-Key</span>
+                  <input
+                    id="abs-key-input"
+                    type="password"
+                    placeholder="ABS API-Schlüssel"
+                  />
+                </label>
+                <div class="toolbar">
+                  <button class="action-button primary" id="abs-test-btn">Verbindung testen</button>
+                  <button class="action-button" id="abs-libraries-btn">Bibliotheken laden</button>
+                </div>
+                <p class="field-hint" id="abs-feedback"></p>
+                <div id="abs-libraries-section" hidden>
+                  <label class="field">
+                    <span>Bibliothek</span>
+                    <select id="abs-library-select"></select>
+                  </label>
+                  <button class="action-button" id="abs-import-btn">Bibliothek importieren</button>
+                </div>
+              </div>
+            </section>
           </div>
         </section>
       </main>
@@ -441,6 +549,7 @@
             <button class="action-button icon-button" id="inspector-edit-toggle" aria-label="Bearbeiten">✎</button>
           </div>
           <div class="inspector-actions">
+            <button class="action-button primary" id="inspector-play" hidden>▶ Abspielen</button>
             <button class="action-button" id="inspector-fetch-metadata">AniList abrufen</button>
             <button class="action-button" id="inspector-not-duplicate">Kein Duplikat</button>
             <button class="action-button danger" id="inspector-trash">In Papierkorb</button>
@@ -525,6 +634,62 @@
         <div class="anilist-results" id="anilist-dialog-results"></div>
       </section>
 
+      <section class="panel modal-card anilist-modal" id="audible-dialog" hidden>
+        <p class="panel-label">Audible</p>
+        <h3 id="audible-dialog-title">Hörbuch suchen</h3>
+        <label class="field">
+          <span>Titel</span>
+          <input id="audible-dialog-query" type="text" />
+        </label>
+        <label class="field">
+          <span>Autor (optional)</span>
+          <input id="audible-dialog-author" type="text" placeholder="z.B. Stephen King" />
+        </label>
+        <div class="toolbar">
+          <button class="action-button primary" id="audible-dialog-search">Suchen</button>
+          <button class="action-button" id="audible-dialog-cancel">Abbrechen</button>
+        </div>
+        <div class="api-feedback" id="audible-dialog-feedback"></div>
+        <div class="anilist-results" id="audible-dialog-results"></div>
+      </section>
+
+      <section class="panel modal-card" id="confirm-dialog" hidden>
+        <p class="panel-label" id="confirm-dialog-label">Bestätigen</p>
+        <h3 id="confirm-dialog-title">Bist du sicher?</h3>
+        <p class="body-copy" id="confirm-dialog-body"></p>
+        <div class="toolbar">
+          <button class="action-button primary" id="confirm-dialog-confirm">Fortfahren</button>
+          <button class="action-button" id="confirm-dialog-cancel">Abbrechen</button>
+        </div>
+      </section>
+
+      <section class="panel modal-card" id="conflict-dialog" hidden>
+        <p class="panel-label">Konflikte</p>
+        <h3 id="conflict-dialog-title">Dateien existieren bereits</h3>
+        <p class="body-copy" id="conflict-dialog-body">
+          Am Zielort existieren bereits gleichnamige Dateien. Bitte wähle, wie verfahren werden soll.
+        </p>
+        <div class="conflict-list" id="conflict-dialog-list"></div>
+        <div class="toolbar">
+          <button class="action-button danger" id="conflict-dialog-overwrite">Überschreiben (alte löschen)</button>
+          <button class="action-button" id="conflict-dialog-skip">Konflikte überspringen</button>
+          <button class="action-button" id="conflict-dialog-cancel">Abbrechen</button>
+        </div>
+      </section>
+
+      <section class="panel modal-card" id="playlist-create-dialog" hidden>
+        <p class="panel-label">Neue Playlist</p>
+        <h3>Playlist erstellen</h3>
+        <label class="field">
+          <span>Name</span>
+          <input id="playlist-create-name" type="text" placeholder="z.B. Meine Lieblingsfilme" />
+        </label>
+        <div class="toolbar">
+          <button class="action-button primary" id="playlist-create-confirm">Erstellen</button>
+          <button class="action-button" id="playlist-create-cancel">Abbrechen</button>
+        </div>
+      </section>
+
       <section class="panel modal-card image-modal" id="image-dialog" hidden>
         <p class="panel-label">Vorschau</p>
         <h3 id="image-dialog-title">Bildansicht</h3>
@@ -535,6 +700,78 @@
           <button class="action-button" id="image-dialog-close">Schließen</button>
         </div>
       </section>
+
+    </section>
+
+    <!-- Media player — fullscreen overlay, lives outside app-modal so it is
+         not affected when app-modal is hidden to dismiss other dialogs. -->
+    <section class="player-modal" id="player-dialog" hidden>
+      <div class="player-header">
+        <span class="player-title" id="player-title">-</span>
+        <button class="action-button icon-button" id="player-close" title="Schließen">✕</button>
+      </div>
+
+      <!-- Video stage (hidden for audio-only) -->
+      <div class="player-stage" id="player-stage">
+        <video id="player-video" preload="metadata"></video>
+      </div>
+
+      <!-- PDF stage (shown for .pdf files) -->
+      <div class="player-pdf-stage" id="player-pdf-stage" hidden>
+        <iframe id="player-pdf-frame" title="PDF-Ansicht"></iframe>
+      </div>
+
+      <!-- Manga/image stage (shown for image sequences) -->
+      <div class="player-manga-stage" id="player-manga-stage" hidden>
+        <button class="action-button icon-button player-manga-nav" id="player-manga-prev" title="Zurück">‹</button>
+        <img id="player-manga-img" alt="Seite" />
+        <button class="action-button icon-button player-manga-nav" id="player-manga-next" title="Weiter">›</button>
+        <div class="player-manga-counter" id="player-manga-counter">1 / 1</div>
+      </div>
+
+      <!-- Audio-only placeholder (shown instead of stage for audio) -->
+      <div class="player-audio-art" id="player-audio-art" hidden>
+        <img id="player-cover-art" alt="" />
+      </div>
+
+      <!-- Hidden audio element for audio-only files -->
+      <audio id="player-audio" preload="metadata"></audio>
+
+      <!-- Subtitle track: auto-loaded when .srt companion found -->
+      <div class="player-subtitle-display" id="player-subtitle-display"></div>
+
+      <div class="player-controls">
+        <div class="player-progress-row">
+          <span class="player-time" id="player-time-current">0:00</span>
+          <input class="player-seek" type="range" id="player-seek" min="0" max="1000" value="0" step="1" />
+          <span class="player-time" id="player-time-total">—:——</span>
+        </div>
+        <div class="player-buttons-row">
+          <button class="action-button icon-button player-btn-skip" id="player-skip-back" title="−10 Sek.">⏮</button>
+          <button class="action-button icon-button player-btn-main" id="player-play-pause" title="Wiedergabe">▶</button>
+          <button class="action-button icon-button player-btn-skip" id="player-skip-fwd" title="+30 Sek.">⏭</button>
+          <select class="action-button player-speed" id="player-speed" title="Geschwindigkeit">
+            <option value="0.5">0.5×</option>
+            <option value="0.75">0.75×</option>
+            <option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="2">2×</option>
+          </select>
+          <select class="action-button player-sleep" id="player-sleep-timer" title="Sleep-Timer">
+            <option value="0">Kein Timer</option>
+            <option value="15">15 Min.</option>
+            <option value="30">30 Min.</option>
+            <option value="45">45 Min.</option>
+            <option value="60">60 Min.</option>
+            <option value="90">90 Min.</option>
+          </select>
+          <select class="action-button player-subtitle" id="player-subtitle-select" title="Untertitel" hidden>
+            <option value="">Untertitel: Aus</option>
+          </select>
+          <button class="action-button" id="player-open-system" title="Mit System-App öffnen">Mit System öffnen</button>
+        </div>
+      </div>
     </section>
 
     <script src="/app.js" defer></script>

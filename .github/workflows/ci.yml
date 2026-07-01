@@ -32,8 +32,8 @@ jobs:
             librsvg2-dev \
             wget
 
-      - name: Normalize formatting
-        run: cargo fmt --all
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       - name: Compile check
         run: cargo check --all-targets
@@ -57,16 +57,45 @@ jobs:
       - name: Generate bundle icons
         run: cargo tauri icon icons/icon.png
 
-      - name: Build bundled macOS app
-        run: cargo tauri build --bundles dmg
-
-      - name: List bundled outputs
+      - name: Import Apple certificate
+        if: ${{ env.APPLE_CERTIFICATE != '' }}
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          find target/release/bundle -maxdepth 3 -print | sort
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          rm certificate.p12
 
-      - name: Upload bundled macOS DMG
+      - name: Build macOS app bundle
+        run: cargo tauri build --bundles app
+
+      - name: Ad-hoc sign app bundle
+        # Ad-hoc signing ("-") prevents the "app is damaged" Gatekeeper error.
+        # Without a Developer ID, macOS will show "unidentified developer" instead,
+        # which users can bypass with right-click → Open (or xattr -cr).
+        run: |
+          codesign --force --deep --sign - \
+            target/release/bundle/macos/MediaVault.app
+
+      - name: Create DMG
+        run: |
+          hdiutil create \
+            -volname "MediaVault" \
+            -srcfolder target/release/bundle/macos/MediaVault.app \
+            -ov -format UDZO \
+            MediaVault.dmg
+
+      - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
         with:
           name: mediavault-macos
-          path: target/release/bundle/dmg/*.dmg
+          path: MediaVault.dmg
           if-no-files-found: error

@@ -352,7 +352,12 @@ impl AniListClient {
     }
 
     /// Builds a JSON request body for AniList anime search suggestions.
-    pub fn build_search_results_query(search: &str, adult: bool, page: u32, per_page: u32) -> String {
+    pub fn build_search_results_query(
+        search: &str,
+        adult: bool,
+        page: u32,
+        per_page: u32,
+    ) -> String {
         serde_json::json!({
             "query": ANILIST_MEDIA_SEARCH_QUERY,
             "variables": {
@@ -366,11 +371,7 @@ impl AniListClient {
     }
 
     /// Searches AniList for an anime title and returns the best match.
-    pub fn search_anime(
-        &self,
-        search: &str,
-        adult: bool,
-    ) -> Result<Option<AniListAnimeMetadata>> {
+    pub fn search_anime(&self, search: &str, adult: bool) -> Result<Option<AniListAnimeMetadata>> {
         Ok(self
             .search_anime_candidates(search, adult, 1)?
             .into_iter()
@@ -437,7 +438,7 @@ impl AniListClient {
 }
 
 /// A normalized AniList anime result.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AniListAnimeMetadata {
     /// AniList media ID.
     pub anilist_id: u32,
@@ -550,7 +551,7 @@ impl AniListAnimeMetadata {
 }
 
 /// Date value returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListDate {
     /// Year component.
     pub year: Option<u16>,
@@ -561,7 +562,7 @@ pub struct AniListDate {
 }
 
 /// Trailer metadata returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListTrailer {
     /// Provider-local trailer id.
     pub id: Option<String>,
@@ -572,7 +573,7 @@ pub struct AniListTrailer {
 }
 
 /// AniList tag metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListTag {
     /// Tag name.
     pub name: String,
@@ -587,7 +588,7 @@ pub struct AniListTag {
 }
 
 /// Studio metadata returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListStudio {
     /// AniList studio id.
     pub id: u32,
@@ -600,7 +601,7 @@ pub struct AniListStudio {
 }
 
 /// Related media metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListRelation {
     /// Relation type.
     pub relation_type: Option<String>,
@@ -623,7 +624,7 @@ pub struct AniListRelation {
 }
 
 /// Character and Japanese voice actor credit.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListCharacterCredit {
     /// Character role.
     pub role: Option<String>,
@@ -638,7 +639,7 @@ pub struct AniListCharacterCredit {
 }
 
 /// Staff credit metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListStaffCredit {
     /// Staff role.
     pub role: Option<String>,
@@ -647,7 +648,7 @@ pub struct AniListStaffCredit {
 }
 
 /// Person metadata used for staff and voice actors.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListPerson {
     /// AniList person id.
     pub id: u32,
@@ -662,7 +663,7 @@ pub struct AniListPerson {
 }
 
 /// Review metadata returned by AniList.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AniListReview {
     /// AniList review id.
     pub id: u32,
@@ -676,18 +677,6 @@ pub struct AniListReview {
     pub site_url: Option<String>,
     /// Reviewer name.
     pub user_name: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AniListGraphQlResponse {
-    data: Option<AniListGraphQlData>,
-    errors: Option<Vec<AniListGraphQlError>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AniListGraphQlData {
-    #[serde(rename = "Media")]
-    media: Option<AniListGraphQlMedia>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -972,7 +961,13 @@ impl From<AniListGraphQlMedia> for AniListAnimeMetadata {
                 .unwrap_or_default(),
             relations: media
                 .relations
-                .map(|connection| connection.edges.into_iter().map(AniListRelation::from).collect())
+                .map(|connection| {
+                    connection
+                        .edges
+                        .into_iter()
+                        .map(AniListRelation::from)
+                        .collect()
+                })
                 .unwrap_or_default(),
             characters: media
                 .characters
@@ -1060,7 +1055,11 @@ impl From<AniListGraphQlRelationEdge> for AniListRelation {
             media_type: edge.node.media_type,
             format: edge.node.format,
             site_url: edge.node.site_url,
-            title: edge.node.title.display_title().map(|value| value.to_string()),
+            title: edge
+                .node
+                .title
+                .display_title()
+                .map(|value| value.to_string()),
             cover_image_medium: edge
                 .node
                 .cover_image
@@ -1090,7 +1089,11 @@ impl From<AniListGraphQlCharacterEdge> for AniListCharacterCredit {
                 .node
                 .image
                 .and_then(|image| image.large.or(image.medium)),
-            voice_actors: edge.voice_actors.into_iter().map(AniListPerson::from).collect(),
+            voice_actors: edge
+                .voice_actors
+                .into_iter()
+                .map(AniListPerson::from)
+                .collect(),
         }
     }
 }

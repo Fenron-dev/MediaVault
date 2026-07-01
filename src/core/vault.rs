@@ -10,6 +10,9 @@ const SYSTEM_DIR: &str = ".mediavault";
 const INBOX_DIR: &str = "Inbox";
 const REVIEW_QUEUE_DIR: &str = "_review_queue";
 const COVERS_DIR: &str = "covers";
+const THUMBNAILS_DIR: &str = "thumbnails";
+const ASSETS_DIR: &str = "assets";
+const PROGRESS_DIR: &str = "progress";
 
 /// A normalized path that is guaranteed to stay inside the vault.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -139,7 +142,32 @@ impl Vault {
 
     /// Returns the cover storage directory inside the vault.
     pub fn covers_dir(&self) -> PathBuf {
-        self.root.join(SYSTEM_DIR).join(COVERS_DIR)
+        self.system_dir().join(COVERS_DIR)
+    }
+
+    /// Returns the thumbnail cache directory (app-internal, 256 px grid cache).
+    pub fn thumbnails_dir(&self) -> PathBuf {
+        self.system_dir().join(THUMBNAILS_DIR)
+    }
+
+    /// Returns the per-media assets directory root (backdrops, crew photos, banners).
+    pub fn assets_dir(&self) -> PathBuf {
+        self.system_dir().join(ASSETS_DIR)
+    }
+
+    /// Returns the assets directory for a specific media item.
+    pub fn asset_dir_for(&self, media_id: &str) -> PathBuf {
+        self.assets_dir().join(media_id)
+    }
+
+    /// Returns the progress store directory for resume data.
+    pub fn progress_dir(&self) -> PathBuf {
+        self.system_dir().join(PROGRESS_DIR)
+    }
+
+    /// Returns the playlists directory.
+    pub fn playlists_dir(&self) -> PathBuf {
+        self.system_dir().join("playlists")
     }
 
     /// Resolves an absolute path into a vault-relative path.

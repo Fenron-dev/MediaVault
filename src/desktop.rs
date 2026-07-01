@@ -1,16 +1,26 @@
 //! Desktop shell bootstrap for MediaVault.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
+use crate::api::audible::{AudibleClient, AudibleSearchResponse};
+use crate::api::audiobookshelf::AbsClient;
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
+};
+use crate::core::playlist::{
+    delete_playlist, list_playlists, load_cursor, load_playlist, save_cursor, save_playlist,
+    Playlist, PlaylistCursor,
+};
+use crate::core::progress::{
+    delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
 };
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
@@ -22,6 +32,57 @@ use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
 const PROTOCOL_SCHEME: &str = "mediavault";
 const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
 const LEGACY_SIDECAR_SUFFIX: &str = ".mediashelf.yaml";
+const ANILIST_CACHE_FILE: &str = "anilist_cache.json";
+
+const INBOX_SUBFOLDERS: &[&str] = &[
+    "Unsortiert",
+    "Anime/TV",
+    "Anime/Filme",
+    "Serien",
+    "Filme",
+    "Musik",
+    "Bücher",
+    "Hörbücher",
+    "Manga",
+    "Comics",
+    "TTRPG",
+    "Games",
+];
+
+type AniListCacheMap = HashMap<String, AniListAnimeMetadata>;
+
+fn anilist_cache_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".mediavault")
+            .join(ANILIST_CACHE_FILE),
+    )
+}
+
+fn load_anilist_cache() -> AniListCacheMap {
+    let path = match anilist_cache_path() {
+        Some(p) => p,
+        None => return HashMap::new(),
+    };
+    let raw = match fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn save_anilist_cache(cache: &AniListCacheMap) {
+    let Some(path) = anilist_cache_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(body) = serde_json::to_string(cache) {
+        let _ = fs::write(path, body);
+    }
+}
 
 const INDEX_HTML: &str = include_str!("../dist/index.html");
 const APP_JS: &str = include_str!("../dist/app.js");
@@ -43,18 +104,20 @@ pub(crate) fn run() -> Result<()> {
                     APP_JS,
                 ),
                 "/styles.css" => response(StatusCode::OK, "text/css; charset=utf-8", STYLES_CSS),
-                "/api/vault-plan" => json_response(
-                    StatusCode::OK,
-                    &build_plan_response(request.uri().query()),
-                ),
+                "/api/vault-plan" => {
+                    json_response(StatusCode::OK, &build_plan_response(request.uri().query()))
+                }
                 "/api/anilist-search" => json_response(
                     StatusCode::OK,
                     &build_anilist_search_response(request.uri().query()),
                 ),
-                "/api/select-folder" => json_response(
+                "/api/audible-search" => json_response(
                     StatusCode::OK,
-                    &build_select_folder_response(),
+                    &build_audible_search_response(request.uri().query()),
                 ),
+                "/api/select-folder" => {
+                    json_response(StatusCode::OK, &build_select_folder_response())
+                }
                 "/api/create-vault" => json_response(
                     StatusCode::OK,
                     &build_create_vault_response(request.uri().query()),
@@ -63,16 +126,108 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_vault_root_response(request.uri().query()),
                 ),
-                "/api/media-file" => build_media_file_response(request.uri().query()),
-                "/api/apply-import" => json_response(
-                    StatusCode::OK,
-                    &build_apply_import_response(request.body()),
-                ),
+                "/api/media-file" => {
+                    let range = request
+                        .headers()
+                        .get("range")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_string());
+                    build_media_file_response(request.uri().query(), range.as_deref())
+                }
+                "/api/apply-import" => {
+                    json_response(StatusCode::OK, &build_apply_import_response(request.body()))
+                }
                 "/api/save-sidecars" => json_response(
                     StatusCode::OK,
                     &build_save_sidecars_response(request.body()),
                 ),
-                _ => response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "Not Found"),
+                "/api/delete-files" => {
+                    json_response(StatusCode::OK, &build_delete_files_response(request.body()))
+                }
+                "/api/cleanup-vault" => json_response(
+                    StatusCode::OK,
+                    &build_cleanup_vault_response(request.uri().query()),
+                ),
+                "/api/progress/save" => json_response(
+                    StatusCode::OK,
+                    &build_save_progress_response(request.body()),
+                ),
+                "/api/progress/load" => json_response(
+                    StatusCode::OK,
+                    &build_load_progress_response(request.uri().query()),
+                ),
+                "/api/progress/delete" => json_response(
+                    StatusCode::OK,
+                    &build_delete_progress_response(request.body()),
+                ),
+                "/api/progress/list" => json_response(
+                    StatusCode::OK,
+                    &build_list_progress_response(request.uri().query()),
+                ),
+                "/api/open-external" => json_response(
+                    StatusCode::OK,
+                    &build_open_external_response(request.uri().query()),
+                ),
+                "/api/open-vault-root" => json_response(
+                    StatusCode::OK,
+                    &build_open_vault_root_response(request.uri().query()),
+                ),
+                "/api/playlist/list" => json_response(
+                    StatusCode::OK,
+                    &build_list_playlists_response(request.uri().query()),
+                ),
+                "/api/playlist/get" => json_response(
+                    StatusCode::OK,
+                    &build_get_playlist_response(request.uri().query()),
+                ),
+                "/api/playlist/save" => json_response(
+                    StatusCode::OK,
+                    &build_save_playlist_response(request.body()),
+                ),
+                "/api/playlist/delete" => json_response(
+                    StatusCode::OK,
+                    &build_delete_playlist_response(request.body()),
+                ),
+                "/api/playlist/cursor/save" => {
+                    json_response(StatusCode::OK, &build_save_cursor_response(request.body()))
+                }
+                "/api/playlist/cursor/load" => json_response(
+                    StatusCode::OK,
+                    &build_load_cursor_response(request.uri().query()),
+                ),
+                "/api/abs/test" => json_response(
+                    StatusCode::OK,
+                    &build_abs_test_response(request.uri().query()),
+                ),
+                "/api/abs/libraries" => json_response(
+                    StatusCode::OK,
+                    &build_abs_libraries_response(request.uri().query()),
+                ),
+                "/api/abs/library-items" => json_response(
+                    StatusCode::OK,
+                    &build_abs_library_items_response(request.uri().query()),
+                ),
+                "/api/abs/sync-progress" => json_response(
+                    StatusCode::OK,
+                    &build_abs_sync_progress_response(request.body()),
+                ),
+                "/api/recent-items" => json_response(
+                    StatusCode::OK,
+                    &build_recent_items_response(request.uri().query()),
+                ),
+                "/api/in-progress" => json_response(
+                    StatusCode::OK,
+                    &build_in_progress_response(request.uri().query()),
+                ),
+                "/api/list-subtitles" => json_response(
+                    StatusCode::OK,
+                    &build_list_subtitles_response(request.uri().query()),
+                ),
+                _ => response(
+                    StatusCode::NOT_FOUND,
+                    "text/plain; charset=utf-8",
+                    "Not Found",
+                ),
             }
         })
         .run(tauri::generate_context!())
@@ -104,9 +259,13 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8
 
 fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
     let root_override = query.and_then(|query| extract_query_value(query, "root"));
+    let refresh = query
+        .and_then(|query| extract_query_value(query, "refresh"))
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     if let Some(root_override) = root_override {
-        match build_vault_plan(Some(&root_override)) {
+        match build_vault_plan(Some(&root_override), refresh) {
             Ok(plan) => return plan,
             Err(error) => {
                 return build_error_plan(
@@ -118,20 +277,44 @@ fn build_plan_response(query: Option<&str>) -> DemoPlanResponse {
     }
 
     match resolve_vault_root(None) {
-        Ok(Some(vault_root)) => match build_vault_plan_with_root(vault_root) {
+        Ok(Some(vault_root)) => match build_vault_plan_with_root(vault_root, refresh) {
             Ok(plan) => plan,
-            Err(error) => build_error_plan(
-                format!("Vault konnte nicht gescannt werden: {error}"),
-                None,
-            ),
+            Err(error) => {
+                build_error_plan(format!("Vault konnte nicht gescannt werden: {error}"), None)
+            }
         },
         Ok(None) => build_demo_plan(Some(
             "Kein Vault gefunden, daher Demo-Daten angezeigt.".to_string(),
         )),
-        Err(error) => build_error_plan(
-            format!("Vault-Erkennung fehlgeschlagen: {error}"),
-            None,
-        ),
+        Err(error) => build_error_plan(format!("Vault-Erkennung fehlgeschlagen: {error}"), None),
+    }
+}
+
+fn build_audible_search_response(query: Option<&str>) -> AudibleSearchResponse {
+    let Some(query) = query else {
+        return AudibleSearchResponse::error("missing query".to_string());
+    };
+    let Some(title) = extract_query_value(query, "title") else {
+        return AudibleSearchResponse::error("missing title".to_string());
+    };
+
+    let author = extract_query_value(query, "author");
+    let limit = extract_query_value(query, "limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(8);
+
+    let client = match AudibleClient::new() {
+        Ok(c) => c,
+        Err(e) => return AudibleSearchResponse::error(e.to_string()),
+    };
+
+    match client.search(&title, author.as_deref(), limit) {
+        Ok(results) => AudibleSearchResponse {
+            metadata: results.first().cloned(),
+            results,
+            error: None,
+        },
+        Err(error) => AudibleSearchResponse::error(error.to_string()),
     }
 }
 
@@ -222,7 +405,7 @@ fn build_select_folder_response() -> SelectFolderResponse {
     }
 }
 
-fn build_media_file_response(query: Option<&str>) -> Response<Vec<u8>> {
+fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Response<Vec<u8>> {
     let Some(query) = query else {
         return response(
             StatusCode::BAD_REQUEST,
@@ -291,18 +474,106 @@ fn build_media_file_response(query: Option<&str>) -> Response<Vec<u8>> {
         }
     };
 
+    let file_size = match fs::metadata(&absolute) {
+        Ok(m) => m.len(),
+        Err(error) => {
+            return response(
+                StatusCode::NOT_FOUND,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            )
+        }
+    };
+
+    let content_type = media_content_type(&absolute);
+
+    // Serve a partial range when the browser requests one (required for video seeking).
+    if let Some(range_str) = range.and_then(|r| r.strip_prefix("bytes=")) {
+        let (start, end) = parse_byte_range(range_str, file_size);
+
+        if start >= file_size || end >= file_size || start > end {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header("Content-Range", format!("bytes */{file_size}"))
+                .body(Vec::new())
+                .expect("range error response should build");
+        }
+
+        let length = end - start + 1;
+
+        let body = match read_file_range(&absolute, start, length) {
+            Ok(b) => b,
+            Err(error) => {
+                return response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "text/plain; charset=utf-8",
+                    &error.to_string(),
+                )
+            }
+        };
+
+        return Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(CONTENT_TYPE, content_type)
+            .header("Content-Range", format!("bytes {start}-{end}/{file_size}"))
+            .header("Content-Length", length.to_string())
+            .header("Accept-Ranges", "bytes")
+            .body(body)
+            .expect("partial content response should build");
+    }
+
+    // No Range header — serve the full file, but advertise range support so the
+    // browser knows it can seek without a full reload.
     match fs::read(&absolute) {
         Ok(body) => Response::builder()
             .status(StatusCode::OK)
-            .header(CONTENT_TYPE, media_content_type(&absolute))
+            .header(CONTENT_TYPE, content_type)
+            .header("Content-Length", file_size.to_string())
+            .header("Accept-Ranges", "bytes")
             .body(body)
-            .expect("media response construction should succeed"),
+            .expect("media response should build"),
         Err(error) => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
             &error.to_string(),
         ),
     }
+}
+
+/// Parses a `bytes=start-end` range spec and clamps both ends to `[0, file_size - 1]`.
+fn parse_byte_range(range_str: &str, file_size: u64) -> (u64, u64) {
+    let last = file_size.saturating_sub(1);
+
+    // Suffix form: "-500" means the last 500 bytes.
+    if let Some(suffix) = range_str.strip_prefix('-') {
+        if let Ok(n) = suffix.parse::<u64>() {
+            return (file_size.saturating_sub(n), last);
+        }
+        return (0, last);
+    }
+
+    let mut parts = range_str.splitn(2, '-');
+    let start = parts
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let end = parts
+        .next()
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(last)
+        .min(last);
+
+    (start, end)
+}
+
+/// Reads exactly `length` bytes from `path` starting at byte offset `start`.
+fn read_file_range(path: &Path, start: u64, length: u64) -> std::io::Result<Vec<u8>> {
+    let mut file = fs::File::open(path)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut buf = vec![0u8; length as usize];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
 }
 
 fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
@@ -336,6 +607,28 @@ fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
         }
     };
 
+    // Dry-run: report conflicts (existing targets) without moving anything.
+    if request.dry_run {
+        let mut conflicts = Vec::new();
+        let mut skipped = Vec::new();
+        for item in &request.items {
+            match detect_import_conflict(&vault, item) {
+                Ok(Some(conflict)) => conflicts.push(conflict),
+                Ok(None) => {}
+                Err(error) => skipped.push(ApplyImportSkipped {
+                    source_path: item.source_path.clone(),
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        return ApplyImportResponse {
+            applied: Vec::new(),
+            skipped,
+            conflicts,
+            error: None,
+        };
+    }
+
     let mut applied = Vec::new();
     let mut skipped = Vec::new();
 
@@ -354,8 +647,45 @@ fn build_apply_import_response(body: &[u8]) -> ApplyImportResponse {
     ApplyImportResponse {
         applied,
         skipped,
+        conflicts: Vec::new(),
         error: None,
     }
+}
+
+/// Checks whether applying `item` would overwrite an existing target file.
+///
+/// Returns `Ok(Some(conflict))` when the resolved target exists and differs from
+/// the source, `Ok(None)` when there is no conflict, and `Err` when the source
+/// is missing or paths are invalid.
+fn detect_import_conflict(
+    vault: &Vault,
+    item: &ApplyImportItem,
+) -> Result<Option<ApplyImportConflict>> {
+    let source_relative = RelativePath::new(&item.source_path)?;
+    let target_relative = RelativePath::new(&item.target_path)?;
+    let source_absolute = vault.resolve(source_relative.as_path())?;
+    let target_absolute = vault.resolve(target_relative.as_path())?;
+
+    if !source_absolute.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Quelldatei nicht gefunden: {}",
+            source_relative
+        )));
+    }
+
+    if source_absolute == target_absolute || !target_absolute.exists() {
+        return Ok(None);
+    }
+
+    let source_size = fs::metadata(&source_absolute).map(|m| m.len()).unwrap_or(0);
+    let target_size = fs::metadata(&target_absolute).map(|m| m.len()).unwrap_or(0);
+
+    Ok(Some(ApplyImportConflict {
+        source_path: item.source_path.clone(),
+        target_path: item.target_path.clone(),
+        target_size,
+        source_size,
+    }))
 }
 
 fn build_save_sidecars_response(body: &[u8]) -> SaveSidecarsResponse {
@@ -395,6 +725,273 @@ fn build_save_sidecars_response(body: &[u8]) -> SaveSidecarsResponse {
     }
 }
 
+fn build_delete_files_response(body: &[u8]) -> DeleteFilesResponse {
+    let request: DeleteFilesRequest = match serde_json::from_slice(body) {
+        Ok(request) => request,
+        Err(error) => return DeleteFilesResponse::error(format!("ungültiger Request: {error}")),
+    };
+
+    let vault_root = match resolve_vault_root(request.vault_root.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => return DeleteFilesResponse::error("kein Vault ausgewählt".to_string()),
+        Err(error) => return DeleteFilesResponse::error(error.to_string()),
+    };
+
+    let vault = match Vault::new(&vault_root) {
+        Ok(vault) => vault,
+        Err(error) => return DeleteFilesResponse::error(error.to_string()),
+    };
+
+    let mut deleted = Vec::new();
+    let mut skipped = Vec::new();
+
+    for path in request.paths {
+        match delete_vault_file(&vault, &path, request.permanent) {
+            Ok(()) => deleted.push(path),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: path,
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    DeleteFilesResponse {
+        deleted,
+        skipped,
+        error: None,
+    }
+}
+
+/// Deletes a single vault file plus its sidecar.
+///
+/// When `permanent` is false the file is moved into the vault `.trash` folder
+/// (reversible). When true it is removed from disk. The accompanying
+/// `.mediavault.yaml` sidecar, if present, is removed alongside.
+fn delete_vault_file(vault: &Vault, path: &str, permanent: bool) -> Result<()> {
+    let relative = RelativePath::new(path)?;
+    let absolute = vault.resolve(relative.as_path())?;
+
+    if !absolute.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Datei nicht gefunden: {relative}"
+        )));
+    }
+
+    if permanent {
+        fs::remove_file(&absolute).map_err(VaultError::from)?;
+    } else {
+        // Move to .trash/<original relative path> so structure is preserved and
+        // name collisions across folders are avoided.
+        let trash_target = vault.root().join(".trash").join(relative.as_path());
+        if let Some(parent) = trash_target.parent() {
+            fs::create_dir_all(parent).map_err(VaultError::from)?;
+        }
+        move_file_with_fallback(&absolute, &trash_target)?;
+    }
+
+    // Remove the sidecar if it exists (best effort — never fail the delete).
+    if let Ok(sidecar_relative) = sidecar_path_for(&relative) {
+        if let Ok(sidecar_absolute) = vault.resolve(sidecar_relative.as_path()) {
+            let _ = fs::remove_file(sidecar_absolute);
+        }
+    }
+
+    prune_empty_inbox_dirs(vault, absolute.parent());
+    Ok(())
+}
+
+fn build_cleanup_vault_response(query: Option<&str>) -> CleanupVaultResponse {
+    let root_override = query.and_then(|query| extract_query_value(query, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => {
+            return CleanupVaultResponse::error("Kein Vault geöffnet.".to_string());
+        }
+        Err(error) => return CleanupVaultResponse::error(error.to_string()),
+    };
+    let vault = match Vault::new(&vault_root) {
+        Ok(vault) => vault,
+        Err(error) => return CleanupVaultResponse::error(error.to_string()),
+    };
+    match run_vault_cleanup(&vault) {
+        Ok(response) => response,
+        Err(error) => CleanupVaultResponse::error(error.to_string()),
+    }
+}
+
+/// Scans the vault for maintenance issues: orphaned sidecars, empty folders, and
+/// thumbnail/asset entries that no longer have a corresponding media file.
+fn run_vault_cleanup(vault: &Vault) -> Result<CleanupVaultResponse> {
+    let mut issues: Vec<CleanupIssue> = Vec::new();
+
+    // --- Orphaned .mediavault.yaml sidecars ---
+    find_orphaned_sidecars(vault, vault.root(), &mut issues)?;
+
+    // --- Empty directories (excluding system and inbox) ---
+    find_empty_directories(vault, vault.root(), &mut issues)?;
+
+    // --- Orphaned thumbnail cache files ---
+    if vault.thumbnails_dir().exists() {
+        for entry in fs::read_dir(vault.thumbnails_dir()).map_err(VaultError::from)? {
+            let entry = entry.map_err(VaultError::from)?;
+            let path = entry.path();
+            if path.extension().map(|e| e == "jpg").unwrap_or(false) {
+                // Thumbnails are named by content hash; we can't re-link them here without
+                // the DB.  Flag them as potentially stale for manual review.
+                issues.push(CleanupIssue {
+                    kind: "stale_thumbnail".to_string(),
+                    path: path.display().to_string(),
+                    description: "Thumbnail ohne zugehörigen Eintrag (DB nicht verfügbar)"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    let summary = CleanupSummary {
+        orphaned_sidecars: issues
+            .iter()
+            .filter(|i| i.kind == "orphaned_sidecar")
+            .count(),
+        empty_directories: issues
+            .iter()
+            .filter(|i| i.kind == "empty_directory")
+            .count(),
+        stale_thumbnails: issues
+            .iter()
+            .filter(|i| i.kind == "stale_thumbnail")
+            .count(),
+    };
+
+    Ok(CleanupVaultResponse {
+        issues,
+        summary,
+        error: None,
+    })
+}
+
+fn find_orphaned_sidecars(
+    vault: &Vault,
+    directory: &Path,
+    issues: &mut Vec<CleanupIssue>,
+) -> Result<()> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Ok(());
+    };
+    for entry in entries {
+        let entry = entry.map_err(VaultError::from)?;
+        let path = entry.path();
+        if path.is_dir() {
+            if should_skip_scanned_directory(vault, &path) {
+                continue;
+            }
+            find_orphaned_sidecars(vault, &path, issues)?;
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if name.ends_with(".mediavault.yaml") || name.ends_with(LEGACY_SIDECAR_SUFFIX) {
+            // Derive the expected media filename by stripping the sidecar suffix.
+            let media_path = if name.ends_with(".mediavault.yaml") {
+                path.with_file_name(name.trim_end_matches(".mediavault.yaml"))
+            } else {
+                path.with_file_name(name.trim_end_matches(LEGACY_SIDECAR_SUFFIX))
+            };
+            if !media_path.exists() {
+                issues.push(CleanupIssue {
+                    kind: "orphaned_sidecar".to_string(),
+                    path: path.display().to_string(),
+                    description: format!("Sidecar ohne Mediendatei: {}", media_path.display()),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_empty_directories(
+    vault: &Vault,
+    directory: &Path,
+    issues: &mut Vec<CleanupIssue>,
+) -> Result<()> {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return Ok(());
+    };
+    let mut has_content = false;
+
+    for entry in entries {
+        let entry = entry.map_err(VaultError::from)?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            if should_skip_scanned_directory(vault, &path)
+                || path == vault.inbox_dir()
+                || path.starts_with(vault.inbox_dir())
+            {
+                has_content = true; // inbox subfolders are intentionally empty initially
+                continue;
+            }
+            find_empty_directories(vault, &path, issues)?;
+            has_content = true;
+        } else if path.is_file() {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !is_hidden_system_entry(name) {
+                has_content = true;
+            }
+        }
+    }
+
+    if !has_content && directory != vault.root() {
+        issues.push(CleanupIssue {
+            kind: "empty_directory".to_string(),
+            path: directory.display().to_string(),
+            description: "Leerer Ordner".to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupIssue {
+    kind: String,
+    path: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupSummary {
+    orphaned_sidecars: usize,
+    empty_directories: usize,
+    stale_thumbnails: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CleanupVaultResponse {
+    issues: Vec<CleanupIssue>,
+    summary: CleanupSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl CleanupVaultResponse {
+    fn error(message: String) -> Self {
+        Self {
+            issues: Vec::new(),
+            summary: CleanupSummary {
+                orphaned_sidecars: 0,
+                empty_directories: 0,
+                stale_thumbnails: 0,
+            },
+            error: Some(message),
+        }
+    }
+}
+
 fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
     let parent = PathBuf::from(parent.trim());
     if parent.as_os_str().is_empty() {
@@ -431,16 +1028,28 @@ fn create_vault_at(parent: &str, name: &str) -> Result<PathBuf> {
     fs::create_dir_all(vault.covers_dir()).map_err(VaultError::from)?;
     fs::create_dir_all(vault.system_dir()).map_err(VaultError::from)?;
 
+    // Pre-create sorted inbox subfolders so users can drop files in the right place immediately.
+    let inbox = vault.inbox_dir();
+    for subfolder in INBOX_SUBFOLDERS {
+        fs::create_dir_all(inbox.join(subfolder)).map_err(VaultError::from)?;
+    }
+
+    // Create app-internal cache directories up front so cover downloads and progress
+    // tracking never need to check-and-mkdir at call time.
+    fs::create_dir_all(vault.thumbnails_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.assets_dir()).map_err(VaultError::from)?;
+    fs::create_dir_all(vault.progress_dir()).map_err(VaultError::from)?;
+
     fs::canonicalize(&vault_root).map_err(VaultError::from)
 }
 
-fn build_vault_plan(root_override: Option<&str>) -> Result<DemoPlanResponse> {
+fn build_vault_plan(root_override: Option<&str>, refresh: bool) -> Result<DemoPlanResponse> {
     let vault_root = resolve_vault_root(root_override)?
         .ok_or_else(|| VaultError::InvalidVaultPath("no vault root found".to_string()))?;
-    build_vault_plan_with_root(vault_root)
+    build_vault_plan_with_root(vault_root, refresh)
 }
 
-fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
+fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<DemoPlanResponse> {
     let vault = Vault::new(vault_root.clone())?;
     let files = scan_vault_files(&vault)?;
     let planner = ImportPlanner::new(ImportConfig {
@@ -448,6 +1057,11 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
         ..ImportConfig::default()
     });
     let anilist_client = AniListClient::default();
+    let mut anilist_cache = if refresh {
+        HashMap::new()
+    } else {
+        load_anilist_cache()
+    };
 
     let mut items = Vec::with_capacity(files.len());
     let mut anilist_results = Vec::with_capacity(files.len());
@@ -455,10 +1069,11 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
 
     for file in &files {
         let mut item = planner.plan_file(&file.incoming)?;
-        anilist_results.push(resolve_anilist_metadata(
+        anilist_results.push(resolve_anilist_metadata_cached(
             &anilist_client,
             &file.incoming,
             &item,
+            &mut anilist_cache,
         ));
         if is_in_inbox(&file.incoming.source_path) {
             if let Some(fingerprint) = item.fingerprint.as_ref() {
@@ -492,12 +1107,44 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
         items.push(item);
     }
 
+    save_anilist_cache(&anilist_cache);
+
     let plan = ImportPlan {
         dry_run: true,
         summary: Default::default(),
         items: items.clone(),
     };
     let summary = summarize_demo_plan(&plan);
+
+    let mut plan_items: Vec<DemoPlanItem> = files
+        .iter()
+        .zip(items.iter())
+        .zip(anilist_results.iter())
+        .map(|((file, item), anilist_metadata)| {
+            DemoPlanItem::from_scanned(
+                &file.incoming,
+                item,
+                anilist_metadata.as_ref(),
+                file.sidecar.as_ref(),
+                file.sidecar_preview.as_deref(),
+            )
+        })
+        .collect();
+
+    group_audiobook_folders(&mut plan_items, Some(vault_root.as_path()));
+
+    // Append parts list to the sidecar YAML preview for audiobook group representatives.
+    for item in &mut plan_items {
+        if let Some(parts) = item.audiobook_parts.as_deref() {
+            let parts_yaml = parts
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("  - path: \"{}\"\n    part: {}", p, i + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            item.sidecar_preview = format!("{}parts:\n{}\n", item.sidecar_preview, parts_yaml);
+        }
+    }
 
     Ok(DemoPlanResponse {
         title: "Vault-Dry-Run".to_string(),
@@ -509,20 +1156,7 @@ fn build_vault_plan_with_root(vault_root: PathBuf) -> Result<DemoPlanResponse> {
             None
         },
         summary,
-        items: files
-            .iter()
-            .zip(items.iter())
-            .zip(anilist_results.iter())
-            .map(|((file, item), anilist_metadata)| {
-                DemoPlanItem::from_scanned(
-                    &file.incoming,
-                    item,
-                    anilist_metadata.as_ref(),
-                    file.sidecar.as_ref(),
-                    file.sidecar_preview.as_deref(),
-                )
-            })
-            .collect(),
+        items: plan_items,
     })
 }
 
@@ -592,12 +1226,18 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     let mut items = Vec::with_capacity(files.len());
     let mut anilist_results = Vec::with_capacity(files.len());
     let mut seen_fingerprints = HashSet::new();
+    let mut demo_cache: AniListCacheMap = HashMap::new();
 
     for file in &files {
         let mut item = planner
             .plan_file(file)
             .expect("demo planning should succeed");
-        anilist_results.push(resolve_anilist_metadata(&anilist_client, file, &item));
+        anilist_results.push(resolve_anilist_metadata_cached(
+            &anilist_client,
+            file,
+            &item,
+            &mut demo_cache,
+        ));
 
         if let Some(fingerprint) = item.fingerprint.as_ref() {
             let is_duplicate = !seen_fingerprints.insert(fingerprint.hash.clone());
@@ -800,6 +1440,10 @@ struct ParsedSidecar {
 struct ApplyImportRequest {
     vault_root: Option<String>,
     items: Vec<ApplyImportItem>,
+    /// When true, no files are moved — the response only reports which targets
+    /// already exist (conflicts) so the UI can ask the user how to proceed.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -807,6 +1451,10 @@ struct ApplyImportItem {
     source_path: String,
     target_path: String,
     sidecar_preview: String,
+    /// When true, an existing target file is deleted before the move so the
+    /// inbox copy can replace it (resolves the "file in both places" case).
+    #[serde(default)]
+    overwrite: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -827,10 +1475,25 @@ struct ApplyImportSkipped {
     reason: String,
 }
 
+/// A target path that already exists on disk — reported during a dry-run so the
+/// user can decide whether to overwrite or skip.
+#[derive(Debug, Clone, Serialize)]
+struct ApplyImportConflict {
+    source_path: String,
+    target_path: String,
+    /// Size in bytes of the existing target file (helps the user judge whether
+    /// it is the same file).
+    target_size: u64,
+    /// Size in bytes of the inbox source file.
+    source_size: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ApplyImportResponse {
     applied: Vec<String>,
     skipped: Vec<ApplyImportSkipped>,
+    #[serde(default)]
+    conflicts: Vec<ApplyImportConflict>,
     error: Option<String>,
 }
 
@@ -839,6 +1502,7 @@ impl ApplyImportResponse {
         Self {
             applied: Vec::new(),
             skipped: Vec::new(),
+            conflicts: Vec::new(),
             error: Some(error),
         }
     }
@@ -855,6 +1519,34 @@ impl SaveSidecarsResponse {
     fn error(error: String) -> Self {
         Self {
             saved: Vec::new(),
+            skipped: Vec::new(),
+            error: Some(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct DeleteFilesRequest {
+    vault_root: Option<String>,
+    /// Vault-relative paths of files to delete.
+    paths: Vec<String>,
+    /// When false (default), files are moved to the vault `.trash` folder so the
+    /// action is reversible. When true, files are removed permanently.
+    #[serde(default)]
+    permanent: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeleteFilesResponse {
+    deleted: Vec<String>,
+    skipped: Vec<ApplyImportSkipped>,
+    error: Option<String>,
+}
+
+impl DeleteFilesResponse {
+    fn error(error: String) -> Self {
+        Self {
+            deleted: Vec::new(),
             skipped: Vec::new(),
             error: Some(error),
         }
@@ -891,6 +1583,19 @@ struct DemoPlanItem {
     sidecar_path: Option<String>,
     sidecar_preview: String,
     steps: Vec<String>,
+    /// When this item is the group representative of a multi-file audiobook,
+    /// contains the vault-relative paths of all sibling audio parts (sorted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audiobook_parts: Option<Vec<String>>,
+    /// True for audio files that are part of a multi-file audiobook group but
+    /// are not the group representative.  The UI can collapse these.
+    #[serde(default)]
+    is_audiobook_part: bool,
+    /// Author name extracted from embedded audio tags (ID3/MP4) or from
+    /// Audible metadata.  Populated before the first Audible sync so the
+    /// collection view already has an author even for unsynced books.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
 }
 
 impl DemoPlanItem {
@@ -901,7 +1606,10 @@ impl DemoPlanItem {
         sidecar: Option<&ParsedSidecar>,
         sidecar_preview: Option<&str>,
     ) -> Self {
-        let classification = item.classification.as_ref().or(file.classification.as_ref());
+        let classification = item
+            .classification
+            .as_ref()
+            .or(file.classification.as_ref());
         let media_type = classification
             .map(|classification| classification.media_type)
             .or(sidecar.and_then(|value| value.media_type))
@@ -911,22 +1619,42 @@ impl DemoPlanItem {
         let anime_context = derive_anime_context(file, item, anilist, title.as_deref());
         let effective_series_title = sidecar
             .and_then(|value| value.series_title.clone())
-            .or_else(|| anime_context.as_ref().and_then(|context| context.series_title.clone()));
-        let effective_season_number = sidecar
-            .and_then(|value| value.season_number)
-            .or_else(|| anime_context.as_ref().and_then(|context| context.season_number));
-        let effective_episode_start = sidecar
-            .and_then(|value| value.episode_start)
-            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_start));
-        let effective_episode_end = sidecar
-            .and_then(|value| value.episode_end)
-            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_end));
+            .or_else(|| {
+                anime_context
+                    .as_ref()
+                    .and_then(|context| context.series_title.clone())
+            });
+        let effective_season_number = sidecar.and_then(|value| value.season_number).or_else(|| {
+            anime_context
+                .as_ref()
+                .and_then(|context| context.season_number)
+        });
+        let effective_episode_start = sidecar.and_then(|value| value.episode_start).or_else(|| {
+            anime_context
+                .as_ref()
+                .and_then(|context| context.episode_start)
+        });
+        let effective_episode_end = sidecar.and_then(|value| value.episode_end).or_else(|| {
+            anime_context
+                .as_ref()
+                .and_then(|context| context.episode_end)
+        });
         let effective_episode_title = sidecar
             .and_then(|value| value.episode_title.clone())
-            .or_else(|| anime_context.as_ref().and_then(|context| context.episode_title.clone()));
+            .or_else(|| {
+                anime_context
+                    .as_ref()
+                    .and_then(|context| context.episode_title.clone())
+            });
+        let effective_year = file
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.year)
+            .or_else(|| sidecar.and_then(|value| value.year));
         let collection_path = build_collection_path(
             media_type,
             title.as_deref(),
+            effective_year,
             anime_context.as_ref(),
             anilist,
         );
@@ -989,13 +1717,16 @@ impl DemoPlanItem {
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
-            sidecar_path: sidecar_path_for(&preview_path).ok().map(|path| path.to_string()),
-            sidecar_preview: sidecar_preview
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref())
-                }),
+            sidecar_path: sidecar_path_for(&preview_path)
+                .ok()
+                .map(|path| path.to_string()),
+            sidecar_preview: sidecar_preview.map(ToString::to_string).unwrap_or_else(|| {
+                render_sidecar_preview(file, item, media_type, anilist, anime_context.as_ref())
+            }),
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
+            audiobook_parts: None,
+            is_audiobook_part: false,
+            author: None,
         }
     }
 }
@@ -1021,7 +1752,11 @@ fn render_sidecar_preview(
             .unwrap_or_else(|| file.source_path.to_string()),
     );
 
-    entry.source = match item.classification.as_ref().map(|classification| classification.source) {
+    entry.source = match item
+        .classification
+        .as_ref()
+        .map(|classification| classification.source)
+    {
         Some(ClassificationSource::Api) => PropertySource::Api,
         Some(ClassificationSource::Ai) => PropertySource::Ai,
         Some(ClassificationSource::User) => PropertySource::User,
@@ -1074,9 +1809,7 @@ fn render_sidecar_preview(
     } else {
         "Automatisch erzeugte Vorschau".to_string()
     });
-    render_sidecar_yaml(&entry).unwrap_or_else(|error| {
-        format!("---\nerror: {error}\n---\n")
-    })
+    render_sidecar_yaml(&entry).unwrap_or_else(|error| format!("---\nerror: {error}\n---\n"))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1118,7 +1851,10 @@ fn derive_anime_context(
     series_title_hint: Option<&str>,
 ) -> Option<AnimeEpisodeContext> {
     let media_type = file.classification.as_ref()?.media_type;
-    if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+    if !matches!(
+        media_type,
+        MediaType::Anime | MediaType::HentaiAnime | MediaType::Series
+    ) {
         return None;
     }
 
@@ -1127,12 +1863,24 @@ fn derive_anime_context(
         .file_stem()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| file.source_path.to_string());
-    let series_title = anilist
-        .and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
-        .or_else(|| series_title_hint.map(|value| value.to_string()))
-        .or_else(|| extract_series_hint_from_path(&file.source_path))
-        .or_else(|| extract_anime_series_hint(&file.source_path))
-        .or_else(|| Some(normalize_title_candidate(&file_name)));
+
+    // For Anime: AniList > caller hint > folder extraction > file stem.
+    // For Series: folder extraction takes priority because the caller hint
+    // is derived from the episode filename (e.g. "S01E02 - Title"), not the
+    // series name.
+    let series_title = if matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+        anilist
+            .and_then(|metadata| metadata.display_title().map(|value| value.to_string()))
+            .or_else(|| series_title_hint.map(|value| value.to_string()))
+            .or_else(|| extract_series_hint_from_path(&file.source_path))
+            .or_else(|| extract_anime_series_hint(&file.source_path))
+            .or_else(|| Some(normalize_title_candidate(&file_name)))
+    } else {
+        extract_series_hint_from_path(&file.source_path)
+            .or_else(|| extract_anime_series_hint(&file.source_path))
+            .or_else(|| Some(normalize_title_candidate(&file_name)))
+    };
+
     let season_number = extract_season_number(&file.source_path).or(Some(1));
     let (episode_start, episode_end) = parse_episode_range(&file_name);
     let episode_title = parse_episode_title(&file_name, series_title.as_deref());
@@ -1149,16 +1897,21 @@ fn derive_anime_context(
 fn build_collection_path(
     media_type: MediaType,
     title: Option<&str>,
+    year: Option<u16>,
     anime_context: Option<&AnimeEpisodeContext>,
     anilist: Option<&AniListAnimeMetadata>,
 ) -> String {
+    // Append "(year)" suffix when a year is known — helps distinguish remakes and re-releases.
+    let year_suffix =
+        |y: Option<u16>| -> String { y.map(|y| format!(" ({y})")).unwrap_or_default() };
+
     match media_type {
         MediaType::Anime | MediaType::HentaiAnime => {
             if is_anilist_movie(anilist) {
-                return format!(
-                    "Anime/Filme/{}",
-                    sanitize_path_segment(title.unwrap_or("Unbenannt"))
-                );
+                let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+                let y =
+                    year_suffix(year.or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year)));
+                return format!("Anime/Filme/{t}{y}");
             }
 
             let series = anime_context
@@ -1174,21 +1927,49 @@ fn build_collection_path(
                 season_number
             )
         }
-        MediaType::Series => format!(
-            "Series/{}",
-            sanitize_path_segment(title.unwrap_or("Unbenannt"))
-        ),
-        MediaType::Film => format!(
-            "Movies/{}",
-            sanitize_path_segment(title.unwrap_or("Unbenannt"))
-        ),
+        MediaType::Series => {
+            let series = anime_context
+                .and_then(|context| context.series_title.as_deref())
+                .or(title)
+                .unwrap_or("Unbekannte Serie");
+            let season_number = anime_context
+                .and_then(|context| context.season_number)
+                .unwrap_or(1);
+            format!(
+                "Serien/{}/Staffel {}",
+                sanitize_path_segment(series),
+                season_number
+            )
+        }
+        MediaType::Film => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Filme/{t}{y}")
+        }
+        // Books and Ebooks: Bücher/<Title (Year)>/  — Author subfolder added once OpenLibrary
+        // metadata is available.
+        MediaType::Book | MediaType::Ebook => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Bücher/{t}{y}")
+        }
+        MediaType::Audiobook => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Hörbücher/{t}{y}")
+        }
+        // Music: Musik/<Title (Year)>/  — Artist subfolder added once MusicBrainz metadata is
+        // available.
+        MediaType::MusicAlbum | MediaType::MusicTrack => {
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("Musik/{t}{y}")
+        }
         _ => {
             let folder = media_type.folder_segment();
-            if let Some(title) = title {
-                format!("{folder}/{}", sanitize_path_segment(title))
-            } else {
-                folder.to_string()
-            }
+            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let y = year_suffix(year);
+            format!("{folder}/{t}{y}")
         }
     }
 }
@@ -1201,22 +1982,32 @@ fn build_target_path_preview(
     anime_context: Option<&AnimeEpisodeContext>,
     anilist: Option<&AniListAnimeMetadata>,
 ) -> Option<String> {
-    if !matches!(media_type, MediaType::Anime | MediaType::HentaiAnime) {
+    let is_anime = matches!(media_type, MediaType::Anime | MediaType::HentaiAnime);
+    let is_series_with_context = media_type == MediaType::Series && anime_context.is_some();
+
+    if !is_anime && !is_series_with_context {
         return item.target_path.as_ref().map(|path| path.to_string());
     }
 
-    if is_anilist_movie(anilist) {
+    if is_anime && is_anilist_movie(anilist) {
         let movie_title = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+        let year = file
+            .metadata
+            .as_ref()
+            .and_then(|m| m.year)
+            .or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year));
+        let year_suffix = year.map(|y| format!(" ({y})")).unwrap_or_default();
+        let folder_name = format!("{movie_title}{year_suffix}");
         let extension = file
             .source_path
             .extension()
             .map(|ext| ext.to_string_lossy().to_string());
         let mut path = PathBuf::from("Anime");
         path.push("Filme");
-        path.push(&movie_title);
+        path.push(&folder_name);
         let file_name = match extension {
-            Some(extension) if !extension.is_empty() => format!("{movie_title}.{extension}"),
-            _ => movie_title,
+            Some(extension) if !extension.is_empty() => format!("{folder_name}.{extension}"),
+            _ => folder_name,
         };
         path.push(file_name.as_str());
         return Some(path.display().to_string());
@@ -1241,8 +2032,15 @@ fn build_target_path_preview(
         .source_path
         .extension()
         .map(|ext| ext.to_string_lossy().to_string());
-    let mut path = PathBuf::from("Anime");
-    path.push("Serien");
+
+    // Anime → "Anime/Serien/…",  TV Series → "Serien/…"
+    let mut path = if is_anime {
+        let mut p = PathBuf::from("Anime");
+        p.push("Serien");
+        p
+    } else {
+        PathBuf::from("Serien")
+    };
     path.push(sanitize_path_segment(series_title));
     path.push(format!("Staffel {season_number}"));
     let file_name = match extension {
@@ -1291,21 +2089,40 @@ fn format_episode_label(context: &AnimeEpisodeContext) -> Option<String> {
     }
 }
 
-fn resolve_anilist_metadata(
+fn resolve_anilist_metadata_cached(
     client: &AniListClient,
     file: &IncomingFile,
     item: &ImportPlanItem,
+    cache: &mut AniListCacheMap,
 ) -> Option<AniListAnimeMetadata> {
-    let classification = item.classification.as_ref().or(file.classification.as_ref())?;
+    let classification = item
+        .classification
+        .as_ref()
+        .or(file.classification.as_ref())?;
     if !should_attempt_anilist(classification.media_type, &file.source_path) {
         return None;
     }
 
     let search_title = build_anime_search_title(file)?;
-    client
-        .search_anime(&search_title, AniListClient::adult_flag_for(classification.media_type))
+    let cache_key = search_title.to_lowercase();
+
+    if let Some(cached) = cache.get(&cache_key) {
+        return Some(cached.clone());
+    }
+
+    let result = client
+        .search_anime(
+            &search_title,
+            AniListClient::adult_flag_for(classification.media_type),
+        )
         .ok()
-        .flatten()
+        .flatten();
+
+    if let Some(ref metadata) = result {
+        cache.insert(cache_key, metadata.clone());
+    }
+
+    result
 }
 
 fn should_attempt_anilist(media_type: MediaType, source_path: &RelativePath) -> bool {
@@ -1313,10 +2130,7 @@ fn should_attempt_anilist(media_type: MediaType, source_path: &RelativePath) -> 
         return true;
     }
 
-    source_path
-        .to_string()
-        .to_lowercase()
-        .contains("anime")
+    source_path.to_string().to_lowercase().contains("anime")
 }
 
 fn build_anime_search_title(file: &IncomingFile) -> Option<String> {
@@ -1385,10 +2199,7 @@ fn looks_like_episode_fragment(value: &str) -> bool {
 
     lower.chars().all(|character| {
         character.is_ascii_digit()
-            || matches!(
-                character,
-                '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.'
-            )
+            || matches!(character, '+' | '-' | 'e' | 'p' | 's' | 'x' | ' ' | '.')
     }) || lower.contains("episode")
         || lower.contains("ep")
 }
@@ -1638,15 +2449,12 @@ fn classification_source_label(source: &ClassificationSource) -> String {
 fn requires_review(item: &ImportPlanItem) -> bool {
     item.manual_review
         || item.duplicate_of.is_some()
-        || item
-            .steps
-            .iter()
-            .any(|step| {
-                matches!(
-                    step,
-                    PlannedImportStep::QueueReview { .. } | PlannedImportStep::AskUser { .. }
-                )
-            })
+        || item.steps.iter().any(|step| {
+            matches!(
+                step,
+                PlannedImportStep::QueueReview { .. } | PlannedImportStep::AskUser { .. }
+            )
+        })
 }
 
 fn format_plan_step(step: PlannedImportStep) -> String {
@@ -1673,7 +2481,9 @@ fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
             continue;
         };
         if key == wanted_key {
-            return urlencoding::decode(value).ok().map(|value| value.into_owned());
+            return urlencoding::decode(value)
+                .ok()
+                .map(|value| value.into_owned());
         }
     }
 
@@ -1687,6 +2497,7 @@ fn media_content_type(path: &Path) -> &'static str {
         .map(|extension| extension.to_ascii_lowercase())
         .as_deref()
     {
+        // Images
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("gif") => "image/gif",
@@ -1695,6 +2506,25 @@ fn media_content_type(path: &Path) -> &'static str {
         Some("svg") => "image/svg+xml",
         Some("avif") => "image/avif",
         Some("tif" | "tiff") => "image/tiff",
+        // Video (natively supported by macOS WKWebView)
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("webm") => "video/webm",
+        Some("ogv") => "video/ogg",
+        Some("avi") => "video/x-msvideo",
+        Some("mkv") => "video/x-matroska",
+        // Audio
+        Some("mp3") => "audio/mpeg",
+        Some("m4a" | "m4b") => "audio/mp4",
+        Some("aac") => "audio/aac",
+        Some("ogg" | "oga") => "audio/ogg",
+        Some("opus") => "audio/opus",
+        Some("flac") => "audio/flac",
+        Some("wav") => "audio/wav",
+        Some("weba") => "audio/webm",
+        // Documents
+        Some("pdf") => "application/pdf",
+        Some("epub") => "application/epub+zip",
         _ => "application/octet-stream",
     }
 }
@@ -1723,10 +2553,16 @@ fn apply_import_item(vault: &Vault, item: &ApplyImportItem) -> Result<()> {
 
     if source_absolute != target_absolute {
         if target_absolute.exists() {
-            return Err(VaultError::InvalidVaultPath(format!(
-                "Zieldatei existiert bereits: {}",
-                target_relative
-            )));
+            if item.overwrite {
+                // User confirmed overwrite: remove the existing target so the
+                // inbox copy replaces it and no duplicate remains.
+                fs::remove_file(&target_absolute).map_err(VaultError::from)?;
+            } else {
+                return Err(VaultError::InvalidVaultPath(format!(
+                    "Zieldatei existiert bereits: {}",
+                    target_relative
+                )));
+            }
         }
         move_file_with_fallback(&source_absolute, &target_absolute)?;
     }
@@ -1751,7 +2587,11 @@ fn save_sidecar_item(vault: &Vault, item: &SaveSidecarItem) -> Result<()> {
     write_sidecar_preview(vault, &media_relative, &item.sidecar_preview)
 }
 
-fn write_sidecar_preview(vault: &Vault, media_relative: &RelativePath, sidecar_preview: &str) -> Result<()> {
+fn write_sidecar_preview(
+    vault: &Vault,
+    media_relative: &RelativePath,
+    sidecar_preview: &str,
+) -> Result<()> {
     let sidecar_relative = sidecar_path_for(media_relative)?;
     let sidecar_absolute = vault.resolve(sidecar_relative.as_path())?;
     let sidecar_parent = sidecar_absolute.parent().ok_or_else(|| {
@@ -1799,11 +2639,10 @@ fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
             break;
         }
 
-        let can_remove = fs::read_dir(&path)
-            .ok()
-            .and_then(|mut entries| entries.next().transpose().ok())
-            .flatten()
-            .is_none();
+        let can_remove = match fs::read_dir(&path) {
+            Ok(mut entries) => entries.next().is_none(),
+            Err(_) => false,
+        };
 
         if !can_remove {
             break;
@@ -1944,7 +2783,11 @@ fn scan_vault_files(vault: &Vault) -> Result<Vec<ScannedVaultFile>> {
     Ok(files)
 }
 
-fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultFile>) -> Result<()> {
+fn scan_directory(
+    vault: &Vault,
+    directory: &Path,
+    files: &mut Vec<ScannedVaultFile>,
+) -> Result<()> {
     for entry in fs::read_dir(directory).map_err(VaultError::from)? {
         let entry = entry.map_err(VaultError::from)?;
         let path = entry.path();
@@ -1977,12 +2820,25 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultF
             .as_deref()
             .map(parse_sidecar_metadata)
             .transpose()?;
-        let fingerprint = Some(compute_fingerprint_for_file(&path)?);
-        let classification = parsed_sidecar
+        let parsed_nfo = find_nfo_companion(&path)
+            .map(|nfo_path| {
+                fs::read_to_string(&nfo_path)
+                    .map(|content| parse_nfo_metadata(&content))
+                    .map_err(VaultError::from)
+            })
+            .transpose()?;
+        // NFO data fills any gap not already covered by the .mediavault.yaml sidecar.
+        let effective_sidecar = merge_nfo_into_sidecar(parsed_sidecar, parsed_nfo.as_ref());
+        let fingerprint = if is_in_inbox(&relative_path) {
+            Some(compute_fingerprint_for_file(&path)?)
+        } else {
+            None
+        };
+        let classification = effective_sidecar
             .as_ref()
             .and_then(classification_from_sidecar)
             .or_else(|| detect_classification(&relative_path));
-        let resolved_title = parsed_sidecar
+        let resolved_title = effective_sidecar
             .as_ref()
             .and_then(|sidecar| {
                 sidecar
@@ -1990,10 +2846,14 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultF
                     .clone()
                     .or_else(|| sidecar.title.clone())
             })
-            .or_else(|| relative_path.file_stem().map(|stem| stem.to_string_lossy().to_string()));
+            .or_else(|| {
+                relative_path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_string())
+            });
         let resolved_metadata = Some(ResolvedMetadata {
             title: resolved_title,
-            year: parsed_sidecar.as_ref().and_then(|sidecar| sidecar.year),
+            year: effective_sidecar.as_ref().and_then(|sidecar| sidecar.year),
         });
 
         files.push(ScannedVaultFile {
@@ -2004,7 +2864,7 @@ fn scan_directory(vault: &Vault, directory: &Path, files: &mut Vec<ScannedVaultF
                 classification,
                 metadata: resolved_metadata,
             },
-            sidecar: parsed_sidecar,
+            sidecar: effective_sidecar,
             sidecar_preview,
         });
     }
@@ -2032,6 +2892,516 @@ fn should_skip_scanned_file(path: &Path) -> bool {
     is_hidden_system_entry(name)
         || name.ends_with(".mediavault.yaml")
         || name.ends_with(LEGACY_SIDECAR_SUFFIX)
+        // NFO files are metadata companions, not independent media entries.
+        || name.to_lowercase().ends_with(".nfo")
+}
+
+/// Audio file extensions that qualify a file to be counted as an audiobook part.
+const AUDIOBOOK_AUDIO_EXTS: &[&str] = &[
+    "mp3", "m4a", "m4b", "aac", "ogg", "opus", "flac", "wav", "weba",
+];
+
+/// Numeric-aware string comparison so that "Part9" sorts before "Part21".
+///
+/// Splits each string into runs of digits and non-digits and compares runs
+/// of digits numerically rather than lexicographically.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let mut ai = a.chars().peekable();
+    let mut bi = b.chars().peekable();
+    loop {
+        match (ai.peek().copied(), bi.peek().copied()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, _) => return std::cmp::Ordering::Less,
+            (_, None) => return std::cmp::Ordering::Greater,
+            (Some(ac), Some(bc)) => {
+                if ac.is_ascii_digit() && bc.is_ascii_digit() {
+                    let mut an = String::new();
+                    while ai.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        an.push(ai.next().unwrap());
+                    }
+                    let mut bn = String::new();
+                    while bi.peek().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                        bn.push(bi.next().unwrap());
+                    }
+                    let av: u64 = an.parse().unwrap_or(0);
+                    let bv: u64 = bn.parse().unwrap_or(0);
+                    match av.cmp(&bv) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+                } else {
+                    ai.next();
+                    bi.next();
+                    let ac_lo = ac.to_lowercase().next().unwrap_or(ac);
+                    let bc_lo = bc.to_lowercase().next().unwrap_or(bc);
+                    match ac_lo.cmp(&bc_lo) {
+                        std::cmp::Ordering::Equal => {}
+                        other => return other,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Post-processes a flat list of plan items to detect multi-file audiobook groups.
+///
+/// Rule: if every audio file in a directory is classified as `Audiobook`, they
+/// are treated as parts of a single audiobook.  The lexicographically first
+/// item becomes the group representative and receives `audiobook_parts`; the
+/// others are flagged as `is_audiobook_part = true`.
+///
+/// Items that don't belong to a multi-file group are left unchanged.
+/// Converts a hyphen-separated folder name to a human-readable display title.
+///
+/// Example: `"Listening-to-Bone-Lord--Scribd"` → `"Listening to Bone Lord Scribd"`
+fn prettify_folder_title(raw: &str) -> String {
+    raw.replace("--", " ")
+        .replace('-', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Path>) {
+    // Group item indices by parent directory, counting only Audiobook items.
+    let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
+
+    for (idx, item) in items.iter().enumerate() {
+        if item.media_type != MediaType::Audiobook.to_string() {
+            continue;
+        }
+        let ext = item
+            .source_path
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !AUDIOBOOK_AUDIO_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        // Parent directory = everything before the last '/'
+        let parent = item
+            .source_path
+            .rfind('/')
+            .map(|idx| item.source_path[..idx].to_string())
+            .unwrap_or_default();
+        dir_groups.entry(parent).or_default().push(idx);
+    }
+
+    for (_dir, mut group_indices) in dir_groups {
+        if group_indices.len() < 2 {
+            continue; // Single file — not a multi-part audiobook
+        }
+
+        // Sort indices by source_path using numeric-aware comparison so that
+        // "Part9" sorts before "Part21" even without zero-padding.
+        group_indices.sort_by(|&a, &b| natural_cmp(&items[a].source_path, &items[b].source_path));
+
+        // Try to read embedded audio tags from the first file in the group.
+        // Tags often contain a cleaner title and author than the folder name.
+        let tags = vault_root.and_then(|root| {
+            let rel = &items[group_indices[0]].source_path;
+            let abs = root.join(rel);
+            read_audio_tags(&abs)
+        });
+
+        // Derive the audiobook folder name.  Priority:
+        //   1. Album tag from embedded metadata (clean title)
+        //   2. Parent directory name (prettified hyphens → spaces)
+        let (path_segment, display_title) = {
+            if let Some(album) = tags.as_ref().and_then(|t| t.album.as_deref()) {
+                (sanitize_path_segment(album), album.to_string())
+            } else {
+                let src = &items[group_indices[0]].source_path;
+                let raw = src
+                    .rfind('/')
+                    .and_then(|end| {
+                        let parent = &src[..end];
+                        parent
+                            .rfind('/')
+                            .map(|start| parent[start + 1..].to_string())
+                    })
+                    .unwrap_or_else(|| "Unbenannt".to_string());
+                (sanitize_path_segment(&raw), prettify_folder_title(&raw))
+            }
+        };
+
+        // Author from tags, if available.
+        let tag_author = tags.and_then(|t| t.artist);
+
+        // Update representative: title and (if found) author.
+        items[group_indices[0]].title = Some(display_title);
+        items[group_indices[0]].author = tag_author;
+
+        // Set correct target_path for all members so they land in the same folder.
+        for &idx in &group_indices {
+            let src = items[idx].source_path.clone();
+            let file_name = match src.rfind('/') {
+                Some(pos) => src[pos + 1..].to_string(),
+                None => src,
+            };
+            items[idx].target_path = Some(format!("Hörbücher/{}/{}", path_segment, file_name));
+        }
+
+        let part_paths: Vec<String> = group_indices
+            .iter()
+            .map(|&idx| items[idx].source_path.clone())
+            .collect();
+
+        let representative = group_indices[0];
+        items[representative].audiobook_parts = Some(part_paths);
+
+        for &part_idx in &group_indices[1..] {
+            items[part_idx].is_audiobook_part = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audio tag extraction (ID3v2 + MP4) — no external crate required.
+// ---------------------------------------------------------------------------
+
+/// Album title and artist extracted from embedded audio metadata.
+struct AudioTagData {
+    /// Album title — typically the audiobook or book title.
+    album: Option<String>,
+    /// Album artist or lead artist — typically the author.
+    artist: Option<String>,
+}
+
+/// Reads the first `max_bytes` of a file into a buffer.
+fn read_file_prefix(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; max_bytes];
+    let n = file.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if n < 10 {
+        None
+    } else {
+        Some(buf)
+    }
+}
+
+/// Attempts to read audio metadata tags from the given file.
+///
+/// Recognises ID3v2.3/v2.4 headers (MP3) and MPEG-4 atoms (M4B/M4A/AAC).
+/// Returns `None` if the format is unrecognised or tags are absent.
+fn read_audio_tags(path: &Path) -> Option<AudioTagData> {
+    // 512 KB is enough to cover the ID3 header for most files; for MP4 the
+    // moov metadata box is usually written first (fast-start).
+    let data = read_file_prefix(path, 512 * 1024)?;
+
+    if data.len() >= 10 && &data[0..3] == b"ID3" {
+        return parse_id3v2_tags(&data);
+    }
+
+    // MP4/M4B/M4A: the 4 bytes at offset 4 are the box type; ftyp or moov are
+    // both valid indicators.
+    if data.len() >= 8 && (&data[4..8] == b"ftyp" || &data[4..8] == b"moov") {
+        return parse_mp4_tags(&data);
+    }
+
+    None
+}
+
+// --- ID3v2 ---------------------------------------------------------------
+
+fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
+    if data.len() < 10 {
+        return None;
+    }
+    let version = data[3];
+    // Only handle v2.3 and v2.4; v2.2 uses 3-byte frame IDs (rare today).
+    if version < 3 || version > 4 {
+        return None;
+    }
+    let flags = data[5];
+
+    // Tag size is encoded as a 4-byte synchsafe integer.
+    let tag_size = ((data[6] as usize & 0x7F) << 21)
+        | ((data[7] as usize & 0x7F) << 14)
+        | ((data[8] as usize & 0x7F) << 7)
+        | (data[9] as usize & 0x7F);
+    let tag_end = (10 + tag_size).min(data.len());
+
+    // Skip optional extended header (flag bit 6).
+    let mut pos = 10;
+    if (flags & 0x40) != 0 && pos + 4 <= tag_end {
+        let ext_size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        pos += ext_size;
+    }
+
+    let mut album: Option<String> = None;
+    let mut album_artist: Option<String> = None;
+    let mut lead_artist: Option<String> = None;
+
+    while pos + 10 < tag_end {
+        // Null padding marks end of frames.
+        if data[pos] == 0 {
+            break;
+        }
+        let frame_id = &data[pos..pos + 4];
+
+        let frame_size = if version == 4 {
+            // ID3v2.4: frame size is also synchsafe.
+            ((data[pos + 4] as usize & 0x7F) << 21)
+                | ((data[pos + 5] as usize & 0x7F) << 14)
+                | ((data[pos + 6] as usize & 0x7F) << 7)
+                | (data[pos + 7] as usize & 0x7F)
+        } else {
+            u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize
+        };
+
+        if frame_size == 0 {
+            pos += 10;
+            continue;
+        }
+        if pos + 10 + frame_size > tag_end {
+            break;
+        }
+
+        let content = &data[pos + 10..pos + 10 + frame_size];
+        if frame_id == b"TALB" {
+            album = decode_id3_text(content);
+        } else if frame_id == b"TPE2" {
+            album_artist = decode_id3_text(content);
+        } else if frame_id == b"TPE1" {
+            lead_artist = decode_id3_text(content);
+        }
+
+        pos += 10 + frame_size;
+    }
+
+    Some(AudioTagData {
+        album,
+        artist: album_artist.or(lead_artist),
+    })
+}
+
+/// Decodes an ID3 text frame.  The first byte is the encoding flag:
+/// 0 = ISO-8859-1, 1/2 = UTF-16 (with/without BOM), 3 = UTF-8.
+fn decode_id3_text(data: &[u8]) -> Option<String> {
+    if data.is_empty() {
+        return None;
+    }
+    let encoding = data[0];
+    let text = &data[1..];
+    let result: String = match encoding {
+        // ISO-8859-1: map bytes directly to char (valid for ASCII range)
+        0 => text
+            .iter()
+            .map(|&b| if b < 0x80 { b as char } else { '\u{FFFD}' })
+            .collect(),
+        // UTF-16 with or without BOM
+        1 | 2 => {
+            if text.len() < 2 {
+                return None;
+            }
+            let units: Vec<u16> = if text[0] == 0xFF && text[1] == 0xFE {
+                text[2..]
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect()
+            } else if text[0] == 0xFE && text[1] == 0xFF {
+                text[2..]
+                    .chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect()
+            } else {
+                // No BOM — assume little-endian (most common on Windows/iTunes)
+                text.chunks(2)
+                    .filter(|c| c.len() == 2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect()
+            };
+            String::from_utf16_lossy(&units)
+        }
+        // UTF-8
+        3 => String::from_utf8_lossy(text).into_owned(),
+        _ => return None,
+    };
+    let cleaned = result.trim_matches('\0').trim().to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+// --- MPEG-4 atoms (M4B / M4A / AAC) -------------------------------------
+
+/// Returns `(content_start, content_end)` for the first atom named `target`
+/// found by scanning `data[from..to]`.
+fn find_mp4_atom(data: &[u8], target: &[u8], from: usize, to: usize) -> Option<(usize, usize)> {
+    let mut pos = from;
+    let limit = to.min(data.len());
+    while pos + 8 <= limit {
+        let size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+        if size < 8 {
+            break;
+        }
+        let end = pos + size;
+        if end > data.len() {
+            break;
+        }
+        if &data[pos + 4..pos + 8] == target {
+            return Some((pos + 8, end));
+        }
+        pos = end;
+    }
+    None
+}
+
+fn parse_mp4_tags(data: &[u8]) -> Option<AudioTagData> {
+    let (moov_s, moov_e) = find_mp4_atom(data, b"moov", 0, data.len())?;
+
+    // Locate ilst: try moov→udta→meta→ilst, then moov→meta→ilst.
+    let ilst = locate_mp4_ilst(data, moov_s, moov_e).or_else(|| {
+        // Fallback: meta directly inside moov (some encoders skip udta)
+        let (meta_s, meta_e) = find_mp4_atom(data, b"meta", moov_s, moov_e)?;
+        // meta is a FullBox: skip 4-byte version/flags
+        let adj = (meta_s + 4).min(meta_e);
+        let (ilst_s, ilst_e) = find_mp4_atom(data, b"ilst", adj, meta_e)?;
+        Some((ilst_s, ilst_e))
+    })?;
+
+    let (ilst_s, ilst_e) = ilst;
+
+    let album = read_mp4_string_item(data, b"\xa9alb", ilst_s, ilst_e);
+    let album_artist = read_mp4_string_item(data, b"aART", ilst_s, ilst_e);
+    let artist = read_mp4_string_item(data, b"\xa9ART", ilst_s, ilst_e);
+
+    Some(AudioTagData {
+        album,
+        artist: album_artist.or(artist),
+    })
+}
+
+fn locate_mp4_ilst(data: &[u8], moov_s: usize, moov_e: usize) -> Option<(usize, usize)> {
+    let (udta_s, udta_e) = find_mp4_atom(data, b"udta", moov_s, moov_e)?;
+    let (meta_s, meta_e) = find_mp4_atom(data, b"meta", udta_s, udta_e)?;
+    // meta FullBox: skip 4-byte version/flags
+    let adj = (meta_s + 4).min(meta_e);
+    let (ilst_s, ilst_e) = find_mp4_atom(data, b"ilst", adj, meta_e)?;
+    Some((ilst_s, ilst_e))
+}
+
+/// Reads the string value of an iTunes-style item atom (e.g. `©alb`) from ilst.
+fn read_mp4_string_item(
+    data: &[u8],
+    item_name: &[u8],
+    ilst_s: usize,
+    ilst_e: usize,
+) -> Option<String> {
+    let (item_s, item_e) = find_mp4_atom(data, item_name, ilst_s, ilst_e)?;
+    // Inside the item atom is a 'data' atom: header(8) + type(4) + locale(4) + string
+    let (data_s, data_e) = find_mp4_atom(data, b"data", item_s, item_e)?;
+    let payload_start = data_s + 8; // skip type(4) + locale(4)
+    if payload_start >= data_e {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&data[payload_start..data_e]).into_owned();
+    let cleaned = text.trim_matches('\0').trim().to_string();
+    if cleaned.is_empty() {
+        None
+    } else {
+        Some(cleaned)
+    }
+}
+
+/// Looks for a Kodi/XBMC-style `.nfo` companion file alongside a media file.
+///
+/// Checks in priority order:
+/// 1. Same filename with `.nfo` extension (e.g. `Movie.mkv` → `Movie.nfo`)
+/// 2. `movie.nfo` in the same directory (common Kodi convention)
+fn find_nfo_companion(media_path: &Path) -> Option<PathBuf> {
+    let mut nfo_path = media_path.to_path_buf();
+    nfo_path.set_extension("nfo");
+    if nfo_path.exists() {
+        return Some(nfo_path);
+    }
+    let movie_nfo = media_path.parent()?.join("movie.nfo");
+    if movie_nfo.exists() {
+        Some(movie_nfo)
+    } else {
+        None
+    }
+}
+
+/// Metadata extracted from a Kodi/XBMC NFO companion file.
+#[derive(Debug, Default)]
+struct ParsedNfoMetadata {
+    title: Option<String>,
+    /// For episode NFOs: the show title (`<showtitle>`).
+    series_title: Option<String>,
+    year: Option<u16>,
+    season_number: Option<u16>,
+    episode_start: Option<u16>,
+}
+
+/// Parses a subset of the Kodi NFO XML format without a full XML parser.
+///
+/// Only extracts fields that map to existing `ParsedSidecar` slots; everything
+/// else is ignored.  The NFO format is well-defined enough that tag-based
+/// substring search is reliable here.
+fn parse_nfo_metadata(content: &str) -> ParsedNfoMetadata {
+    ParsedNfoMetadata {
+        title: extract_xml_tag(content, "title"),
+        series_title: extract_xml_tag(content, "showtitle"),
+        year: extract_xml_tag(content, "year").and_then(|s| s.parse::<u16>().ok()),
+        season_number: extract_xml_tag(content, "season").and_then(|s| s.parse::<u16>().ok()),
+        episode_start: extract_xml_tag(content, "episode").and_then(|s| s.parse::<u16>().ok()),
+    }
+}
+
+/// Extracts the text content of the first matching XML tag.
+fn extract_xml_tag(content: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = content.find(&open)? + open.len();
+    let end = content[start..].find(&close).map(|i| start + i)?;
+    let value = content[start..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Merges NFO companion data into a sidecar, with NFO only filling absent fields.
+///
+/// The `.mediavault.yaml` sidecar always wins; NFO data only fills gaps.
+fn merge_nfo_into_sidecar(
+    sidecar: Option<ParsedSidecar>,
+    nfo: Option<&ParsedNfoMetadata>,
+) -> Option<ParsedSidecar> {
+    let Some(nfo) = nfo else {
+        return sidecar;
+    };
+    let mut result = sidecar.unwrap_or_default();
+    if result.title.is_none() {
+        result.title = nfo.title.clone();
+    }
+    if result.series_title.is_none() {
+        result.series_title = nfo.series_title.clone();
+    }
+    if result.year.is_none() {
+        result.year = nfo.year;
+    }
+    if result.season_number.is_none() {
+        result.season_number = nfo.season_number;
+    }
+    if result.episode_start.is_none() {
+        result.episode_start = nfo.episode_start;
+    }
+    Some(result)
 }
 
 fn find_sidecar_file(vault: &Vault, media_path: &RelativePath) -> Result<Option<PathBuf>> {
@@ -2100,11 +3470,16 @@ fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
 
 fn unquote_yaml(value: &str) -> String {
     let trimmed = value.trim();
-    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-        return trimmed[1..trimmed.len() - 1]
-            .replace("\\n", "\n")
-            .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
+    if trimmed.len() >= 2 {
+        let is_double = trimmed.starts_with('"') && trimmed.ends_with('"');
+        let is_single = trimmed.starts_with('\'') && trimmed.ends_with('\'');
+        if is_double || is_single {
+            return trimmed[1..trimmed.len() - 1]
+                .replace("\\n", "\n")
+                .replace("\\\"", "\"")
+                .replace("\\'", "'")
+                .replace("\\\\", "\\");
+        }
     }
     trimmed.to_string()
 }
@@ -2150,11 +3525,78 @@ fn parse_media_status(value: &str) -> Option<MediaStatus> {
     }
 }
 
+fn classify_from_inbox_folder(path: &str) -> Option<FileClassification> {
+    let make = |media_type: MediaType| FileClassification {
+        media_type,
+        confidence: 0.96,
+        source: ClassificationSource::Folder,
+    };
+    // These paths reflect the pre-created INBOX_SUBFOLDERS — the user intentionally
+    // placed the file there, so treat the folder as a strong signal.
+    if path.starts_with("inbox/anime/tv/") || path.starts_with("inbox/anime/serien/") {
+        return Some(make(MediaType::Anime));
+    }
+    if path.starts_with("inbox/anime/") {
+        return Some(make(MediaType::Anime));
+    }
+    if path.starts_with("inbox/serien/") {
+        return Some(make(MediaType::Series));
+    }
+    if path.starts_with("inbox/filme/") {
+        return Some(make(MediaType::Film));
+    }
+    if path.starts_with("inbox/musik/") {
+        return Some(make(MediaType::MusicAlbum));
+    }
+    if path.starts_with("inbox/bücher/") {
+        return Some(make(MediaType::Book));
+    }
+    if path.starts_with("inbox/hörbücher/") {
+        return Some(make(MediaType::Audiobook));
+    }
+    if path.starts_with("inbox/manga/") {
+        return Some(make(MediaType::Manga));
+    }
+    if path.starts_with("inbox/comics/") {
+        return Some(make(MediaType::Comic));
+    }
+    if path.starts_with("inbox/ttrpg/") {
+        return Some(make(MediaType::RPG));
+    }
+    if path.starts_with("inbox/games/") {
+        return Some(make(MediaType::VideoGame));
+    }
+    if path.starts_with("inbox/unsortiert/") {
+        return Some(FileClassification {
+            media_type: MediaType::Unclassified,
+            confidence: 0.50,
+            source: ClassificationSource::Folder,
+        });
+    }
+    None
+}
+
+/// Image extensions that should never be classified as Audiobook even when
+/// placed inside `Inbox/Hörbücher/`.  These are cover-art files that happen
+/// to live next to the audio tracks.
+const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "avif"];
+
 fn detect_classification(relative_path: &RelativePath) -> Option<FileClassification> {
     let path = relative_path.to_string().to_lowercase();
+
     let extension = relative_path
         .extension()
         .map(|ext| ext.to_string_lossy().to_lowercase());
+
+    // Inbox subfolder takes highest priority — the user explicitly sorted it there.
+    // Exception: image files in audiobook folders are artwork, not audio items.
+    if let Some(cls) = classify_from_inbox_folder(&path) {
+        let is_image = IMAGE_EXTS.contains(&extension.as_deref().unwrap_or(""));
+        if is_image && cls.media_type == MediaType::Audiobook {
+            return None; // leave unclassified; will stay in Inbox
+        }
+        return Some(cls);
+    }
 
     match extension.as_deref() {
         Some("mkv" | "mp4" | "avi" | "mov" | "webm") => {
@@ -2234,14 +3676,7 @@ fn detect_classification(relative_path: &RelativePath) -> Option<FileClassificat
 }
 
 const PHOTO_HINTS: [&str; 8] = [
-    "dcim",
-    "camera",
-    "photo",
-    "photos",
-    "picture",
-    "pictures",
-    "img_",
-    "dsc",
+    "dcim", "camera", "photo", "photos", "picture", "pictures", "img_", "dsc",
 ];
 
 const CAMERA_HINTS: [&str; 4] = ["dcim", "camera", "dsc", "img_"];
@@ -2281,4 +3716,1287 @@ fn has_season_episode_marker(value: &str) -> bool {
             && window[4].is_ascii_digit()
             && window[5].is_ascii_digit()
     })
+}
+
+// ---------------------------------------------------------------------------
+// Progress API
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SaveProgressRequest {
+    vault_root: Option<String>,
+    vault_path: String,
+    progress: MediaProgress,
+    #[serde(default)]
+    completed: bool,
+}
+
+#[derive(Serialize)]
+struct SaveProgressResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl SaveProgressResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct LoadProgressResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    record: Option<ProgressRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeleteProgressRequest {
+    vault_root: Option<String>,
+    vault_path: String,
+}
+
+#[derive(Serialize)]
+struct DeleteProgressResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl DeleteProgressResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ListProgressResponse {
+    records: Vec<ProgressRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_save_progress_response(body: &[u8]) -> SaveProgressResponse {
+    let req: SaveProgressRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return SaveProgressResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return SaveProgressResponse::error("Kein Vault geöffnet."),
+        Err(e) => return SaveProgressResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return SaveProgressResponse::error(e.to_string()),
+    };
+
+    match save_progress(
+        &vault.progress_dir(),
+        &req.vault_path,
+        req.progress,
+        req.completed,
+    ) {
+        Ok(()) => SaveProgressResponse::ok(),
+        Err(e) => SaveProgressResponse::error(e.to_string()),
+    }
+}
+
+fn build_load_progress_response(query: Option<&str>) -> LoadProgressResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some("missing query".into()),
+            }
+        }
+    };
+
+    let vault_path = match extract_query_value(query, "path") {
+        Some(p) => p,
+        None => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some("missing path".into()),
+            }
+        }
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return LoadProgressResponse {
+                record: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    match load_progress(&vault.progress_dir(), &vault_path) {
+        Ok(record) => LoadProgressResponse {
+            record,
+            error: None,
+        },
+        Err(e) => LoadProgressResponse {
+            record: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn build_delete_progress_response(body: &[u8]) -> DeleteProgressResponse {
+    let req: DeleteProgressRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return DeleteProgressResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return DeleteProgressResponse::error("Kein Vault geöffnet."),
+        Err(e) => return DeleteProgressResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return DeleteProgressResponse::error(e.to_string()),
+    };
+
+    match delete_progress(&vault.progress_dir(), &req.vault_path) {
+        Ok(()) => DeleteProgressResponse::ok(),
+        Err(e) => DeleteProgressResponse::error(e.to_string()),
+    }
+}
+
+fn build_list_progress_response(query: Option<&str>) -> ListProgressResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ListProgressResponse {
+                records: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return ListProgressResponse {
+                records: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return ListProgressResponse {
+                records: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    match list_in_progress(&vault.progress_dir()) {
+        Ok(records) => ListProgressResponse {
+            records,
+            error: None,
+        },
+        Err(e) => ListProgressResponse {
+            records: vec![],
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Open-with-system API
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct OpenExternalResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl OpenExternalResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return OpenExternalResponse::error("missing query"),
+    };
+
+    let path = match extract_query_value(query, "path") {
+        Some(p) => p,
+        None => return OpenExternalResponse::error("missing path"),
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return OpenExternalResponse::error("Kein Vault geöffnet."),
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let relative = match RelativePath::new(&path) {
+        Ok(r) => r,
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let absolute = match vault.resolve(relative.as_path()) {
+        Ok(p) => p,
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    // `open` on macOS launches the file with the default app; equivalent to
+    // double-clicking in Finder. This is fire-and-forget — we only care that
+    // the process started, not how it exits.
+    match std::process::Command::new("open").arg(&absolute).spawn() {
+        Ok(_) => OpenExternalResponse::ok(),
+        Err(e) => OpenExternalResponse::error(format!("open failed: {e}")),
+    }
+}
+
+fn build_open_vault_root_response(query: Option<&str>) -> OpenExternalResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return OpenExternalResponse::error("Kein Vault geöffnet."),
+        Err(e) => return OpenExternalResponse::error(e.to_string()),
+    };
+
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+
+    match std::process::Command::new(program)
+        .arg(vault_root.as_path())
+        .spawn()
+    {
+        Ok(_) => OpenExternalResponse::ok(),
+        Err(e) => OpenExternalResponse::error(format!("open failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard APIs
+// ---------------------------------------------------------------------------
+
+/// A lightweight item descriptor for dashboard cards.
+#[derive(Serialize)]
+struct DashboardItem {
+    vault_path: String,
+    title: String,
+    media_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    year: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress_fraction: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    position_seconds: Option<f64>,
+    /// File modification time as UNIX seconds.
+    modified_at: u64,
+}
+
+#[derive(Serialize)]
+struct RecentItemsResponse {
+    items: Vec<DashboardItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct InProgressResponse {
+    items: Vec<DashboardItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+const DASHBOARD_LIMIT: usize = 24;
+
+/// Standard filenames to look for when searching for a cover image.
+const COVER_FILENAMES: &[&str] = &[
+    "cover.jpg",
+    "cover.jpeg",
+    "cover.png",
+    "cover.webp",
+    "folder.jpg",
+    "folder.jpeg",
+    "folder.png",
+    "poster.jpg",
+    "poster.jpeg",
+    "poster.png",
+];
+
+/// Searches the media file's directory (and its parent) for a cover image.
+///
+/// Returns a `/api/media-file?path=...&root=...` URL suitable for the frontend
+/// to use directly as an `<img src>`.
+fn find_cover_url(vault: &Vault, relative_path: &str) -> Option<String> {
+    use std::path::Path;
+
+    let file_path = Path::new(relative_path);
+    let dir = file_path.parent()?;
+    let vault_root = vault.root().to_string_lossy();
+    let vault_root_enc = urlencoding::encode(&vault_root);
+
+    let parent_dir = dir.parent();
+    let mut dirs_to_check: Vec<&Path> = vec![dir];
+    if let Some(p) = parent_dir {
+        // Only check parent if it is not the vault root itself (empty string = root)
+        if p != Path::new("") {
+            dirs_to_check.push(p);
+        }
+    }
+
+    for check_dir in dirs_to_check {
+        for name in COVER_FILENAMES {
+            let candidate_rel = check_dir.join(name);
+            let candidate_abs = vault.root().join(&candidate_rel);
+            if candidate_abs.exists() {
+                let rel_str = candidate_rel.to_string_lossy().replace('\\', "/");
+                return Some(format!(
+                    "/api/media-file?path={}&root={}",
+                    urlencoding::encode(&rel_str),
+                    vault_root_enc,
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(&vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let scanned = match scan_vault_files(&vault) {
+        Ok(files) => files,
+        Err(e) => {
+            return RecentItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    // Sort by file system modification time, newest first.
+    let mut with_mtime: Vec<(u64, ScannedVaultFile)> = scanned
+        .into_iter()
+        .filter_map(|file| {
+            let abs = vault.resolve(file.incoming.source_path.as_path()).ok()?;
+            let mtime = fs::metadata(&abs)
+                .ok()?
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs();
+            Some((mtime, file))
+        })
+        .collect();
+
+    with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let items = with_mtime
+        .into_iter()
+        .take(DASHBOARD_LIMIT)
+        .map(|(mtime, file)| {
+            let cls = file.incoming.classification.as_ref();
+            let media_type = cls
+                .map(|c| c.media_type.to_string())
+                .unwrap_or_else(|| "unclassified".to_string());
+            let title = file
+                .sidecar
+                .as_ref()
+                .and_then(|s| s.title.clone().or_else(|| s.series_title.clone()))
+                .or_else(|| {
+                    file.incoming
+                        .source_path
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().to_string())
+                })
+                .unwrap_or_else(|| file.incoming.source_path.to_string());
+            let year = file
+                .incoming
+                .metadata
+                .as_ref()
+                .and_then(|m| m.year)
+                .or_else(|| file.sidecar.as_ref().and_then(|s| s.year));
+            let cover_url = find_cover_url(&vault, &file.incoming.source_path.to_string());
+            DashboardItem {
+                vault_path: file.incoming.source_path.to_string(),
+                title,
+                media_type,
+                year,
+                cover_url,
+                progress_fraction: None,
+                position_seconds: None,
+                modified_at: mtime,
+            }
+        })
+        .collect();
+
+    RecentItemsResponse { items, error: None }
+}
+
+fn build_in_progress_response(query: Option<&str>) -> InProgressResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let records = match list_in_progress(&vault.progress_dir()) {
+        Ok(r) => r,
+        Err(e) => {
+            return InProgressResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let items = records
+        .into_iter()
+        .take(DASHBOARD_LIMIT)
+        .map(|record| {
+            let title = record
+                .vault_path
+                .rsplit('/')
+                .next()
+                .and_then(|name| name.rsplit('.').nth(1).map(|_| name.to_string()))
+                .unwrap_or_else(|| record.vault_path.clone());
+            let position_seconds = match &record.progress {
+                MediaProgress::Video {
+                    position_seconds, ..
+                }
+                | MediaProgress::Audio {
+                    position_seconds, ..
+                } => Some(*position_seconds),
+                MediaProgress::Audiobook {
+                    position_seconds, ..
+                } => Some(*position_seconds),
+                _ => None,
+            };
+            let modified_at = record.last_accessed;
+            let cover_url = find_cover_url(&vault, &record.vault_path);
+            DashboardItem {
+                vault_path: record.vault_path.clone(),
+                title,
+                media_type: "unknown".to_string(),
+                year: None,
+                cover_url,
+                progress_fraction: record.fraction(),
+                position_seconds,
+                modified_at,
+            }
+        })
+        .collect();
+
+    InProgressResponse { items, error: None }
+}
+
+// ---------------------------------------------------------------------------
+// Subtitle discovery
+// ---------------------------------------------------------------------------
+
+/// Subtitle file extensions the in-app player can parse.
+const SUBTITLE_EXTS: &[&str] = &["srt", "vtt", "ass", "ssa"];
+
+#[derive(Debug, Clone, Serialize)]
+struct SubtitleTrack {
+    /// Vault-relative path to the subtitle file.
+    path: String,
+    /// Human-readable label (filename, with any language hint).
+    label: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ListSubtitlesResponse {
+    subtitles: Vec<SubtitleTrack>,
+    error: Option<String>,
+}
+
+/// Lists subtitle files near a video so the player can offer track selection.
+///
+/// Searches the video's own directory and common `Subs` / `Subtitles`
+/// subfolders. Files whose stem starts with the video stem are listed first so
+/// the best match is auto-selected by the frontend.
+fn build_list_subtitles_response(query: Option<&str>) -> ListSubtitlesResponse {
+    let video_path = match query.and_then(|q| extract_query_value(q, "path")) {
+        Some(p) => p,
+        None => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some("Kein Pfad angegeben.".into()),
+            }
+        }
+    };
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let relative = match RelativePath::new(&video_path) {
+        Ok(r) => r,
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+    let absolute = match vault.resolve(relative.as_path()) {
+        Ok(a) => a,
+        Err(e) => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let video_dir = match absolute.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return ListSubtitlesResponse {
+                subtitles: vec![],
+                error: None,
+            }
+        }
+    };
+    let video_stem = absolute
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Directories to scan: the video's folder plus optional subtitle subfolders.
+    let mut dirs = vec![video_dir.clone()];
+    for sub in ["Subs", "Subtitles", "subs", "subtitles"] {
+        let candidate = video_dir.join(sub);
+        if candidate.is_dir() {
+            dirs.push(candidate);
+        }
+    }
+
+    let mut matching = Vec::new();
+    let mut others = Vec::new();
+    for dir in dirs {
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let ext = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            if !SUBTITLE_EXTS.contains(&ext.as_str()) {
+                continue;
+            }
+            let Ok(rel) = vault.relative_from_absolute(&path) else {
+                continue;
+            };
+            let file_stem = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let track = SubtitleTrack {
+                path: rel.to_string(),
+                label: file_stem.clone(),
+            };
+            // Files whose stem starts with the video stem are the best match.
+            if !video_stem.is_empty() && file_stem.to_lowercase().starts_with(&video_stem) {
+                matching.push(track);
+            } else {
+                others.push(track);
+            }
+        }
+    }
+
+    matching.sort_by(|a, b| a.label.cmp(&b.label));
+    others.sort_by(|a, b| a.label.cmp(&b.label));
+    matching.extend(others);
+
+    ListSubtitlesResponse {
+        subtitles: matching,
+        error: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playlist APIs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ListPlaylistsResponse {
+    playlists: Vec<Playlist>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct GetPlaylistResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    playlist: Option<Playlist>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SavePlaylistRequest {
+    vault_root: Option<String>,
+    playlist: Playlist,
+}
+
+#[derive(Serialize)]
+struct SavePlaylistResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl SavePlaylistResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct DeletePlaylistRequest {
+    vault_root: Option<String>,
+    id: String,
+}
+
+#[derive(Serialize)]
+struct DeletePlaylistResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl DeletePlaylistResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SaveCursorRequest {
+    vault_root: Option<String>,
+    cursor: PlaylistCursor,
+}
+
+#[derive(Serialize)]
+struct SaveCursorResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl SaveCursorResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct LoadCursorResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<PlaylistCursor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_list_playlists_response(query: Option<&str>) -> ListPlaylistsResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return ListPlaylistsResponse {
+                playlists: vec![],
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return ListPlaylistsResponse {
+                playlists: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return ListPlaylistsResponse {
+                playlists: vec![],
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    match list_playlists(&vault.system_dir()) {
+        Ok(playlists) => ListPlaylistsResponse {
+            playlists,
+            error: None,
+        },
+        Err(e) => ListPlaylistsResponse {
+            playlists: vec![],
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn build_get_playlist_response(query: Option<&str>) -> GetPlaylistResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some("missing query".into()),
+            }
+        }
+    };
+
+    let id = match extract_query_value(query, "id") {
+        Some(id) => id,
+        None => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some("missing id".into()),
+            }
+        }
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return GetPlaylistResponse {
+                playlist: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    match load_playlist(&vault.system_dir(), &id) {
+        Ok(playlist) => GetPlaylistResponse {
+            playlist,
+            error: None,
+        },
+        Err(e) => GetPlaylistResponse {
+            playlist: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn build_save_playlist_response(body: &[u8]) -> SavePlaylistResponse {
+    let req: SavePlaylistRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return SavePlaylistResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return SavePlaylistResponse::error("Kein Vault geöffnet."),
+        Err(e) => return SavePlaylistResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return SavePlaylistResponse::error(e.to_string()),
+    };
+
+    let mut playlist = req.playlist;
+    match save_playlist(&vault.system_dir(), &mut playlist) {
+        Ok(()) => SavePlaylistResponse::ok(),
+        Err(e) => SavePlaylistResponse::error(e.to_string()),
+    }
+}
+
+fn build_delete_playlist_response(body: &[u8]) -> DeletePlaylistResponse {
+    let req: DeletePlaylistRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return DeletePlaylistResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return DeletePlaylistResponse::error("Kein Vault geöffnet."),
+        Err(e) => return DeletePlaylistResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return DeletePlaylistResponse::error(e.to_string()),
+    };
+
+    match delete_playlist(&vault.system_dir(), &req.id) {
+        Ok(()) => DeletePlaylistResponse::ok(),
+        Err(e) => DeletePlaylistResponse::error(e.to_string()),
+    }
+}
+
+fn build_save_cursor_response(body: &[u8]) -> SaveCursorResponse {
+    let req: SaveCursorRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return SaveCursorResponse::error(format!("Invalid request: {e}")),
+    };
+
+    let vault_root = match resolve_vault_root(req.vault_root.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => return SaveCursorResponse::error("Kein Vault geöffnet."),
+        Err(e) => return SaveCursorResponse::error(e.to_string()),
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => return SaveCursorResponse::error(e.to_string()),
+    };
+
+    let mut cursor = req.cursor;
+    match save_cursor(&vault.progress_dir(), &mut cursor) {
+        Ok(()) => SaveCursorResponse::ok(),
+        Err(e) => SaveCursorResponse::error(e.to_string()),
+    }
+}
+
+fn build_load_cursor_response(query: Option<&str>) -> LoadCursorResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some("missing query".into()),
+            }
+        }
+    };
+
+    let id = match extract_query_value(query, "id") {
+        Some(id) => id,
+        None => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some("missing id".into()),
+            }
+        }
+    };
+
+    let root_override = extract_query_value(query, "root");
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some("Kein Vault geöffnet.".into()),
+            }
+        }
+        Err(e) => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    let vault = match Vault::new(vault_root) {
+        Ok(v) => v,
+        Err(e) => {
+            return LoadCursorResponse {
+                cursor: None,
+                error: Some(e.to_string()),
+            }
+        }
+    };
+
+    match load_cursor(&vault.progress_dir(), &id) {
+        Ok(cursor) => LoadCursorResponse {
+            cursor,
+            error: None,
+        },
+        Err(e) => LoadCursorResponse {
+            cursor: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audiobookshelf (ABS) sync APIs
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct AbsTestResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl AbsTestResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AbsLibrariesResponse {
+    libraries: Vec<crate::api::audiobookshelf::AbsLibrary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AbsLibraryItemsResponse {
+    items: Vec<crate::api::audiobookshelf::AbsLibraryItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AbsSyncProgressRequest {
+    abs_url: String,
+    api_key: String,
+    item_id: String,
+    current_time: f64,
+    #[serde(default)]
+    duration: f64,
+    #[serde(default)]
+    is_finished: bool,
+}
+
+#[derive(Serialize)]
+struct AbsSyncProgressResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl AbsSyncProgressResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(msg: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(msg.into()),
+        }
+    }
+}
+
+fn build_abs_test_response(query: Option<&str>) -> AbsTestResponse {
+    let query = match query {
+        Some(q) => q,
+        None => return AbsTestResponse::error("missing query"),
+    };
+    let url = match extract_query_value(query, "url") {
+        Some(u) => u,
+        None => return AbsTestResponse::error("missing url"),
+    };
+    let key = extract_query_value(query, "key").unwrap_or_default();
+    match AbsClient::new(url, key) {
+        Ok(client) => match client.test_connection() {
+            Ok(()) => AbsTestResponse::ok(),
+            Err(e) => AbsTestResponse::error(e.to_string()),
+        },
+        Err(e) => AbsTestResponse::error(e.to_string()),
+    }
+}
+
+fn build_abs_libraries_response(query: Option<&str>) -> AbsLibrariesResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return AbsLibrariesResponse {
+                libraries: vec![],
+                error: Some("missing query".into()),
+            }
+        }
+    };
+    let url = match extract_query_value(query, "url") {
+        Some(u) => u,
+        None => {
+            return AbsLibrariesResponse {
+                libraries: vec![],
+                error: Some("missing url".into()),
+            }
+        }
+    };
+    let key = extract_query_value(query, "key").unwrap_or_default();
+    match AbsClient::new(url, key) {
+        Ok(client) => match client.list_libraries() {
+            Ok(libraries) => AbsLibrariesResponse {
+                libraries,
+                error: None,
+            },
+            Err(e) => AbsLibrariesResponse {
+                libraries: vec![],
+                error: Some(e.to_string()),
+            },
+        },
+        Err(e) => AbsLibrariesResponse {
+            libraries: vec![],
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn build_abs_library_items_response(query: Option<&str>) -> AbsLibraryItemsResponse {
+    let query = match query {
+        Some(q) => q,
+        None => {
+            return AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some("missing query".into()),
+            }
+        }
+    };
+    let url = match extract_query_value(query, "url") {
+        Some(u) => u,
+        None => {
+            return AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some("missing url".into()),
+            }
+        }
+    };
+    let key = extract_query_value(query, "key").unwrap_or_default();
+    let library_id = match extract_query_value(query, "library") {
+        Some(id) => id,
+        None => {
+            return AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some("missing library".into()),
+            }
+        }
+    };
+    match AbsClient::new(url, key) {
+        Ok(client) => match client.list_library_items(&library_id) {
+            Ok(items) => AbsLibraryItemsResponse { items, error: None },
+            Err(e) => AbsLibraryItemsResponse {
+                items: vec![],
+                error: Some(e.to_string()),
+            },
+        },
+        Err(e) => AbsLibraryItemsResponse {
+            items: vec![],
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+fn build_abs_sync_progress_response(body: &[u8]) -> AbsSyncProgressResponse {
+    let req: AbsSyncProgressRequest = match serde_json::from_slice(body) {
+        Ok(r) => r,
+        Err(e) => return AbsSyncProgressResponse::error(format!("Invalid request: {e}")),
+    };
+    match AbsClient::new(&req.abs_url, &req.api_key) {
+        Ok(client) => {
+            let result = client.set_progress(
+                &req.item_id,
+                req.current_time,
+                req.duration,
+                req.is_finished,
+            );
+            match result {
+                Ok(()) => AbsSyncProgressResponse::ok(),
+                Err(e) => AbsSyncProgressResponse::error(e.to_string()),
+            }
+        }
+        Err(e) => AbsSyncProgressResponse::error(e.to_string()),
+    }
 }
