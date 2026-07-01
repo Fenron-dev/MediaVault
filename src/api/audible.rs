@@ -173,9 +173,7 @@ impl AudibleClient {
             // Audible returns 403 without a recognizable User-Agent.
             .user_agent("Mozilla/5.0 (compatible; MediaVault/1.0)")
             .build()
-            .map_err(|e| {
-                VaultError::ExternalApi(format!("failed to build HTTP client: {e}"))
-            })?;
+            .map_err(|e| VaultError::ExternalApi(format!("failed to build HTTP client: {e}")))?;
         Ok(Self { client })
     }
 
@@ -191,7 +189,12 @@ impl AudibleClient {
     ///
     /// # Errors
     /// - Returns `VaultError::ExternalApi` if both regions fail.
-    pub fn search(&self, title: &str, author: Option<&str>, limit: usize) -> Result<Vec<AudibleProduct>> {
+    pub fn search(
+        &self,
+        title: &str,
+        author: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<AudibleProduct>> {
         match self.search_region(title, author, limit, "de") {
             Ok(results) if !results.is_empty() => return Ok(results),
             _ => {}
@@ -219,16 +222,9 @@ impl AudibleClient {
             params.push(("author", auth));
         }
 
-        let resp = self
-            .client
-            .get(&url)
-            .query(&params)
-            .send()
-            .map_err(|e| {
-                VaultError::ExternalApi(format!(
-                    "Audible (.{tld}) request failed: {e}"
-                ))
-            })?;
+        let resp = self.client.get(&url).query(&params).send().map_err(|e| {
+            VaultError::ExternalApi(format!("Audible (.{tld}) request failed: {e}"))
+        })?;
 
         if !resp.status().is_success() {
             return Err(VaultError::ExternalApi(format!(
@@ -238,9 +234,7 @@ impl AudibleClient {
         }
 
         let body: AudibleProductsResponse = resp.json().map_err(|e| {
-            VaultError::ExternalApi(format!(
-                "Audible (.{tld}) response parse error: {e}"
-            ))
+            VaultError::ExternalApi(format!("Audible (.{tld}) response parse error: {e}"))
         })?;
 
         Ok(body.products)

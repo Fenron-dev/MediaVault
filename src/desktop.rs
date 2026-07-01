@@ -141,10 +141,9 @@ pub(crate) fn run() -> Result<()> {
                     StatusCode::OK,
                     &build_save_sidecars_response(request.body()),
                 ),
-                "/api/delete-files" => json_response(
-                    StatusCode::OK,
-                    &build_delete_files_response(request.body()),
-                ),
+                "/api/delete-files" => {
+                    json_response(StatusCode::OK, &build_delete_files_response(request.body()))
+                }
                 "/api/cleanup-vault" => json_response(
                     StatusCode::OK,
                     &build_cleanup_vault_response(request.uri().query()),
@@ -3019,7 +3018,9 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Pa
                     .rfind('/')
                     .and_then(|end| {
                         let parent = &src[..end];
-                        parent.rfind('/').map(|start| parent[start + 1..].to_string())
+                        parent
+                            .rfind('/')
+                            .map(|start| parent[start + 1..].to_string())
                     })
                     .unwrap_or_else(|| "Unbenannt".to_string());
                 (sanitize_path_segment(&raw), prettify_folder_title(&raw))
@@ -3040,8 +3041,7 @@ fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Pa
                 Some(pos) => src[pos + 1..].to_string(),
                 None => src,
             };
-            items[idx].target_path =
-                Some(format!("Hörbücher/{}/{}", path_segment, file_name));
+            items[idx].target_path = Some(format!("Hörbücher/{}/{}", path_segment, file_name));
         }
 
         let part_paths: Vec<String> = group_indices
@@ -3130,8 +3130,7 @@ fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
     let mut pos = 10;
     if (flags & 0x40) != 0 && pos + 4 <= tag_end {
         let ext_size =
-            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                as usize;
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += ext_size;
     }
 
@@ -3153,12 +3152,8 @@ fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
                 | ((data[pos + 6] as usize & 0x7F) << 7)
                 | (data[pos + 7] as usize & 0x7F)
         } else {
-            u32::from_be_bytes([
-                data[pos + 4],
-                data[pos + 5],
-                data[pos + 6],
-                data[pos + 7],
-            ]) as usize
+            u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
+                as usize
         };
 
         if frame_size == 0 {
@@ -3247,8 +3242,8 @@ fn find_mp4_atom(data: &[u8], target: &[u8], from: usize, to: usize) -> Option<(
     let mut pos = from;
     let limit = to.min(data.len());
     while pos + 8 <= limit {
-        let size = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-            as usize;
+        let size =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         if size < 8 {
             break;
         }
@@ -3268,15 +3263,14 @@ fn parse_mp4_tags(data: &[u8]) -> Option<AudioTagData> {
     let (moov_s, moov_e) = find_mp4_atom(data, b"moov", 0, data.len())?;
 
     // Locate ilst: try moov→udta→meta→ilst, then moov→meta→ilst.
-    let ilst = locate_mp4_ilst(data, moov_s, moov_e)
-        .or_else(|| {
-            // Fallback: meta directly inside moov (some encoders skip udta)
-            let (meta_s, meta_e) = find_mp4_atom(data, b"meta", moov_s, moov_e)?;
-            // meta is a FullBox: skip 4-byte version/flags
-            let adj = (meta_s + 4).min(meta_e);
-            let (ilst_s, ilst_e) = find_mp4_atom(data, b"ilst", adj, meta_e)?;
-            Some((ilst_s, ilst_e))
-        })?;
+    let ilst = locate_mp4_ilst(data, moov_s, moov_e).or_else(|| {
+        // Fallback: meta directly inside moov (some encoders skip udta)
+        let (meta_s, meta_e) = find_mp4_atom(data, b"meta", moov_s, moov_e)?;
+        // meta is a FullBox: skip 4-byte version/flags
+        let adj = (meta_s + 4).min(meta_e);
+        let (ilst_s, ilst_e) = find_mp4_atom(data, b"ilst", adj, meta_e)?;
+        Some((ilst_s, ilst_e))
+    })?;
 
     let (ilst_s, ilst_e) = ilst;
 
