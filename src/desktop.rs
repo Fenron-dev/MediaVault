@@ -27,7 +27,7 @@ use crate::core::vault::{RelativePath, Vault};
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
 use serde::{Deserialize, Serialize};
-use tauri::http::{header::CONTENT_TYPE, Response, StatusCode};
+use tauri::http::{header::CONTENT_TYPE, Request, Response, StatusCode};
 
 const PROTOCOL_SCHEME: &str = "mediavault";
 const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
@@ -91,147 +91,156 @@ const STYLES_CSS: &str = include_str!("../dist/styles.css");
 /// Starts the Tauri desktop shell.
 pub(crate) fn run() -> Result<()> {
     tauri::Builder::default()
-        .register_uri_scheme_protocol(PROTOCOL_SCHEME, |_context, request| {
-            let path = request.uri().path();
-
-            match path {
-                "/" | "/index.html" => {
-                    response(StatusCode::OK, "text/html; charset=utf-8", INDEX_HTML)
-                }
-                "/app.js" => response(
-                    StatusCode::OK,
-                    "application/javascript; charset=utf-8",
-                    APP_JS,
-                ),
-                "/styles.css" => response(StatusCode::OK, "text/css; charset=utf-8", STYLES_CSS),
-                "/api/vault-plan" => {
-                    json_response(StatusCode::OK, &build_plan_response(request.uri().query()))
-                }
-                "/api/anilist-search" => json_response(
-                    StatusCode::OK,
-                    &build_anilist_search_response(request.uri().query()),
-                ),
-                "/api/audible-search" => json_response(
-                    StatusCode::OK,
-                    &build_audible_search_response(request.uri().query()),
-                ),
-                "/api/select-folder" => {
-                    json_response(StatusCode::OK, &build_select_folder_response())
-                }
-                "/api/create-vault" => json_response(
-                    StatusCode::OK,
-                    &build_create_vault_response(request.uri().query()),
-                ),
-                "/api/vault-root" => json_response(
-                    StatusCode::OK,
-                    &build_vault_root_response(request.uri().query()),
-                ),
-                "/api/media-file" => {
-                    let range = request
-                        .headers()
-                        .get("range")
-                        .and_then(|v| v.to_str().ok())
-                        .map(|s| s.to_string());
-                    build_media_file_response(request.uri().query(), range.as_deref())
-                }
-                "/api/apply-import" => {
-                    json_response(StatusCode::OK, &build_apply_import_response(request.body()))
-                }
-                "/api/save-sidecars" => json_response(
-                    StatusCode::OK,
-                    &build_save_sidecars_response(request.body()),
-                ),
-                "/api/delete-files" => {
-                    json_response(StatusCode::OK, &build_delete_files_response(request.body()))
-                }
-                "/api/cleanup-vault" => json_response(
-                    StatusCode::OK,
-                    &build_cleanup_vault_response(request.uri().query()),
-                ),
-                "/api/progress/save" => json_response(
-                    StatusCode::OK,
-                    &build_save_progress_response(request.body()),
-                ),
-                "/api/progress/load" => json_response(
-                    StatusCode::OK,
-                    &build_load_progress_response(request.uri().query()),
-                ),
-                "/api/progress/delete" => json_response(
-                    StatusCode::OK,
-                    &build_delete_progress_response(request.body()),
-                ),
-                "/api/progress/list" => json_response(
-                    StatusCode::OK,
-                    &build_list_progress_response(request.uri().query()),
-                ),
-                "/api/open-external" => json_response(
-                    StatusCode::OK,
-                    &build_open_external_response(request.uri().query()),
-                ),
-                "/api/open-vault-root" => json_response(
-                    StatusCode::OK,
-                    &build_open_vault_root_response(request.uri().query()),
-                ),
-                "/api/playlist/list" => json_response(
-                    StatusCode::OK,
-                    &build_list_playlists_response(request.uri().query()),
-                ),
-                "/api/playlist/get" => json_response(
-                    StatusCode::OK,
-                    &build_get_playlist_response(request.uri().query()),
-                ),
-                "/api/playlist/save" => json_response(
-                    StatusCode::OK,
-                    &build_save_playlist_response(request.body()),
-                ),
-                "/api/playlist/delete" => json_response(
-                    StatusCode::OK,
-                    &build_delete_playlist_response(request.body()),
-                ),
-                "/api/playlist/cursor/save" => {
-                    json_response(StatusCode::OK, &build_save_cursor_response(request.body()))
-                }
-                "/api/playlist/cursor/load" => json_response(
-                    StatusCode::OK,
-                    &build_load_cursor_response(request.uri().query()),
-                ),
-                "/api/abs/test" => json_response(
-                    StatusCode::OK,
-                    &build_abs_test_response(request.uri().query()),
-                ),
-                "/api/abs/libraries" => json_response(
-                    StatusCode::OK,
-                    &build_abs_libraries_response(request.uri().query()),
-                ),
-                "/api/abs/library-items" => json_response(
-                    StatusCode::OK,
-                    &build_abs_library_items_response(request.uri().query()),
-                ),
-                "/api/abs/sync-progress" => json_response(
-                    StatusCode::OK,
-                    &build_abs_sync_progress_response(request.body()),
-                ),
-                "/api/recent-items" => json_response(
-                    StatusCode::OK,
-                    &build_recent_items_response(request.uri().query()),
-                ),
-                "/api/in-progress" => json_response(
-                    StatusCode::OK,
-                    &build_in_progress_response(request.uri().query()),
-                ),
-                "/api/list-subtitles" => json_response(
-                    StatusCode::OK,
-                    &build_list_subtitles_response(request.uri().query()),
-                ),
-                _ => response(
-                    StatusCode::NOT_FOUND,
-                    "text/plain; charset=utf-8",
-                    "Not Found",
-                ),
-            }
+        // Handle custom-scheme requests asynchronously: the whole request is
+        // processed on a worker thread and answered via the `responder`, so
+        // blocking work (AniList HTTP calls, full-file hashing) never runs on
+        // the synchronous webview thread and can no longer freeze the UI. (#7)
+        .register_asynchronous_uri_scheme_protocol(PROTOCOL_SCHEME, |_context, request, responder| {
+            std::thread::spawn(move || {
+                responder.respond(handle_request(&request));
+            });
         })
         .run(tauri::generate_context!())
         .map_err(|error| VaultError::AppStartup(error.to_string()))
+}
+
+/// Routes a single custom-scheme request to its handler and returns the
+/// response. Runs on a worker thread (see [`run`]); all blocking work lives
+/// here rather than on the webview thread.
+fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
+    let path = request.uri().path();
+
+    match path {
+        "/" | "/index.html" => response(StatusCode::OK, "text/html; charset=utf-8", INDEX_HTML),
+        "/app.js" => response(
+            StatusCode::OK,
+            "application/javascript; charset=utf-8",
+            APP_JS,
+        ),
+        "/styles.css" => response(StatusCode::OK, "text/css; charset=utf-8", STYLES_CSS),
+        "/api/vault-plan" => {
+            json_response(StatusCode::OK, &build_plan_response(request.uri().query()))
+        }
+        "/api/anilist-search" => json_response(
+            StatusCode::OK,
+            &build_anilist_search_response(request.uri().query()),
+        ),
+        "/api/audible-search" => json_response(
+            StatusCode::OK,
+            &build_audible_search_response(request.uri().query()),
+        ),
+        "/api/select-folder" => json_response(StatusCode::OK, &build_select_folder_response()),
+        "/api/create-vault" => json_response(
+            StatusCode::OK,
+            &build_create_vault_response(request.uri().query()),
+        ),
+        "/api/vault-root" => json_response(
+            StatusCode::OK,
+            &build_vault_root_response(request.uri().query()),
+        ),
+        "/api/media-file" => {
+            let range = request
+                .headers()
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            build_media_file_response(request.uri().query(), range.as_deref())
+        }
+        "/api/apply-import" => {
+            json_response(StatusCode::OK, &build_apply_import_response(request.body()))
+        }
+        "/api/save-sidecars" => json_response(
+            StatusCode::OK,
+            &build_save_sidecars_response(request.body()),
+        ),
+        "/api/delete-files" => {
+            json_response(StatusCode::OK, &build_delete_files_response(request.body()))
+        }
+        "/api/cleanup-vault" => json_response(
+            StatusCode::OK,
+            &build_cleanup_vault_response(request.uri().query()),
+        ),
+        "/api/progress/save" => json_response(
+            StatusCode::OK,
+            &build_save_progress_response(request.body()),
+        ),
+        "/api/progress/load" => json_response(
+            StatusCode::OK,
+            &build_load_progress_response(request.uri().query()),
+        ),
+        "/api/progress/delete" => json_response(
+            StatusCode::OK,
+            &build_delete_progress_response(request.body()),
+        ),
+        "/api/progress/list" => json_response(
+            StatusCode::OK,
+            &build_list_progress_response(request.uri().query()),
+        ),
+        "/api/open-external" => json_response(
+            StatusCode::OK,
+            &build_open_external_response(request.uri().query()),
+        ),
+        "/api/open-vault-root" => json_response(
+            StatusCode::OK,
+            &build_open_vault_root_response(request.uri().query()),
+        ),
+        "/api/playlist/list" => json_response(
+            StatusCode::OK,
+            &build_list_playlists_response(request.uri().query()),
+        ),
+        "/api/playlist/get" => json_response(
+            StatusCode::OK,
+            &build_get_playlist_response(request.uri().query()),
+        ),
+        "/api/playlist/save" => json_response(
+            StatusCode::OK,
+            &build_save_playlist_response(request.body()),
+        ),
+        "/api/playlist/delete" => json_response(
+            StatusCode::OK,
+            &build_delete_playlist_response(request.body()),
+        ),
+        "/api/playlist/cursor/save" => {
+            json_response(StatusCode::OK, &build_save_cursor_response(request.body()))
+        }
+        "/api/playlist/cursor/load" => json_response(
+            StatusCode::OK,
+            &build_load_cursor_response(request.uri().query()),
+        ),
+        "/api/abs/test" => json_response(
+            StatusCode::OK,
+            &build_abs_test_response(request.uri().query()),
+        ),
+        "/api/abs/libraries" => json_response(
+            StatusCode::OK,
+            &build_abs_libraries_response(request.uri().query()),
+        ),
+        "/api/abs/library-items" => json_response(
+            StatusCode::OK,
+            &build_abs_library_items_response(request.uri().query()),
+        ),
+        "/api/abs/sync-progress" => json_response(
+            StatusCode::OK,
+            &build_abs_sync_progress_response(request.body()),
+        ),
+        "/api/recent-items" => json_response(
+            StatusCode::OK,
+            &build_recent_items_response(request.uri().query()),
+        ),
+        "/api/in-progress" => json_response(
+            StatusCode::OK,
+            &build_in_progress_response(request.uri().query()),
+        ),
+        "/api/list-subtitles" => json_response(
+            StatusCode::OK,
+            &build_list_subtitles_response(request.uri().query()),
+        ),
+        _ => response(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            "Not Found",
+        ),
+    }
 }
 
 fn response(status: StatusCode, content_type: &str, body: &str) -> Response<Vec<u8>> {
