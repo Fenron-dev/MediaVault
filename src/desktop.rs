@@ -1184,6 +1184,15 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
     })
 }
 
+/// One static demo fixture: `(relative path, size, fingerprint, classification, metadata)`.
+type DemoFileSpec = (
+    &'static str,
+    u64,
+    Option<FileFingerprint>,
+    Option<FileClassification>,
+    Option<ResolvedMetadata>,
+);
+
 fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     let planner = ImportPlanner::new(ImportConfig {
         duplicate_policy: DuplicatePolicy::AskUser,
@@ -1194,13 +1203,7 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     // Static demo fixtures. `RelativePath::new` is fallible, so we build each
     // entry lazily and skip any that fails to parse. These literals are always
     // valid, but expect()/unwrap() are forbidden in library code (CLAUDE.md §4.3).
-    let demo_files: [(
-        &str,
-        u64,
-        Option<FileFingerprint>,
-        Option<FileClassification>,
-        Option<ResolvedMetadata>,
-    ); 4] = [
+    let demo_files: [DemoFileSpec; 4] = [
         (
             "Inbox/Violet Evergarden.mkv",
             1_843_200_000,
@@ -1349,48 +1352,48 @@ fn build_error_plan(note: String, vault_root: Option<String>) -> DemoPlanRespons
 }
 
 fn summarize_demo_plan(plan: &ImportPlan) -> DemoSummary {
-    let mut summary = DemoSummary::default();
-    summary.total_files = plan.items.len();
-    summary.items_needing_review = plan
-        .items
-        .iter()
-        .filter(|item| requires_review(item))
-        .count();
-    summary.duplicates = plan
-        .items
-        .iter()
-        .filter(|item| item.duplicate_of.is_some())
-        .count();
-    summary.planned_moves = plan
-        .items
-        .iter()
-        .filter(|item| {
-            item.steps
-                .iter()
-                .any(|step| matches!(step, PlannedImportStep::MoveFile { .. }))
-        })
-        .count();
-    summary.planned_sidecars = plan
-        .items
-        .iter()
-        .filter(|item| {
-            item.steps
-                .iter()
-                .any(|step| matches!(step, PlannedImportStep::WriteSidecar { .. }))
-        })
-        .count();
-    summary.planned_api_fetches = plan
-        .items
-        .iter()
-        .map(|item| {
-            item.steps
-                .iter()
-                .filter(|step| matches!(step, PlannedImportStep::FetchMetadata { .. }))
-                .count()
-        })
-        .sum();
-    summary.smart_collections = 3;
-    summary
+    DemoSummary {
+        total_files: plan.items.len(),
+        items_needing_review: plan
+            .items
+            .iter()
+            .filter(|item| requires_review(item))
+            .count(),
+        duplicates: plan
+            .items
+            .iter()
+            .filter(|item| item.duplicate_of.is_some())
+            .count(),
+        planned_moves: plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.steps
+                    .iter()
+                    .any(|step| matches!(step, PlannedImportStep::MoveFile { .. }))
+            })
+            .count(),
+        planned_sidecars: plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.steps
+                    .iter()
+                    .any(|step| matches!(step, PlannedImportStep::WriteSidecar { .. }))
+            })
+            .count(),
+        planned_api_fetches: plan
+            .items
+            .iter()
+            .map(|item| {
+                item.steps
+                    .iter()
+                    .filter(|step| matches!(step, PlannedImportStep::FetchMetadata { .. }))
+                    .count()
+            })
+            .sum(),
+        smart_collections: 3,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2066,7 +2069,7 @@ fn build_target_path_preview(
         .and_then(|context| context.season_number)
         .unwrap_or(1);
     let episode_label = anime_context
-        .and_then(|context| format_episode_label(context))
+        .and_then(format_episode_label)
         .unwrap_or_else(|| {
             file.source_path
                 .file_stem()
@@ -3008,7 +3011,7 @@ fn prettify_folder_title(raw: &str) -> String {
         .join(" ")
 }
 
-fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Path>) {
+fn group_audiobook_folders(items: &mut [DemoPlanItem], vault_root: Option<&Path>) {
     // Group item indices by parent directory, counting only Audiobook items.
     let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -3159,7 +3162,7 @@ fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
     }
     let version = data[3];
     // Only handle v2.3 and v2.4; v2.2 uses 3-byte frame IDs (rare today).
-    if version < 3 || version > 4 {
+    if !(3..=4).contains(&version) {
         return None;
     }
     let flags = data[5];
@@ -3475,9 +3478,8 @@ fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassifica
 
 fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
     let mut sidecar = ParsedSidecar::default();
-    let mut lines = raw.lines();
 
-    while let Some(line) = lines.next() {
+    for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "---" {
             continue;
@@ -4230,7 +4232,7 @@ fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
         })
         .collect();
 
-    with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+    with_mtime.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
     let items = with_mtime
         .into_iter()
