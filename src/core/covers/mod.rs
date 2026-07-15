@@ -47,7 +47,9 @@ impl CoverFallbackChain {
 
     /// Returns the best available candidate.
     pub fn best(&self) -> Option<&CoverCandidate> {
-        self.candidates.iter().min_by_key(|candidate| candidate.priority)
+        self.candidates
+            .iter()
+            .min_by_key(|candidate| candidate.priority)
     }
 
     /// Returns all known candidates.

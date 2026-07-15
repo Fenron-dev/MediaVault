@@ -9,8 +9,13 @@ const title = document.getElementById("view-title");
 const statusStrip = document.getElementById("status-strip");
 const demoButton = document.getElementById("run-demo");
 const applyImportButton = document.getElementById("apply-import");
+const openVaultFolderButton = document.getElementById("open-vault-folder");
 const inboxRows = document.getElementById("inbox-rows");
+const inboxMultiToggle = document.getElementById("inbox-multi-toggle");
+const inboxDeleteSelected = document.getElementById("inbox-delete-selected");
 const reviewRows = document.getElementById("review-rows");
+const reviewMultiToggle = document.getElementById("review-multi-toggle");
+const reviewDeleteSelected = document.getElementById("review-delete-selected");
 const metricInbox = document.getElementById("metric-inbox");
 const metricReview = document.getElementById("metric-review");
 const metricDuplicates = document.getElementById("metric-duplicates");
@@ -84,6 +89,7 @@ const inspectorToggle = document.getElementById("inspector-toggle");
 const inspectorTitle = document.getElementById("inspector-title");
 const inspectorProperties = document.getElementById("inspector-properties");
 const inspectorEditToggle = document.getElementById("inspector-edit-toggle");
+const inspectorPlay = document.getElementById("inspector-play");
 const inspectorFetchMetadata = document.getElementById("inspector-fetch-metadata");
 const inspectorNotDuplicate = document.getElementById("inspector-not-duplicate");
 const inspectorTrash = document.getElementById("inspector-trash");
@@ -107,6 +113,18 @@ const inspectorYamlHint = document.getElementById("inspector-yaml-hint");
 const inspectorYamlPanel = document.getElementById("inspector-yaml-panel");
 const auditTrailNode = document.getElementById("audit-trail");
 const appModal = document.getElementById("app-modal");
+const confirmDialog = document.getElementById("confirm-dialog");
+const confirmDialogLabel = document.getElementById("confirm-dialog-label");
+const confirmDialogTitle = document.getElementById("confirm-dialog-title");
+const confirmDialogBody = document.getElementById("confirm-dialog-body");
+const confirmDialogConfirm = document.getElementById("confirm-dialog-confirm");
+const confirmDialogCancel = document.getElementById("confirm-dialog-cancel");
+const conflictDialog = document.getElementById("conflict-dialog");
+const conflictDialogBody = document.getElementById("conflict-dialog-body");
+const conflictDialogList = document.getElementById("conflict-dialog-list");
+const conflictDialogOverwrite = document.getElementById("conflict-dialog-overwrite");
+const conflictDialogSkip = document.getElementById("conflict-dialog-skip");
+const conflictDialogCancel = document.getElementById("conflict-dialog-cancel");
 const trashDialog = document.getElementById("trash-dialog");
 const trashDialogTitle = document.getElementById("trash-dialog-title");
 const trashDialogBody = document.getElementById("trash-dialog-body");
@@ -119,10 +137,73 @@ const anilistDialogSearch = document.getElementById("anilist-dialog-search");
 const anilistDialogCancel = document.getElementById("anilist-dialog-cancel");
 const anilistDialogFeedback = document.getElementById("anilist-dialog-feedback");
 const anilistDialogResults = document.getElementById("anilist-dialog-results");
+const audibleDialog = document.getElementById("audible-dialog");
+const audibleDialogTitle = document.getElementById("audible-dialog-title");
+const audibleDialogQuery = document.getElementById("audible-dialog-query");
+const audibleDialogAuthor = document.getElementById("audible-dialog-author");
+const audibleDialogSearch = document.getElementById("audible-dialog-search");
+const audibleDialogCancel = document.getElementById("audible-dialog-cancel");
+const audibleDialogFeedback = document.getElementById("audible-dialog-feedback");
+const audibleDialogResults = document.getElementById("audible-dialog-results");
 const imageDialog = document.getElementById("image-dialog");
 const imageDialogTitle = document.getElementById("image-dialog-title");
 const imageDialogPreview = document.getElementById("image-dialog-preview");
 const imageDialogClose = document.getElementById("image-dialog-close");
+
+// Audiobookshelf sync
+const absUrlInput = document.getElementById("abs-url-input");
+const absKeyInput = document.getElementById("abs-key-input");
+const absTestBtn = document.getElementById("abs-test-btn");
+const absLibrariesBtn = document.getElementById("abs-libraries-btn");
+const absFeedback = document.getElementById("abs-feedback");
+const absLibrariesSection = document.getElementById("abs-libraries-section");
+const absLibrarySelect = document.getElementById("abs-library-select");
+const absImportBtn = document.getElementById("abs-import-btn");
+
+// Playlists
+const playlistList = document.getElementById("playlist-list");
+const playlistNew = document.getElementById("playlist-new");
+const playlistDetailEmpty = document.getElementById("playlist-detail-empty");
+const playlistDetailContent = document.getElementById("playlist-detail-content");
+const playlistDetailKindLabel = document.getElementById("playlist-detail-kind-label");
+const playlistDetailTitle = document.getElementById("playlist-detail-title");
+const playlistDetailCount = document.getElementById("playlist-detail-count");
+const playlistPlayAll = document.getElementById("playlist-play-all");
+const playlistDelete = document.getElementById("playlist-delete");
+const playlistItemsRows = document.getElementById("playlist-items-rows");
+const playlistItemsHint = document.getElementById("playlist-items-hint");
+const playlistCreateDialog = document.getElementById("playlist-create-dialog");
+const playlistCreateName = document.getElementById("playlist-create-name");
+const playlistCreateConfirm = document.getElementById("playlist-create-confirm");
+const playlistCreateCancel = document.getElementById("playlist-create-cancel");
+
+// Player
+const playerDialog = document.getElementById("player-dialog");
+const playerTitle = document.getElementById("player-title");
+const playerStage = document.getElementById("player-stage");
+const playerVideo = document.getElementById("player-video");
+const playerAudio = document.getElementById("player-audio");
+const playerAudioArt = document.getElementById("player-audio-art");
+const playerCoverArt = document.getElementById("player-cover-art");
+const playerSubtitleDisplay = document.getElementById("player-subtitle-display");
+const playerSubtitleSelect = document.getElementById("player-subtitle-select");
+const playerPdfStage = document.getElementById("player-pdf-stage");
+const playerPdfFrame = document.getElementById("player-pdf-frame");
+const playerMangaStage = document.getElementById("player-manga-stage");
+const playerMangaImg = document.getElementById("player-manga-img");
+const playerMangaPrev = document.getElementById("player-manga-prev");
+const playerMangaNext = document.getElementById("player-manga-next");
+const playerMangaCounter = document.getElementById("player-manga-counter");
+const playerClose = document.getElementById("player-close");
+const playerPlayPause = document.getElementById("player-play-pause");
+const playerSeek = document.getElementById("player-seek");
+const playerTimeCurrent = document.getElementById("player-time-current");
+const playerTimeTotal = document.getElementById("player-time-total");
+const playerSpeed = document.getElementById("player-speed");
+const playerSleepTimer = document.getElementById("player-sleep-timer");
+const playerSkipBack = document.getElementById("player-skip-back");
+const playerSkipFwd = document.getElementById("player-skip-fwd");
+const playerOpenSystem = document.getElementById("player-open-system");
 
 const storageKey = "mediavault.vaultRoot";
 const recentVaultsKey = "mediavault.recentVaults";
@@ -141,6 +222,7 @@ const labels = {
   inbox: "Inbox",
   review: "Prüfung",
   collections: "Sammlungen",
+  playlists: "Wiedergabelisten",
   settings: "Einstellungen",
 };
 
@@ -199,10 +281,19 @@ let recentCollections = loadStoredJson(recentCollectionsKey, []);
 let trashedEntries = loadStoredJson(trashKey, {});
 let isMultiEdit = false;
 let multiSelectedKeys = new Set();
+let isInboxMultiEdit = false;
+let inboxSelectedKeys = new Set();
+let isReviewMultiEdit = false;
+let reviewSelectedKeys = new Set();
+let pendingConflictResolve = null;
+let pendingConfirmResolve = null;
 let pendingTrashSelection = null;
 let pendingAniListSelection = null;
 let pendingAniListTargets = [];
 let pendingAniListFeedback = null;
+let pendingAudibleSelection = null;
+let pendingAudibleTargets = [];
+let pendingAudibleFeedback = null;
 
 function setActiveTab(tab, options = {}) {
   document.body.classList.remove("inspector-editing", "property-add-open");
@@ -230,6 +321,17 @@ function setActiveTab(tab, options = {}) {
     collectionSidebar.classList.toggle("is-active", tab === "collections");
   }
   document.body.classList.toggle("is-collections", tab === "collections");
+
+  // Hide the right-hand inspector on tabs that don't use it so they get
+  // the full workspace width.  Restore it when switching to collections.
+  const noInspector = tab === "inbox" || tab === "review";
+  document.body.classList.toggle("inspector-hidden", noInspector);
+
+  // Clear the inspector when leaving the collections tab so stale
+  // property values don't bleed through to other tabs.
+  if (noInspector) {
+    renderInspector(null);
+  }
 
   if (statusStrip) {
     statusStrip.textContent = `Ansicht gewechselt: ${labels[tab] ?? tab}.`;
@@ -489,6 +591,26 @@ function renderRecentVaults() {
   });
 }
 
+// Numeric-aware sort so "Part9" comes before "Part21".
+function naturalCompare(a, b) {
+  const re = /(\d+)|(\D+)/g;
+  const at = String(a).match(re) ?? [];
+  const bt = String(b).match(re) ?? [];
+  for (let i = 0; i < Math.max(at.length, bt.length); i++) {
+    const as = at[i] ?? "";
+    const bs = bt[i] ?? "";
+    const an = parseInt(as, 10);
+    const bn = parseInt(bs, 10);
+    if (!Number.isNaN(an) && !Number.isNaN(bn)) {
+      if (an !== bn) return an - bn;
+    } else {
+      const c = as.localeCompare(bs, "de");
+      if (c !== 0) return c;
+    }
+  }
+  return 0;
+}
+
 function sanitizeSegment(value) {
   return String(value)
     .replace(/[\\/:"*?<>|]/g, " ")
@@ -562,6 +684,7 @@ function isLocalImageItem(item) {
 
 function coverUrlFor(item) {
   return (
+    item?.cover_url ||
     item?.cover_image_extra_large ||
     item?.cover_image_large ||
     item?.cover_image_medium ||
@@ -669,43 +792,48 @@ function classificationSourceLabel(value) {
 function folderSegmentFor(mediaType) {
   switch (mediaType) {
     case "film":
-      return "Movies";
+      return "Filme";
     case "series":
-      return "Series";
+      return "Serien";
     case "anime":
+    case "hentai-anime":
       return "Anime";
     case "photo":
-      return "Photos";
+      return "Fotos";
     case "image":
-      return "Images";
+      return "Bilder";
     case "music-album":
-      return "Music/Albums";
     case "music-track":
-      return "Music/Tracks";
+      return "Musik";
     case "book":
-      return "Books";
     case "ebook":
-      return "Ebooks";
+      return "Bücher";
     case "manga":
       return "Manga";
     case "comic":
       return "Comics";
     case "audiobook":
-      return "Audiobooks";
+      return "Hörbücher";
     case "video-game":
-      return "Video Games";
+      return "Games";
+    case "rpg":
+      return "TTRPG";
+    case "board-game":
+      return "Brettspiele";
     case "document":
-      return "Documents";
+      return "Dokumente";
     case "archive":
-      return "Archives";
+      return "Archive";
     case "software":
       return "Software";
     case "3d-model":
-      return "3D Models";
+      return "3D-Modelle";
     case "video-misc":
       return "Videos";
+    case "font":
+      return "Schriften";
     default:
-      return "Unclassified";
+      return "Unklassifiziert";
   }
 }
 
@@ -769,11 +897,24 @@ function deriveSeriesTitle(item) {
   }
 
   const pathParts = String(item.source_path ?? "").split("/").map(cleanTitleText).filter(Boolean);
+
+  // Check for explicit "anime" folder
   const animeIndex = pathParts.findIndex((part) => part.toLowerCase() === "anime");
   if (animeIndex >= 0 && pathParts[animeIndex + 1]) {
     const candidate = pathParts[animeIndex + 1];
-    if (!/^staffel|^season|^s\d+/i.test(candidate)) {
+    if (!/^(?:staffel|season)\s*\d+$/i.test(candidate) && !/^s\d+$/i.test(candidate)) {
       return candidate;
+    }
+  }
+
+  // Find the folder directly above "Staffel X" / "Season X" in the path.
+  // e.g. "Inbox/Elfen Lied/Staffel 1/S01E02.mkv" → "Elfen Lied"
+  for (let i = 1; i < pathParts.length; i++) {
+    if (/^(?:staffel|season)\s*\d+$/i.test(pathParts[i]) || /^s\d{1,2}$/i.test(pathParts[i])) {
+      const candidate = pathParts[i - 1];
+      if (candidate && candidate.toLowerCase() !== "inbox" && !episodeMarker(candidate)) {
+        return candidate;
+      }
     }
   }
 
@@ -865,9 +1006,17 @@ function collectionPathFor(item) {
     return pathWithoutFilename(renderPathTemplate(pathTemplates.film, item));
   }
 
+  // Audiobooks (single file or multi-part) derive their collection node from the
+  // computed target_path so they share the deep Author/Series/Book structure.
+  // buildTargetPath runs before this in projectItem, so target_path is current.
+  if (item.media_type === "audiobook" && item.target_path) {
+    return pathWithoutFilename(item.target_path);
+  }
+
   const folder = item.folder_segment ?? folderSegmentFor(item.media_type);
   const title = sanitizeSegment(item.title || fileStem(item.source_path) || "Unbenannt");
-  return title ? `${folder}/${title}` : folder;
+  const yearSuffix = item.year ? ` (${item.year})` : "";
+  return title ? `${folder}/${title}${yearSuffix}` : folder;
 }
 
 function episodeFileLabel(item) {
@@ -917,6 +1066,11 @@ function projectItem(item) {
     "episode_title",
     "status",
     "notes",
+    "author",
+    "narrator",
+    "publisher",
+    "audible_asin",
+    "series_sequence",
   ].forEach((field) => {
     if (typeof metadata[field] === "string") {
       effective[field] = metadata[field];
@@ -1005,8 +1159,11 @@ function projectItem(item) {
       effective.folder_segment = folderSegmentFor(effective.media_type);
     }
   }
-  effective.collection_path = collectionPathFor(effective);
+  // target_path must be computed first: collectionPathFor derives the audiobook
+  // collection node from the (possibly deep) target_path, so a stale target_path
+  // would yield the old flat Hörbücher/<book> node instead of Author/Series/Book.
   effective.target_path = buildTargetPath(effective);
+  effective.collection_path = collectionPathFor(effective);
   effective.sidecar_path = buildSidecarPath(effective.target_path);
   effective.sidecar_preview = yamlOverrides[item.source_path] || buildSidecarPreview(effective);
   return effective;
@@ -1049,7 +1206,7 @@ function isReadyForImport(item) {
   return !String(item.target_path).startsWith("Inbox/");
 }
 
-function buildApplyImportItem(item) {
+function buildApplyImportItem(item, overwrite = false) {
   const prepared = {
     ...item,
     status: effectiveAppliedStatus(item),
@@ -1061,6 +1218,7 @@ function buildApplyImportItem(item) {
     source_path: item.source_path,
     target_path: prepared.target_path,
     sidecar_preview: prepared.sidecar_preview,
+    overwrite,
   };
 }
 
@@ -1119,26 +1277,7 @@ function clearAppliedLocalState(sourcePaths) {
   saveStoredJson(trashKey, trashedEntries);
 }
 
-async function applyReadyImports() {
-  const readyItems = (currentPlan?.items ?? []).filter((item) => isReadyForImport(item));
-  if (!readyItems.length) {
-    if (statusStrip) {
-      statusStrip.textContent = "Keine verschiebbaren Einträge vorhanden. Prüfe Titel, Typ und Duplikate.";
-    }
-    return;
-  }
-
-  const confirmed = window.confirm(
-    `${readyItems.length} Eintrag(e) jetzt aus der Inbox in die Vault-Struktur verschieben?`
-  );
-  if (!confirmed) {
-    return;
-  }
-
-  if (statusStrip) {
-    statusStrip.textContent = `${readyItems.length} Eintrag(e) werden verschoben...`;
-  }
-
+async function postApplyImport(items, dryRun) {
   const response = await fetch("/api/apply-import", {
     method: "POST",
     headers: {
@@ -1146,7 +1285,8 @@ async function applyReadyImports() {
     },
     body: JSON.stringify({
       vault_root: getVaultRoot(),
-      items: readyItems.map((item) => buildApplyImportItem(item)),
+      items,
+      dry_run: dryRun,
     }),
   });
 
@@ -1158,6 +1298,85 @@ async function applyReadyImports() {
   if (result.error) {
     throw new Error(result.error);
   }
+  return result;
+}
+
+async function applyReadyImports() {
+  const readyItems = (currentPlan?.items ?? []).filter((item) => isReadyForImport(item));
+  if (!readyItems.length) {
+    const reviewCount = (currentPlan?.items ?? []).filter((item) => needsReviewInUi(item)).length;
+    const hint = reviewCount
+      ? ` ${reviewCount} Eintrag(e) warten noch auf Prüfung.`
+      : " Alle Einträge sind bereits in der Vault oder werden als Review markiert.";
+    if (statusStrip) {
+      statusStrip.textContent = "Kein Eintrag bereit zum Verschieben." + hint;
+      statusStrip.style.color = "var(--accent-strong)";
+      setTimeout(() => {
+        statusStrip.style.color = "";
+      }, 4000);
+    }
+    return;
+  }
+
+  // If some items still need review, confirm that we only move the ready ones.
+  const pendingReview = (currentPlan?.items ?? []).filter((item) => needsReviewInUi(item)).length;
+  if (pendingReview > 0) {
+    const proceed = await showConfirmDialog({
+      label: "Teilimport",
+      title: "Noch nicht alle Dateien zugewiesen",
+      body:
+        `${readyItems.length} Datei(en) sind bereit und werden verschoben. ` +
+        `${pendingReview} Eintrag(e) warten noch auf Prüfung und bleiben in der Inbox. ` +
+        `Möchtest du die bereits klaren Dateien jetzt verschieben?`,
+      confirmLabel: `${readyItems.length} verschieben`,
+    });
+    if (!proceed) {
+      if (statusStrip) {
+        statusStrip.textContent = "Import abgebrochen.";
+      }
+      return;
+    }
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `Prüfe ${readyItems.length} Eintrag(e) auf Konflikte...`;
+  }
+
+  // Step 1 — dry-run preflight: detect targets that already exist on disk.
+  const preflight = await postApplyImport(
+    readyItems.map((item) => buildApplyImportItem(item)),
+    true
+  );
+  const conflicts = Array.isArray(preflight.conflicts) ? preflight.conflicts : [];
+
+  // Step 2 — if conflicts exist, ask the user how to proceed.
+  let overwritePaths = new Set();
+  if (conflicts.length) {
+    const decision = await showImportConflictDialog(conflicts);
+    if (decision === "cancel") {
+      if (statusStrip) {
+        statusStrip.textContent = "Import abgebrochen.";
+      }
+      return;
+    }
+    if (decision === "overwrite") {
+      overwritePaths = new Set(conflicts.map((c) => c.source_path));
+    }
+    // decision === "skip": leave overwritePaths empty → conflicting files are
+    // skipped by the backend (target exists, overwrite=false).
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `${readyItems.length} Eintrag(e) werden verschoben...`;
+  }
+
+  // Step 3 — real apply with per-item overwrite flags.
+  const result = await postApplyImport(
+    readyItems.map((item) =>
+      buildApplyImportItem(item, overwritePaths.has(item.source_path))
+    ),
+    false
+  );
 
   const applied = Array.isArray(result.applied) ? result.applied : [];
   const skipped = Array.isArray(result.skipped) ? result.skipped : [];
@@ -1174,6 +1393,120 @@ async function applyReadyImports() {
   }
 
   await loadPlan();
+}
+
+// Generic in-app confirmation dialog (replaces window.confirm, which does not
+// work reliably inside the Tauri WebView). Resolves to true/false.
+function showConfirmDialog({ title, body, confirmLabel = "Fortfahren", label = "Bestätigen", danger = false } = {}) {
+  return new Promise((resolve) => {
+    if (!confirmDialog) {
+      resolve(false);
+      return;
+    }
+
+    if (confirmDialogLabel) confirmDialogLabel.textContent = label;
+    if (confirmDialogTitle) confirmDialogTitle.textContent = title || "Bist du sicher?";
+    if (confirmDialogBody) confirmDialogBody.textContent = body || "";
+    if (confirmDialogConfirm) {
+      confirmDialogConfirm.textContent = confirmLabel;
+      confirmDialogConfirm.classList.toggle("danger", danger);
+      confirmDialogConfirm.classList.toggle("primary", !danger);
+    }
+
+    const cleanup = () => {
+      confirmDialogConfirm?.removeEventListener("click", onConfirm);
+      confirmDialogCancel?.removeEventListener("click", onCancel);
+    };
+    pendingConfirmResolve = (value) => {
+      cleanup();
+      resolve(value);
+    };
+    const finish = (value) => {
+      const settle = pendingConfirmResolve;
+      pendingConfirmResolve = null;
+      closeActionModal();
+      settle?.(value);
+    };
+    const onConfirm = () => finish(true);
+    const onCancel = () => finish(false);
+
+    confirmDialogConfirm?.addEventListener("click", onConfirm);
+    confirmDialogCancel?.addEventListener("click", onCancel);
+
+    showModalCard(confirmDialog);
+  });
+}
+
+// Shows the import conflict dialog and resolves with the user's choice:
+// "overwrite" | "skip" | "cancel".
+function showImportConflictDialog(conflicts) {
+  return new Promise((resolve) => {
+    if (!conflictDialog || !conflictDialogList) {
+      resolve("cancel");
+      return;
+    }
+
+    if (conflictDialogBody) {
+      conflictDialogBody.textContent =
+        `${conflicts.length} Datei(en) existieren bereits am Zielort. ` +
+        `Überschreiben löscht die vorhandene Datei und ersetzt sie durch die Inbox-Datei. ` +
+        `Überspringen lässt diese Dateien in der Inbox liegen, damit du sie manuell prüfen kannst.`;
+    }
+
+    clearNode(conflictDialogList);
+    conflicts.forEach((conflict) => {
+      const row = document.createElement("div");
+      row.className = "conflict-row";
+
+      const name = document.createElement("strong");
+      name.textContent = basename(conflict.target_path);
+
+      const target = document.createElement("span");
+      target.className = "conflict-path";
+      target.textContent = `Ziel: ${conflict.target_path}`;
+
+      const sizes = document.createElement("span");
+      sizes.className = "conflict-sizes";
+      const same = Number(conflict.source_size) === Number(conflict.target_size);
+      sizes.textContent =
+        `Inbox: ${formatBytes(conflict.source_size)} · Vorhanden: ${formatBytes(conflict.target_size)}` +
+        (same ? " · vermutlich identisch" : " · unterschiedlich groß!");
+      if (!same) {
+        sizes.classList.add("is-warning");
+      }
+
+      row.appendChild(name);
+      row.appendChild(target);
+      row.appendChild(sizes);
+      conflictDialogList.appendChild(row);
+    });
+
+    const cleanup = () => {
+      conflictDialogOverwrite?.removeEventListener("click", onOverwrite);
+      conflictDialogSkip?.removeEventListener("click", onSkip);
+      conflictDialogCancel?.removeEventListener("click", onCancel);
+    };
+    // Resolver wrapper so closeActionModal (backdrop/Escape) can cancel us too.
+    pendingConflictResolve = (choice) => {
+      cleanup();
+      resolve(choice);
+    };
+    const finish = (choice) => {
+      const settle = pendingConflictResolve;
+      pendingConflictResolve = null;
+      closeActionModal();
+      settle?.(choice);
+    };
+    const onOverwrite = () => finish("overwrite");
+    const onSkip = () => finish("skip");
+    const onCancel = () => finish("cancel");
+
+    conflictDialogOverwrite?.addEventListener("click", onOverwrite);
+    conflictDialogSkip?.addEventListener("click", onSkip);
+    conflictDialogCancel?.addEventListener("click", onCancel);
+
+    showModalCard(conflictDialog);
+  });
 }
 
 function buildTargetPath(item) {
@@ -1196,6 +1529,39 @@ function buildTargetPath(item) {
 
   if (mediaType === "film") {
     return renderPathTemplate(pathTemplates.film, item);
+  }
+
+  // Audiobooks (single file or multi-part). When Audible metadata is available,
+  // build a deep path: Author/Series/NR - Title/file. Without metadata, fall back
+  // to the source folder name. Original filenames are kept so parts don't collide.
+  if (mediaType === "audiobook") {
+    const origFilename = basename(item.source_path);
+    const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
+    const author = sanitizeSegment(item.author || "");
+    const series = sanitizeSegment(item.series_title || "");
+    const bookTitle = sanitizeSegment(item.title || "untitled");
+
+    if (author && series) {
+      const seqRaw = item.series_sequence ? parseInt(item.series_sequence, 10) : NaN;
+      const seqStr = !isNaN(seqRaw) ? String(seqRaw).padStart(2, "0") : null;
+      const bookFolder = seqStr ? `${seqStr} - ${bookTitle}` : bookTitle;
+      return `${folderSegment}/${author}/${series}/${bookFolder}/${origFilename}`;
+    }
+
+    if (author) {
+      return `${folderSegment}/${author}/${bookTitle}/${origFilename}`;
+    }
+
+    // No Audible metadata: derive folder name from the source path parent directory.
+    const srcParts = (item.source_path || "").split("/");
+    const parentName = srcParts.length >= 2 ? srcParts[srcParts.length - 2] : null;
+    const INBOX_SEGMENTS = new Set(["inbox", "hörbücher", "horbücher"]);
+    const audioTitle = sanitizeSegment(
+      parentName && !INBOX_SEGMENTS.has(parentName.toLowerCase())
+        ? parentName
+        : item.title || fileStem(item.source_path) || "untitled"
+    );
+    return `${folderSegment}/${audioTitle}${yearSuffix}/${origFilename}`;
   }
 
   const folderSegment = item.folder_segment ?? folderSegmentFor(mediaType);
@@ -1704,6 +2070,22 @@ function closeActionModal() {
   pendingAniListSelection = null;
   pendingAniListTargets = [];
   pendingAniListFeedback = null;
+  pendingAudibleSelection = null;
+  pendingAudibleTargets = [];
+  pendingAudibleFeedback = null;
+
+  // If a conflict dialog is awaiting a decision and the modal is closed by other
+  // means (backdrop click, Escape), resolve it as a cancel so the caller unblocks.
+  if (pendingConflictResolve) {
+    const resolve = pendingConflictResolve;
+    pendingConflictResolve = null;
+    resolve("cancel");
+  }
+  if (pendingConfirmResolve) {
+    const resolve = pendingConfirmResolve;
+    pendingConfirmResolve = null;
+    resolve(false);
+  }
 
   hideModalCards();
   if (appModal) {
@@ -1713,11 +2095,13 @@ function closeActionModal() {
 }
 
 function hideModalCards() {
-  [trashDialog, anilistDialog, imageDialog].forEach((dialog) => {
-    if (dialog) {
-      dialog.hidden = true;
+  [trashDialog, anilistDialog, audibleDialog, imageDialog, conflictDialog, confirmDialog].forEach(
+    (dialog) => {
+      if (dialog) {
+        dialog.hidden = true;
+      }
     }
-  });
+  );
 }
 
 function showModalCard(dialog) {
@@ -1746,6 +2130,1271 @@ function openImagePreview(item) {
   imageDialogPreview.src = imageUrl;
   imageDialogPreview.alt = item?.title || "Bildvorschau";
   showModalCard(imageDialog);
+}
+
+// ---------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------
+
+const dashboardResumeSection = document.getElementById("dashboard-resume-section");
+const dashboardResumeCards = document.getElementById("dashboard-resume-cards");
+const dashboardRecentSection = document.getElementById("dashboard-recent-section");
+const dashboardRecentCards = document.getElementById("dashboard-recent-cards");
+const dashboardEmptyHint = document.getElementById("dashboard-empty-hint");
+
+function mediaTypeEmoji(type) {
+  switch (type) {
+    case "film": return "🎬";
+    case "series": return "📺";
+    case "anime": case "hentai-anime": return "🌸";
+    case "audiobook": return "🎧";
+    case "music-album": case "music-track": return "🎵";
+    case "book": case "ebook": return "📖";
+    case "manga": return "📚";
+    case "comic": return "💬";
+    case "video-misc": return "🎞";
+    default: return "📁";
+  }
+}
+
+function createDashboardCard(item, onPlay) {
+  const card = document.createElement("div");
+  card.className = "dashboard-card";
+  card.title = item.title;
+
+  const coverWrap = document.createElement("div");
+  coverWrap.className = "dashboard-card-cover";
+  if (item.cover_url) {
+    const img = document.createElement("img");
+    img.src = item.cover_url;
+    img.alt = item.title;
+    img.onerror = () => { img.style.display = "none"; };
+    coverWrap.appendChild(img);
+  } else {
+    coverWrap.textContent = mediaTypeEmoji(item.media_type);
+  }
+
+  const titleEl = document.createElement("div");
+  titleEl.className = "dashboard-card-title";
+  titleEl.textContent = item.title;
+
+  const meta = document.createElement("div");
+  meta.className = "dashboard-card-meta";
+  meta.textContent = item.year ? String(item.year) : mediaTypeLabel(item.media_type);
+
+  card.appendChild(coverWrap);
+
+  if (typeof item.progress_fraction === "number") {
+    const barWrap = document.createElement("div");
+    barWrap.className = "dashboard-progress-bar";
+    const fill = document.createElement("div");
+    fill.className = "dashboard-progress-fill";
+    fill.style.width = `${Math.round(item.progress_fraction * 100)}%`;
+    barWrap.appendChild(fill);
+    card.appendChild(barWrap);
+  }
+
+  card.appendChild(titleEl);
+  card.appendChild(meta);
+
+  card.addEventListener("click", () => {
+    if (onPlay) onPlay(item);
+  });
+
+  return card;
+}
+
+async function loadDashboard() {
+  const root = getVaultRoot();
+  if (!root) return;
+
+  const rootQuery = `root=${encodeURIComponent(root)}`;
+
+  // In-progress ("Weitermachen") now lives under Wiedergabelisten → Verlauf,
+  // so it no longer fills the overview. Keep the section hidden here.
+  if (dashboardResumeSection) dashboardResumeSection.hidden = true;
+  if (dashboardResumeCards) clearNode(dashboardResumeCards);
+
+  // Load recent items
+  try {
+    const res = await fetch(`mediavault://localhost/api/recent-items?${rootQuery}`);
+    const data = await res.json();
+    if (dashboardRecentCards) clearNode(dashboardRecentCards);
+    if (data.items && data.items.length > 0) {
+      if (dashboardRecentSection) dashboardRecentSection.hidden = false;
+      if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
+      data.items.forEach((item) => {
+        const card = createDashboardCard(item, (it) => {
+          const ext = playerFileExt(it.vault_path);
+          if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
+            openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
+          }
+        });
+        dashboardRecentCards?.appendChild(card);
+      });
+    } else {
+      if (dashboardRecentSection) dashboardRecentSection.hidden = true;
+      if (dashboardEmptyHint) dashboardEmptyHint.hidden = false;
+    }
+  } catch {
+    if (dashboardRecentSection) dashboardRecentSection.hidden = true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Media player
+// ---------------------------------------------------------------------------
+
+const PLAYER_SAVE_INTERVAL_MS = 5000;
+const PLAYER_VIDEO_EXTS = new Set(["mp4", "m4v", "mov", "webm", "ogv"]);
+const PLAYER_AUDIO_EXTS = new Set(["mp3", "m4a", "m4b", "aac", "ogg", "oga", "opus", "flac", "wav", "weba"]);
+// MKV/AVI cannot be played by macOS WKWebView natively.
+const PLAYER_UNSUPPORTED_EXTS = new Set(["mkv", "avi", "ts", "wmv", "rmvb"]);
+const PLAYER_PDF_EXTS = new Set(["pdf"]);
+const PLAYER_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"]);
+// EPUB opens via system viewer; listed here so the inspector "Abspielen" button shows.
+const PLAYER_EPUB_EXTS = new Set(["epub"]);
+
+// mangaState holds the image list and current index when a manga/image sequence is open.
+let mangaState = null; // { items: string[], index: number }
+
+let playerState = null; // { mediaEl, item, vaultPath, sleepTimerId, saveTimerId, subtitleTrack }
+
+function playerMediaElement() {
+  return playerState?.mediaEl ?? null;
+}
+
+function playerFileExt(path) {
+  return (path || "").split(".").pop().toLowerCase();
+}
+
+function isVideoFile(path) {
+  return PLAYER_VIDEO_EXTS.has(playerFileExt(path));
+}
+
+function isAudioFile(path) {
+  return PLAYER_AUDIO_EXTS.has(playerFileExt(path));
+}
+
+function formatTime(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return "—:——";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  const mm = String(m).padStart(2, "0");
+  const ss = String(s).padStart(2, "0");
+  return h > 0 ? `${h}:${mm}:${ss}` : `${m}:${ss}`;
+}
+
+function playerUpdateTime(el) {
+  if (!playerTimeCurrent || !playerTimeTotal || !playerSeek) return;
+  const cur = el.currentTime || 0;
+  const dur = el.duration || 0;
+  playerTimeCurrent.textContent = formatTime(cur);
+  playerTimeTotal.textContent = formatTime(dur);
+  if (dur > 0) {
+    playerSeek.value = String(Math.round((cur / dur) * 1000));
+  }
+}
+
+function playerSaveProgress() {
+  if (!playerState) return;
+  const el = playerState.mediaEl;
+  if (!el || !isFinite(el.duration) || el.duration <= 0) return;
+
+  const vaultPath = playerState.vaultPath;
+  const root = getVaultRoot();
+  const completed = el.currentTime / el.duration >= 0.90;
+
+  const progressType = isVideoFile(vaultPath) ? "video" : "audio";
+  const body = JSON.stringify({
+    vault_root: root || null,
+    vault_path: vaultPath,
+    progress: {
+      type: progressType,
+      position_seconds: el.currentTime,
+      duration_seconds: el.duration,
+    },
+    completed,
+  });
+
+  fetch("mediavault://localhost/api/progress/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  }).catch(() => {});
+}
+
+async function playerLoadProgress(vaultPath) {
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  try {
+    const res = await fetch(`mediavault://localhost/api/progress/load?path=${encodeURIComponent(vaultPath)}${rootQuery}`);
+    const data = await res.json();
+    return data?.record ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function playerStop() {
+  if (!playerState) return;
+  const { mediaEl, sleepTimerId, saveTimerId } = playerState;
+
+  playerSaveProgress();
+
+  if (sleepTimerId) clearTimeout(sleepTimerId);
+  if (saveTimerId) clearInterval(saveTimerId);
+
+  if (mediaEl) {
+    mediaEl.pause();
+    mediaEl.src = "";
+    mediaEl.load();
+  }
+
+  if (playerVideo) { playerVideo.src = ""; }
+  if (playerAudio) { playerAudio.src = ""; }
+  if (subtitleRafId) {
+    cancelAnimationFrame(subtitleRafId);
+    subtitleRafId = null;
+  }
+  subtitleCues = [];
+  if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+  if (playerPdfFrame) playerPdfFrame.src = "";
+  if (playerPdfStage) playerPdfStage.hidden = true;
+  if (playerMangaStage) playerMangaStage.hidden = true;
+  mangaState = null;
+
+  playerState = null;
+}
+
+// ── SRT subtitle parsing ────────────────────────────────────────────────────
+
+function parseSrt(text) {
+  const cues = [];
+  const blocks = text.replace(/\r\n/g, "\n").trim().split(/\n\n+/);
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    if (lines.length < 3) continue;
+    const timeLine = lines.find((l) => l.includes("-->"));
+    if (!timeLine) continue;
+    const [startStr, endStr] = timeLine.split("-->").map((s) => s.trim());
+    const toSec = (ts) => {
+      const [hms, ms] = ts.replace(",", ".").split(".");
+      const [h, m, s] = hms.split(":").map(Number);
+      return h * 3600 + m * 60 + s + Number(`0.${ms || 0}`);
+    };
+    const start = toSec(startStr);
+    const end = toSec(endStr);
+    const textIdx = lines.indexOf(timeLine) + 1;
+    const cueText = lines.slice(textIdx).join("\n").replace(/<[^>]+>/g, "");
+    cues.push({ start, end, text: cueText });
+  }
+  return cues;
+}
+
+let subtitleCues = [];
+let subtitleRafId = null;
+
+function startSubtitleLoop(mediaEl) {
+  if (subtitleRafId) cancelAnimationFrame(subtitleRafId);
+  function tick() {
+    if (!playerState || !subtitleCues.length) {
+      if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+      return;
+    }
+    const t = mediaEl.currentTime;
+    const cue = subtitleCues.find((c) => t >= c.start && t <= c.end);
+    if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = cue?.text ?? "";
+    subtitleRafId = requestAnimationFrame(tick);
+  }
+  subtitleRafId = requestAnimationFrame(tick);
+}
+
+// Parses WebVTT — same cue structure as SRT but with a header and "." for ms.
+function parseVtt(text) {
+  const body = text.replace(/^﻿/, "").replace(/\r\n/g, "\n");
+  // Drop the WEBVTT header line/block.
+  const stripped = body.replace(/^WEBVTT[^\n]*\n/, "");
+  return parseSrt(stripped);
+}
+
+// Parses the Dialogue lines of an ASS/SSA subtitle file (text only, tags removed).
+function parseAss(text) {
+  const cues = [];
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const toSec = (ts) => {
+    // ASS time format: H:MM:SS.cc
+    const m = ts.trim().match(/(\d+):(\d{2}):(\d{2})[.,](\d{1,3})/);
+    if (!m) return null;
+    return (
+      Number(m[1]) * 3600 +
+      Number(m[2]) * 60 +
+      Number(m[3]) +
+      Number(`0.${m[4]}`)
+    );
+  };
+  for (const line of lines) {
+    if (!line.startsWith("Dialogue:")) continue;
+    // Format: Dialogue: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text
+    const parts = line.slice("Dialogue:".length).split(",");
+    if (parts.length < 10) continue;
+    const start = toSec(parts[1]);
+    const end = toSec(parts[2]);
+    if (start === null || end === null) continue;
+    const raw = parts.slice(9).join(",");
+    const cueText = raw
+      .replace(/\{[^}]*\}/g, "") // override tags
+      .replace(/\\N/gi, "\n")
+      .trim();
+    if (cueText) cues.push({ start, end, text: cueText });
+  }
+  cues.sort((a, b) => a.start - b.start);
+  return cues;
+}
+
+function parseSubtitleByExt(text, path) {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  if (ext === "vtt") return parseVtt(text);
+  if (ext === "ass" || ext === "ssa") return parseAss(text);
+  return parseSrt(text);
+}
+
+// Loads a specific subtitle file by vault path and starts the render loop.
+async function loadSubtitleFile(subtitlePath) {
+  subtitleCues = [];
+  if (!subtitlePath) {
+    if (playerSubtitleDisplay) playerSubtitleDisplay.textContent = "";
+    return;
+  }
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/media-file?path=${encodeURIComponent(subtitlePath)}${rootQuery}`
+    );
+    if (!res.ok) return;
+    const text = await res.text();
+    subtitleCues = parseSubtitleByExt(text, subtitlePath);
+    if (playerState?.mediaEl && subtitleCues.length > 0) {
+      startSubtitleLoop(playerState.mediaEl);
+    }
+  } catch {
+    subtitleCues = [];
+  }
+}
+
+// Discovers subtitle tracks near the video and populates the player selector.
+async function loadSubtitles(vaultPath) {
+  subtitleCues = [];
+  if (!playerSubtitleSelect) return;
+
+  // Reset selector to just "off" while we fetch.
+  playerSubtitleSelect.innerHTML = '<option value="">Untertitel: Aus</option>';
+  playerSubtitleSelect.hidden = true;
+
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  let tracks = [];
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/list-subtitles?path=${encodeURIComponent(vaultPath)}${rootQuery}`
+    );
+    if (res.ok) {
+      const data = await res.json();
+      tracks = Array.isArray(data.subtitles) ? data.subtitles : [];
+    }
+  } catch {
+    tracks = [];
+  }
+
+  if (!tracks.length) {
+    return;
+  }
+
+  tracks.forEach((track) => {
+    const option = document.createElement("option");
+    option.value = track.path;
+    option.textContent = track.label;
+    playerSubtitleSelect.appendChild(option);
+  });
+  playerSubtitleSelect.hidden = false;
+
+  // Auto-select the first track (backend sorts best matches first).
+  const first = tracks[0].path;
+  playerSubtitleSelect.value = first;
+  await loadSubtitleFile(first);
+}
+
+// ── Manga/image sequence ────────────────────────────────────────────────────
+
+function mangaSiblings(vaultPath) {
+  if (!currentPlan) return [vaultPath];
+  const dir = vaultPath.includes("/") ? vaultPath.substring(0, vaultPath.lastIndexOf("/")) : "";
+  return currentPlan.items
+    .filter((it) => {
+      const p = it.source_path || "";
+      const ext = p.split(".").pop().toLowerCase();
+      if (!PLAYER_IMAGE_EXTS.has(ext)) return false;
+      const d = p.includes("/") ? p.substring(0, p.lastIndexOf("/")) : "";
+      return d === dir;
+    })
+    .map((it) => it.source_path)
+    .sort();
+}
+
+function mangaShowIndex(index) {
+  if (!mangaState || !playerMangaImg || !playerMangaCounter) return;
+  const items = mangaState.items;
+  const clamped = Math.max(0, Math.min(items.length - 1, index));
+  mangaState.index = clamped;
+  const vaultPath = items[clamped];
+  const root = getVaultRoot();
+  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+  playerMangaImg.src = `mediavault://localhost/api/media-file?path=${encodeURIComponent(vaultPath)}${rootQuery}`;
+  playerMangaCounter.textContent = `${clamped + 1} / ${items.length}`;
+  if (playerMangaPrev) playerMangaPrev.disabled = clamped === 0;
+  if (playerMangaNext) playerMangaNext.disabled = clamped === items.length - 1;
+}
+
+function playerSetPlayPause(el) {
+  if (!playerPlayPause) return;
+  playerPlayPause.textContent = el.paused ? "▶" : "⏸";
+}
+
+async function openPlayer(item) {
+  if (!playerDialog || !item) return;
+
+  playerStop();
+
+  const sourcePath = item.source_path || item.target_path || "";
+  if (!sourcePath) return;
+
+  const ext = playerFileExt(sourcePath);
+  const isVideo = isVideoFile(sourcePath);
+  const isAudio = isAudioFile(sourcePath);
+  const isPdf = PLAYER_PDF_EXTS.has(ext);
+  const isImage = PLAYER_IMAGE_EXTS.has(ext);
+  const isEpub = PLAYER_EPUB_EXTS.has(ext);
+  const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext) || isEpub;
+
+  if (!isVideo && !isAudio && !isPdf && !isImage && !unsupported) return;
+
+  // Unsupported formats (MKV, AVI, TS, ePub…): open directly in system player
+  // without showing the internal player dialog.
+  if (unsupported) {
+    const root = getVaultRoot();
+    const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+    fetch(
+      `mediavault://localhost/api/open-external?path=${encodeURIComponent(sourcePath)}${rootQuery}`
+    ).catch(() => {});
+    return;
+  }
+
+  const fileUrl = mediaFileUrlFor(item);
+  const title = item.title || fileStem(sourcePath) || "Wiedergabe";
+
+  if (playerTitle) playerTitle.textContent = title;
+
+  // Show the player — it lives outside #app-modal so it is always visible
+  // regardless of whether any other modal is open. Close any other open
+  // modal card so the two overlays don't stack.
+  if (appModal && !appModal.hidden) {
+    appModal.hidden = true;
+    appModal.classList.remove("is-active");
+  }
+  playerDialog.hidden = false;
+
+  // ── PDF ──────────────────────────────────────────────────────────────────
+  if (isPdf) {
+    if (playerStage) playerStage.hidden = true;
+    if (playerAudioArt) playerAudioArt.hidden = true;
+    if (playerPdfStage) playerPdfStage.hidden = false;
+    if (playerMangaStage) playerMangaStage.hidden = true;
+    if (playerPdfFrame) playerPdfFrame.src = fileUrl;
+    // PDF has no playback controls; disable them
+    if (playerPlayPause) playerPlayPause.disabled = true;
+    // Store minimal state so closePlayer works
+    playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
+    return;
+  }
+
+  // ── Image / manga sequence ───────────────────────────────────────────────
+  if (isImage) {
+    if (playerStage) playerStage.hidden = true;
+    if (playerAudioArt) playerAudioArt.hidden = true;
+    if (playerPdfStage) playerPdfStage.hidden = true;
+    if (playerMangaStage) playerMangaStage.hidden = false;
+    if (playerPlayPause) playerPlayPause.disabled = true;
+    const siblings = mangaSiblings(sourcePath);
+    const startIdx = Math.max(0, siblings.indexOf(sourcePath));
+    mangaState = { items: siblings, index: startIdx };
+    mangaShowIndex(startIdx);
+    playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
+    return;
+  }
+
+  // ── Audio / Video ────────────────────────────────────────────────────────
+  const mediaEl = isVideo ? playerVideo : playerAudio;
+  if (!mediaEl) return;
+
+  if (playerStage) playerStage.hidden = !isVideo;
+  if (playerAudioArt) playerAudioArt.hidden = isVideo;
+  if (playerPdfStage) playerPdfStage.hidden = true;
+  if (playerMangaStage) playerMangaStage.hidden = true;
+  if (playerCoverArt && !isVideo) {
+    const cover = coverUrlFor(item);
+    if (cover) {
+      playerCoverArt.src = cover;
+      playerCoverArt.hidden = false;
+      playerCoverArt.onerror = () => {
+        playerCoverArt.hidden = true;
+        playerCoverArt.onerror = null;
+      };
+    } else {
+      // Fall back to cover image files in the same directory
+      const root = getVaultRoot();
+      const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+      const dir = sourcePath.includes("/") ? sourcePath.slice(0, sourcePath.lastIndexOf("/")) : "";
+      const candidates = dir
+        ? ["cover.jpg", "folder.jpg", "cover.png", "poster.jpg"].map(
+            (n) =>
+              `mediavault://localhost/api/media-file?path=${encodeURIComponent(
+                dir + "/" + n
+              )}${rootQuery}`
+          )
+        : [];
+      if (candidates.length > 0) {
+        let ci = 0;
+        const tryNextCover = () => {
+          if (ci < candidates.length) {
+            playerCoverArt.src = candidates[ci++];
+          } else {
+            playerCoverArt.src = "";
+            playerCoverArt.hidden = true;
+            playerCoverArt.onerror = null;
+          }
+        };
+        playerCoverArt.hidden = false;
+        playerCoverArt.onerror = tryNextCover;
+        tryNextCover();
+      } else {
+        playerCoverArt.src = "";
+        playerCoverArt.hidden = true;
+      }
+    }
+  }
+
+  if (playerPlayPause) playerPlayPause.disabled = false;
+  mediaEl.src = fileUrl;
+  mediaEl.playbackRate = parseFloat(playerSpeed?.value ?? "1");
+
+  const saveTimerId = setInterval(playerSaveProgress, PLAYER_SAVE_INTERVAL_MS);
+  playerState = { mediaEl, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId };
+
+  // Restore resume position
+  const record = await playerLoadProgress(sourcePath);
+  if (record?.progress?.position_seconds && isFinite(record.progress.position_seconds)) {
+    mediaEl.currentTime = record.progress.position_seconds;
+  }
+
+  // Discover and load subtitle tracks for video files. Audio hides the selector.
+  if (isVideo) {
+    loadSubtitles(sourcePath);
+  } else if (playerSubtitleSelect) {
+    playerSubtitleSelect.hidden = true;
+    subtitleCues = [];
+  }
+
+  mediaEl.play().catch(() => {});
+  playerSetPlayPause(mediaEl);
+}
+
+function closePlayer() {
+  playerStop();
+  if (playerDialog) playerDialog.hidden = true;
+}
+
+// ─── Audiobookshelf (ABS) sync ────────────────────────────────────────────
+
+const absSettingsKey = "mediavault.absSettings";
+
+function absGetSettings() {
+  return loadStoredJson(absSettingsKey, { url: "", key: "" });
+}
+
+function absSaveSettings(url, key) {
+  saveStoredJson(absSettingsKey, { url, key });
+}
+
+function absUrl() {
+  return absUrlInput?.value.trim() || absGetSettings().url;
+}
+
+function absKey() {
+  return absKeyInput?.value.trim() || absGetSettings().key;
+}
+
+async function absTest() {
+  const url = absUrl();
+  const key = absKey();
+  if (!url) {
+    if (absFeedback) absFeedback.textContent = "Bitte Server-URL eingeben.";
+    return false;
+  }
+  absSaveSettings(url, key);
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/abs/test?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`
+    );
+    const data = await res.json();
+    if (data.ok) {
+      if (absFeedback) absFeedback.textContent = "Verbindung erfolgreich.";
+      return true;
+    }
+    if (absFeedback) absFeedback.textContent = `Fehler: ${data.error || "Unbekannt"}`;
+    return false;
+  } catch (e) {
+    if (absFeedback) absFeedback.textContent = `Verbindungsfehler: ${e.message}`;
+    return false;
+  }
+}
+
+async function absLoadLibraries() {
+  const url = absUrl();
+  const key = absKey();
+  if (!url) {
+    if (absFeedback) absFeedback.textContent = "Bitte Server-URL eingeben.";
+    return;
+  }
+  absSaveSettings(url, key);
+  if (absFeedback) absFeedback.textContent = "Lade Bibliotheken…";
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/abs/libraries?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`
+    );
+    const data = await res.json();
+    if (data.error) {
+      if (absFeedback) absFeedback.textContent = `Fehler: ${data.error}`;
+      return;
+    }
+    if (!absLibrarySelect || !absLibrariesSection) return;
+    absLibrarySelect.innerHTML = "";
+    (data.libraries || []).forEach((lib) => {
+      const opt = document.createElement("option");
+      opt.value = lib.id;
+      opt.textContent = `${lib.name} (${lib.media_type})`;
+      absLibrarySelect.appendChild(opt);
+    });
+    absLibrariesSection.hidden = data.libraries?.length === 0;
+    if (absFeedback) absFeedback.textContent = `${data.libraries?.length || 0} Bibliothek(en) gefunden.`;
+  } catch (e) {
+    if (absFeedback) absFeedback.textContent = `Fehler: ${e.message}`;
+  }
+}
+
+async function absImportLibrary() {
+  const url = absUrl();
+  const key = absKey();
+  const libraryId = absLibrarySelect?.value;
+  if (!url || !libraryId) return;
+  if (absFeedback) absFeedback.textContent = "Lade Bibliotheksinhalte…";
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/abs/library-items?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}&library=${encodeURIComponent(libraryId)}`
+    );
+    const data = await res.json();
+    if (data.error) {
+      if (absFeedback) absFeedback.textContent = `Fehler: ${data.error}`;
+      return;
+    }
+    const count = data.items?.length || 0;
+    if (absFeedback) {
+      absFeedback.textContent = `${count} Einträge gefunden. Import-Funktion wird in einem späteren Release implementiert.`;
+    }
+  } catch (e) {
+    if (absFeedback) absFeedback.textContent = `Fehler: ${e.message}`;
+  }
+}
+
+function initAbsSettings() {
+  const stored = absGetSettings();
+  if (absUrlInput && stored.url) absUrlInput.value = stored.url;
+  if (absKeyInput && stored.key) absKeyInput.value = stored.key;
+  if (absTestBtn) absTestBtn.addEventListener("click", absTest);
+  if (absLibrariesBtn) absLibrariesBtn.addEventListener("click", absLoadLibraries);
+  if (absImportBtn) absImportBtn.addEventListener("click", absImportLibrary);
+}
+
+// ─── Playlist management ──────────────────────────────────────────────────
+
+let activePlaylists = [];
+let activePlaylistId = null;
+let historyViewActive = false;
+let historyItems = [];
+
+// Maps a vault-relative path to a coarse media type via its top folder segment.
+function mediaTypeFromVaultPath(path) {
+  const top = String(path || "").split("/")[0] || "";
+  const map = {
+    Filme: "Filme",
+    Serien: "Serien",
+    Anime: "Anime",
+    Hörbücher: "Hörbücher",
+    Musik: "Musik",
+    Bücher: "Bücher",
+    Manga: "Manga",
+    Comics: "Comics",
+    Games: "Games",
+  };
+  return map[top] || "Sonstige";
+}
+
+function playlistKindLabel(kind) {
+  if (kind === "smart") return "Smart Playlist";
+  if (kind === "series") return "Serie";
+  return "Manuell";
+}
+
+function playlistKindIcon(kind) {
+  if (kind === "smart") return "✦";
+  if (kind === "series") return "▶▶";
+  return "☰";
+}
+
+async function loadPlaylists() {
+  const root = getVaultRoot();
+  if (!root) return;
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/playlist/list?root=${encodeURIComponent(root)}`
+    );
+    const data = await res.json();
+    activePlaylists = data.playlists || [];
+    historyItems = await fetchHistoryItems();
+    renderPlaylistList();
+  } catch {
+    activePlaylists = [];
+  }
+}
+
+function renderPlaylistList() {
+  if (!playlistList) return;
+  playlistList.innerHTML = "";
+
+  // Special "Verlauf" entry at the top: shows in-progress media grouped by type.
+  const historyRow = document.createElement("div");
+  historyRow.className = "playlist-row" + (historyViewActive ? " is-active" : "");
+  const historyIcon = document.createElement("span");
+  historyIcon.className = "playlist-row-icon";
+  historyIcon.textContent = "↺";
+  const historyName = document.createElement("span");
+  historyName.className = "playlist-row-name";
+  historyName.textContent = "Verlauf";
+  const historyCount = document.createElement("span");
+  historyCount.className = "playlist-row-count";
+  historyCount.textContent = historyItems.length || "";
+  historyRow.append(historyIcon, historyName, historyCount);
+  historyRow.addEventListener("click", () => selectHistory());
+  playlistList.appendChild(historyRow);
+
+  if (activePlaylists.length === 0) {
+    const hint = document.createElement("p");
+    hint.className = "body-copy";
+    hint.style.padding = "8px 4px";
+    hint.style.color = "var(--text-muted)";
+    hint.textContent = "Noch keine Playlists.";
+    playlistList.appendChild(hint);
+    return;
+  }
+  for (const pl of activePlaylists) {
+    const row = document.createElement("div");
+    row.className = "playlist-row" + (pl.id === activePlaylistId ? " is-active" : "");
+    row.dataset.id = pl.id;
+
+    const icon = document.createElement("span");
+    icon.className = "playlist-row-icon";
+    icon.textContent = playlistKindIcon(pl.kind);
+
+    const name = document.createElement("span");
+    name.className = "playlist-row-name";
+    name.textContent = pl.name;
+
+    const count = document.createElement("span");
+    count.className = "playlist-row-count";
+    count.textContent = pl.items?.length ?? 0;
+
+    row.append(icon, name, count);
+    row.addEventListener("click", () => selectPlaylist(pl.id));
+    playlistList.appendChild(row);
+  }
+}
+
+function selectPlaylist(id) {
+  historyViewActive = false;
+  activePlaylistId = id;
+  renderPlaylistList();
+  const pl = activePlaylists.find((p) => p.id === id);
+  if (!pl) return;
+  renderPlaylistDetail(pl);
+}
+
+async function fetchHistoryItems() {
+  const root = getVaultRoot();
+  if (!root) return [];
+  try {
+    const res = await fetch(
+      `mediavault://localhost/api/in-progress?root=${encodeURIComponent(root)}`
+    );
+    const data = await res.json();
+    return Array.isArray(data.items) ? data.items : [];
+  } catch {
+    return [];
+  }
+}
+
+async function selectHistory() {
+  historyViewActive = true;
+  activePlaylistId = null;
+  historyItems = await fetchHistoryItems();
+  renderPlaylistList();
+  renderHistoryDetail();
+}
+
+function renderHistoryDetail() {
+  if (!playlistDetailEmpty || !playlistDetailContent) return;
+  playlistDetailEmpty.hidden = true;
+  playlistDetailContent.hidden = false;
+
+  if (playlistDetailKindLabel) playlistDetailKindLabel.textContent = "Wiedergabeverlauf";
+  if (playlistDetailTitle) playlistDetailTitle.textContent = "Verlauf";
+  const total = historyItems.length;
+  if (playlistDetailCount) {
+    playlistDetailCount.textContent = `${total} Eintr${total === 1 ? "ag" : "äge"}`;
+  }
+  if (playlistPlayAll) playlistPlayAll.hidden = true;
+  if (playlistDelete) {
+    playlistDelete.hidden = total === 0;
+    playlistDelete.textContent = "Verlauf löschen";
+  }
+  if (playlistItemsHint) {
+    playlistItemsHint.hidden = total > 0;
+    playlistItemsHint.textContent =
+      "Noch kein Verlauf. Sobald du etwas abspielst, erscheint es hier.";
+  }
+
+  if (!playlistItemsRows) return;
+  playlistItemsRows.innerHTML = "";
+  if (!total) return;
+
+  // Group by media type.
+  const groups = new Map();
+  historyItems.forEach((item) => {
+    const type = mediaTypeFromVaultPath(item.vault_path);
+    if (!groups.has(type)) groups.set(type, []);
+    groups.get(type).push(item);
+  });
+
+  for (const [type, items] of groups) {
+    const header = document.createElement("div");
+    header.className = "history-group-header";
+    header.textContent = `${type} (${items.length})`;
+    playlistItemsRows.appendChild(header);
+
+    items.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = "playlist-item-row";
+
+      const nameSpan = document.createElement("span");
+      nameSpan.style.fontSize = "0.875rem";
+      nameSpan.style.overflow = "hidden";
+      nameSpan.style.textOverflow = "ellipsis";
+      nameSpan.style.whiteSpace = "nowrap";
+      const stem = item.title || item.vault_path.split("/").pop()?.replace(/\.[^.]+$/, "") || item.vault_path;
+      const pct = Math.round((item.progress_fraction || 0) * 100);
+      nameSpan.textContent = pct > 0 ? `${stem} · ${pct}%` : stem;
+      nameSpan.title = item.vault_path;
+
+      const typeSpan = document.createElement("span");
+      typeSpan.style.fontSize = "0.75rem";
+      typeSpan.style.color = "var(--text-muted)";
+      const ext = item.vault_path.split(".").pop()?.toLowerCase() || "";
+      typeSpan.textContent = ext.toUpperCase();
+
+      const actions = document.createElement("span");
+      actions.style.display = "flex";
+      actions.style.gap = "4px";
+
+      const playBtn = document.createElement("button");
+      playBtn.className = "action-button icon-button playlist-item-play";
+      playBtn.title = "Fortsetzen";
+      playBtn.textContent = "▶";
+      playBtn.addEventListener("click", () => {
+        openPlayer({ source_path: item.vault_path, target_path: item.vault_path, title: item.title });
+      });
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "action-button icon-button danger";
+      delBtn.title = "Aus Verlauf entfernen";
+      delBtn.textContent = "✕";
+      delBtn.addEventListener("click", async () => {
+        await deleteHistoryEntry(item.vault_path);
+      });
+
+      actions.append(playBtn, delBtn);
+      row.append(nameSpan, typeSpan, actions);
+      playlistItemsRows.appendChild(row);
+    });
+  }
+}
+
+async function deleteHistoryEntry(vaultPath) {
+  const root = getVaultRoot();
+  if (!root) return;
+  try {
+    await fetch("mediavault://localhost/api/progress/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: root, vault_path: vaultPath }),
+    });
+  } catch {
+    // ignore — re-fetch reflects actual state
+  }
+  historyItems = await fetchHistoryItems();
+  renderPlaylistList();
+  renderHistoryDetail();
+}
+
+async function clearHistory() {
+  const total = historyItems.length;
+  if (!total) return;
+  const confirmed = await showConfirmDialog({
+    label: "Verlauf",
+    title: "Verlauf löschen?",
+    body: `Alle ${total} Verlaufseinträge werden entfernt. Die Mediendateien selbst bleiben erhalten.`,
+    confirmLabel: "Verlauf löschen",
+    danger: true,
+  });
+  if (!confirmed) return;
+
+  const root = getVaultRoot();
+  if (!root) return;
+  for (const item of historyItems) {
+    try {
+      await fetch("mediavault://localhost/api/progress/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ vault_root: root, vault_path: item.vault_path }),
+      });
+    } catch {
+      // continue deleting the rest
+    }
+  }
+  historyItems = [];
+  renderPlaylistList();
+  renderHistoryDetail();
+}
+
+function renderPlaylistDetail(pl) {
+  if (!playlistDetailEmpty || !playlistDetailContent) return;
+  playlistDetailEmpty.hidden = true;
+  playlistDetailContent.hidden = false;
+
+  if (playlistDetailKindLabel) playlistDetailKindLabel.textContent = playlistKindLabel(pl.kind);
+  if (playlistDetailTitle) playlistDetailTitle.textContent = pl.name;
+
+  const count = pl.items?.length ?? 0;
+  if (playlistDetailCount) playlistDetailCount.textContent = `${count} Eintr${count === 1 ? "ag" : "äge"}`;
+
+  if (playlistPlayAll) playlistPlayAll.hidden = count === 0 || pl.kind === "smart";
+  if (playlistItemsHint) playlistItemsHint.hidden = count > 0;
+
+  if (!playlistItemsRows) return;
+  playlistItemsRows.innerHTML = "";
+  if (count === 0) return;
+
+  for (let i = 0; i < pl.items.length; i++) {
+    const vaultPath = pl.items[i];
+    const row = document.createElement("div");
+    row.className = "playlist-item-row";
+
+    const nameSpan = document.createElement("span");
+    nameSpan.style.fontSize = "0.875rem";
+    nameSpan.style.overflow = "hidden";
+    nameSpan.style.textOverflow = "ellipsis";
+    nameSpan.style.whiteSpace = "nowrap";
+    const stem = vaultPath.split("/").pop()?.replace(/\.[^.]+$/, "") || vaultPath;
+    nameSpan.textContent = stem;
+    nameSpan.title = vaultPath;
+
+    const typeSpan = document.createElement("span");
+    typeSpan.style.fontSize = "0.75rem";
+    typeSpan.style.color = "var(--text-muted)";
+    const ext = vaultPath.split(".").pop()?.toLowerCase() || "";
+    typeSpan.textContent = ext.toUpperCase();
+
+    const playBtn = document.createElement("button");
+    playBtn.className = "action-button icon-button playlist-item-play";
+    playBtn.title = "Abspielen";
+    playBtn.textContent = "▶";
+    playBtn.addEventListener("click", () => {
+      openPlayer({ source_path: vaultPath, target_path: vaultPath });
+    });
+
+    row.append(nameSpan, typeSpan, playBtn);
+    playlistItemsRows.appendChild(row);
+  }
+}
+
+async function saveNewPlaylist(name) {
+  const root = getVaultRoot();
+  if (!root) return;
+  const id = `pl_${Date.now()}`;
+  const playlist = {
+    id,
+    name: name.trim(),
+    kind: "manual",
+    items: [],
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+  try {
+    await fetch("mediavault://localhost/api/playlist/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: root, playlist }),
+    });
+    await loadPlaylists();
+    selectPlaylist(id);
+  } catch (e) {
+    if (statusStrip) statusStrip.textContent = `Fehler beim Erstellen: ${e.message}`;
+  }
+}
+
+function createNewPlaylist() {
+  if (playlistCreateDialog) {
+    if (playlistCreateName) playlistCreateName.value = "";
+    showModalCard(playlistCreateDialog);
+    setTimeout(() => playlistCreateName?.focus(), 50);
+  }
+}
+
+async function deleteActivePlaylist() {
+  // In history view the same button clears the playback history instead.
+  if (historyViewActive) {
+    await clearHistory();
+    return;
+  }
+  if (!activePlaylistId) return;
+  const pl = activePlaylists.find((p) => p.id === activePlaylistId);
+  if (!pl) return;
+  const confirmed = await showConfirmDialog({
+    label: "Playlist",
+    title: "Playlist löschen?",
+    body: `Playlist „${pl.name}" wirklich löschen?`,
+    confirmLabel: "Löschen",
+    danger: true,
+  });
+  if (!confirmed) return;
+  const root = getVaultRoot();
+  if (!root) return;
+  try {
+    await fetch("mediavault://localhost/api/playlist/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: root, id: activePlaylistId }),
+    });
+    activePlaylistId = null;
+    if (playlistDetailEmpty) playlistDetailEmpty.hidden = false;
+    if (playlistDetailContent) playlistDetailContent.hidden = true;
+    await loadPlaylists();
+  } catch (e) {
+    if (statusStrip) statusStrip.textContent = `Fehler beim Löschen: ${e.message}`;
+  }
+}
+
+function initPlaylists() {
+  if (playlistNew) playlistNew.addEventListener("click", createNewPlaylist);
+  if (playlistDelete) playlistDelete.addEventListener("click", deleteActivePlaylist);
+  if (playlistPlayAll) {
+    playlistPlayAll.addEventListener("click", () => {
+      const pl = activePlaylists.find((p) => p.id === activePlaylistId);
+      if (!pl || !pl.items?.length) return;
+      openPlayer({ source_path: pl.items[0], target_path: pl.items[0] });
+    });
+  }
+
+  if (playlistCreateConfirm) {
+    playlistCreateConfirm.addEventListener("click", async () => {
+      const name = playlistCreateName?.value.trim();
+      if (!name) return;
+      hideModalCards();
+      await saveNewPlaylist(name);
+    });
+  }
+
+  if (playlistCreateCancel) {
+    playlistCreateCancel.addEventListener("click", () => {
+      hideModalCards();
+    });
+  }
+
+  if (playlistCreateName) {
+    playlistCreateName.addEventListener("keydown", async (e) => {
+      if (e.key === "Enter") {
+        const name = playlistCreateName.value.trim();
+        if (!name) return;
+        hideModalCards();
+        await saveNewPlaylist(name);
+      } else if (e.key === "Escape") {
+        hideModalCards();
+      }
+    });
+  }
+}
+
+// Wire up player controls once DOM is ready.
+function initPlayer() {
+  if (playerClose) {
+    playerClose.addEventListener("click", closePlayer);
+  }
+
+  if (playerPlayPause) {
+    playerPlayPause.addEventListener("click", () => {
+      const el = playerMediaElement();
+      if (!el) return;
+      if (el.paused) { el.play().catch(() => {}); } else { el.pause(); }
+      playerSetPlayPause(el);
+    });
+  }
+
+  if (playerSkipBack) {
+    playerSkipBack.addEventListener("click", () => {
+      const el = playerMediaElement();
+      if (el) el.currentTime = Math.max(0, el.currentTime - 10);
+    });
+  }
+
+  if (playerSkipFwd) {
+    playerSkipFwd.addEventListener("click", () => {
+      const el = playerMediaElement();
+      if (el) el.currentTime = Math.min(el.duration || Infinity, el.currentTime + 30);
+    });
+  }
+
+  if (playerSeek) {
+    playerSeek.addEventListener("input", () => {
+      const el = playerMediaElement();
+      if (!el || !isFinite(el.duration)) return;
+      el.currentTime = (parseInt(playerSeek.value, 10) / 1000) * el.duration;
+    });
+  }
+
+  if (playerSpeed) {
+    playerSpeed.addEventListener("change", () => {
+      const el = playerMediaElement();
+      if (el) el.playbackRate = parseFloat(playerSpeed.value);
+    });
+  }
+
+  if (playerSubtitleSelect) {
+    playerSubtitleSelect.addEventListener("change", () => {
+      loadSubtitleFile(playerSubtitleSelect.value);
+    });
+  }
+
+  if (playerSleepTimer) {
+    playerSleepTimer.addEventListener("change", () => {
+      if (!playerState) return;
+      const { sleepTimerId } = playerState;
+      if (sleepTimerId) clearTimeout(sleepTimerId);
+
+      const minutes = parseInt(playerSleepTimer.value, 10);
+      if (minutes > 0) {
+        playerState.sleepTimerId = setTimeout(() => {
+          const el = playerMediaElement();
+          if (el) el.pause();
+          if (playerPlayPause) playerPlayPause.textContent = "▶";
+          if (playerSleepTimer) playerSleepTimer.value = "0";
+        }, minutes * 60 * 1000);
+      } else {
+        playerState.sleepTimerId = null;
+      }
+    });
+  }
+
+  if (playerOpenSystem) {
+    playerOpenSystem.addEventListener("click", async () => {
+      if (!playerState) return;
+      const root = getVaultRoot();
+      const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
+      const path = playerState.vaultPath;
+      try {
+        await fetch(`mediavault://localhost/api/open-external?path=${encodeURIComponent(path)}${rootQuery}`);
+      } catch {
+        // Ignore — the system open is fire-and-forget
+      }
+    });
+  }
+
+  // Manga navigation buttons
+  if (playerMangaPrev) {
+    playerMangaPrev.addEventListener("click", () => {
+      if (mangaState) mangaShowIndex(mangaState.index - 1);
+    });
+  }
+  if (playerMangaNext) {
+    playerMangaNext.addEventListener("click", () => {
+      if (mangaState) mangaShowIndex(mangaState.index + 1);
+    });
+  }
+
+  // Keep time display and seek bar in sync.
+  for (const mediaEl of [playerVideo, playerAudio]) {
+    if (!mediaEl) continue;
+    mediaEl.addEventListener("timeupdate", () => playerUpdateTime(mediaEl));
+    mediaEl.addEventListener("loadedmetadata", () => playerUpdateTime(mediaEl));
+    mediaEl.addEventListener("play", () => playerSetPlayPause(mediaEl));
+    mediaEl.addEventListener("pause", () => playerSetPlayPause(mediaEl));
+    mediaEl.addEventListener("ended", () => {
+      if (playerPlayPause) playerPlayPause.textContent = "▶";
+      playerSaveProgress();
+      playerAdvancePlaylist();
+    });
+  }
+
+  // Close on Escape
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && playerDialog && !playerDialog.hidden) {
+      e.preventDefault();
+      closePlayer();
+    }
+    if (playerDialog && !playerDialog.hidden) {
+      if (e.key === " " || e.key === "k") {
+        e.preventDefault();
+        playerPlayPause?.click();
+      }
+      if (e.key === "ArrowLeft") {
+        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index - 1); }
+        else { e.preventDefault(); playerSkipBack?.click(); }
+      }
+      if (e.key === "ArrowRight") {
+        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index + 1); }
+        else { e.preventDefault(); playerSkipFwd?.click(); }
+      }
+    }
+  });
+}
+
+function playerAdvancePlaylist() {
+  if (!activePlaylistId || !currentPlan) return;
+  const pl = activePlaylists.find((p) => p.id === activePlaylistId);
+  if (!pl || !pl.items?.length || !playerState) return;
+  const cur = playerState.vaultPath;
+  const idx = pl.items.indexOf(cur);
+  if (idx < 0 || idx >= pl.items.length - 1) return;
+  const next = currentPlan.items.find((it) => it.source_path === pl.items[idx + 1]);
+  if (next) openPlayer(next);
 }
 
 function selectionSearchTitle(selection) {
@@ -1993,6 +3642,323 @@ function applyAniListResult(metadata) {
   closeActionModal();
 }
 
+// ─── Audible dialog ────────────────────────────────────────────────────────
+
+function audibleDisplayTitle(result) {
+  return result.title || "Unbekannter Titel";
+}
+
+function audibleSummary(meta) {
+  const parts = [meta.title];
+  if (meta.author) {
+    parts.push(`von ${meta.author}`);
+  }
+  if (meta.year) {
+    parts.push(String(meta.year));
+  }
+  return parts.filter(Boolean).join(" · ");
+}
+
+function normalizeAudibleMetadata(result) {
+  const authors = Array.isArray(result.authors) ? result.authors.map((a) => a.name).filter(Boolean) : [];
+  const narrators = Array.isArray(result.narrators)
+    ? result.narrators.map((n) => n.name).filter(Boolean)
+    : [];
+  const series = Array.isArray(result.series) ? result.series[0] : null;
+  const year = result.release_date ? parseInt(result.release_date.slice(0, 4), 10) : null;
+
+  const coverImages = result.product_images ?? {};
+  const coverUrl = coverImages["1024"] || coverImages["500"] || null;
+
+  const genres = [];
+  if (Array.isArray(result.category_ladders) && result.category_ladders.length) {
+    const ladder = result.category_ladders[0].ladder ?? [];
+    ladder.forEach((rung) => {
+      if (rung.name && !genres.includes(rung.name)) {
+        genres.push(rung.name);
+      }
+    });
+  }
+
+  const description = result.publisher_summary
+    ? result.publisher_summary.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+    : null;
+
+  const normalized = {
+    title: result.title || null,
+    media_type: "audiobook",
+    author: authors[0] || null,
+    authors: authors.length > 1 ? authors : undefined,
+    narrator: narrators[0] || null,
+    narrators: narrators.length > 1 ? narrators : undefined,
+    publisher: result.publisher_name || null,
+    description: description || null,
+    year: year || null,
+    runtime_minutes: result.runtime_length_min || null,
+    series_title: series?.title || null,
+    series_sequence: series?.sequence || null,
+    audible_asin: result.asin || null,
+    genres: genres.length ? genres : undefined,
+    cover_image_extra_large: coverUrl,
+  };
+
+  Object.keys(normalized).forEach((key) => {
+    if (
+      normalized[key] === null ||
+      normalized[key] === "" ||
+      normalized[key] === undefined ||
+      (Array.isArray(normalized[key]) && !normalized[key].length)
+    ) {
+      delete normalized[key];
+    }
+  });
+
+  return normalized;
+}
+
+function showAudibleResults(results, query) {
+  if (!audibleDialogResults) {
+    return;
+  }
+
+  clearNode(audibleDialogResults);
+  const list = Array.isArray(results) ? results : [];
+  if (!list.length) {
+    const empty = document.createElement("div");
+    empty.className = "anilist-empty";
+    empty.textContent = `Keine Treffer für "${query}". Titel anpassen und erneut suchen.`;
+    audibleDialogResults.appendChild(empty);
+    return;
+  }
+
+  list.forEach((result) => {
+    const card = document.createElement("article");
+    card.className = "anilist-result";
+
+    const cover = document.createElement("div");
+    cover.className = "anilist-result-cover";
+    const coverImages = result.product_images ?? {};
+    const coverUrl = coverImages["500"] || coverImages["1024"] || null;
+    if (coverUrl) {
+      const image = document.createElement("img");
+      image.src = coverUrl;
+      image.alt = audibleDisplayTitle(result);
+      cover.appendChild(image);
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "anilist-result-meta";
+    const title = document.createElement("strong");
+    title.textContent = audibleDisplayTitle(result);
+
+    const authors = Array.isArray(result.authors) ? result.authors.map((a) => a.name).join(", ") : "";
+    const narrators = Array.isArray(result.narrators)
+      ? result.narrators.map((n) => n.name).join(", ")
+      : "";
+    const subtitle = document.createElement("span");
+    subtitle.textContent = [
+      authors ? `von ${authors}` : "",
+      narrators ? `Sprecher: ${narrators}` : "",
+      result.runtime_length_min ? `${result.runtime_length_min} min` : "",
+      result.release_date ? result.release_date.slice(0, 4) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    const description = document.createElement("p");
+    description.textContent = String(result.publisher_summary || "")
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 220);
+
+    meta.appendChild(title);
+    meta.appendChild(subtitle);
+    if (description.textContent) {
+      meta.appendChild(description);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "anilist-result-actions";
+    const applyButton = document.createElement("button");
+    applyButton.type = "button";
+    applyButton.className = "action-button primary";
+    applyButton.textContent = "Übernehmen";
+    applyButton.addEventListener("click", () => {
+      applyAudibleResult(result);
+    });
+    actions.appendChild(applyButton);
+
+    card.appendChild(cover);
+    card.appendChild(meta);
+    card.appendChild(actions);
+    audibleDialogResults.appendChild(card);
+  });
+}
+
+function openAudibleDialog(selection, feedbackNode = null, targetItems = []) {
+  const resolvedSelection =
+    selection && Array.isArray(selection.items) && typeof selection.key === "string"
+      ? selection
+      : normalizeSelection(selection);
+  if (!resolvedSelection || !resolvedSelection.item) {
+    return;
+  }
+
+  pendingAudibleSelection = resolvedSelection;
+  pendingAudibleTargets = targetItems.length ? targetItems : resolvedSelection.items;
+  pendingAudibleFeedback = feedbackNode;
+
+  if (audibleDialogTitle) {
+    audibleDialogTitle.textContent = `Audible-Treffer für ${selectionTitle(resolvedSelection)}`;
+  }
+  if (audibleDialogQuery) {
+    audibleDialogQuery.value = selectionSearchTitle(resolvedSelection);
+  }
+  if (audibleDialogAuthor) {
+    audibleDialogAuthor.value = resolvedSelection.item?.author ?? "";
+  }
+  if (audibleDialogFeedback) {
+    audibleDialogFeedback.textContent = "";
+    audibleDialogFeedback.className = "api-feedback";
+  }
+  if (audibleDialogResults) {
+    clearNode(audibleDialogResults);
+  }
+  if (trashDialog) {
+    trashDialog.hidden = true;
+  }
+  showModalCard(audibleDialog);
+  if (statusStrip) {
+    statusStrip.textContent = `Audible-Treffer für ${selectionTitle(resolvedSelection)} werden geladen.`;
+  }
+}
+
+async function runAudibleDialogSearch() {
+  if (!pendingAudibleSelection) {
+    return;
+  }
+
+  const query = audibleDialogQuery?.value.trim() || "";
+  if (!query) {
+    setApiFeedback(audibleDialogFeedback, "Bitte zuerst einen Suchbegriff eintragen.", "error");
+    return;
+  }
+
+  const author = audibleDialogAuthor?.value.trim() || "";
+  if (statusStrip) {
+    statusStrip.textContent = `Audible-Suche läuft für: ${query}${author ? ` von ${author}` : ""}`;
+  }
+  setApiFeedback(
+    audibleDialogFeedback,
+    `Suche Audible für "${query}"${author ? ` von ${author}` : ""}...`,
+    "loading"
+  );
+
+  const authorParam = author ? `&author=${encodeURIComponent(author)}` : "";
+  const response = await fetch(
+    `/api/audible-search?title=${encodeURIComponent(query)}${authorParam}&limit=10`
+  );
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  const payload = await response.json();
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  showAudibleResults(results, query);
+
+  if (!results.length) {
+    setApiFeedback(
+      audibleDialogFeedback,
+      `Keine Treffer für "${query}". Titel korrigieren und erneut suchen.`,
+      "error"
+    );
+    return;
+  }
+
+  setApiFeedback(audibleDialogFeedback, `${results.length} Treffer gefunden`, "success");
+}
+
+function applyAudibleResult(result) {
+  if (!pendingAudibleSelection) {
+    return;
+  }
+
+  const normalized = normalizeAudibleMetadata(result);
+  pendingAudibleTargets.forEach((target) => {
+    apiMetadata[target.source_path] = normalized;
+  });
+  saveStoredJson(metadataKey, apiMetadata);
+  currentPlan = projectPlan(sourcePlan);
+
+  const firstTarget = pendingAudibleTargets[0];
+  if (pendingAudibleSelection.type === "node") {
+    // After applying metadata, target_path and collection_path are recomputed
+    // (author + series produce a deeper path). Use the updated collection_path
+    // so the UI navigates to the new node rather than the now-gone old one.
+    const updatedRep = firstTarget
+      ? currentPlan.items.find((item) => item.source_path === firstTarget.source_path)
+      : null;
+    selectedCollectionKey =
+      updatedRep?.collection_path ||
+      pendingAudibleSelection.node?.path ||
+      selectedCollectionKey;
+    selectedItemKey = "";
+    selectedCollectionItemKey = "";
+  } else if (firstTarget?.source_path) {
+    selectedItemKey = firstTarget.source_path;
+    selectedCollectionItemKey = firstTarget.source_path;
+  }
+  renderPlan(currentPlan);
+  setApiFeedback(
+    pendingAudibleFeedback,
+    `Audible übernommen: ${audibleSummary(normalized)}`,
+    "success"
+  );
+  updateAuditTrail(
+    `Audible-Metadaten übernommen für ${selectionTitle(pendingAudibleSelection)}.`
+  );
+  void persistSidecarsForItems(
+    pendingAudibleTargets
+      .map((target) => currentPlan.items.find((item) => item.source_path === target.source_path))
+      .filter(Boolean)
+  ).catch((error) => {
+    if (statusStrip) {
+      statusStrip.textContent = `Audible übernommen, aber Sidecar konnte nicht geschrieben werden: ${error.message}`;
+    }
+  });
+  closeActionModal();
+}
+
+async function fetchAudibleForItem(item, feedbackNode = null, targetItems = [item], selection = null) {
+  const resolvedSelection =
+    selection && Array.isArray(selection.items) && typeof selection.key === "string"
+      ? selection
+      : selection
+        ? normalizeSelection(selection)
+        : normalizeSelection(item);
+  if (!resolvedSelection) {
+    throw new Error("Kein gültiger Eintrag für Audible vorhanden");
+  }
+
+  openAudibleDialog(resolvedSelection, feedbackNode, targetItems);
+  try {
+    await runAudibleDialogSearch();
+  } catch (error) {
+    setApiFeedback(
+      audibleDialogFeedback,
+      `Audible konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut suchen.`,
+      "error"
+    );
+    if (statusStrip) {
+      statusStrip.textContent = `Audible konnte keine Daten liefern: ${error.message}`;
+    }
+    throw error;
+  }
+}
+
+// ─── End Audible dialog ─────────────────────────────────────────────────────
+
 function updateAuditTrail(message) {
   const entry = {
     at: new Date().toISOString(),
@@ -2034,20 +4000,69 @@ function renderAuditTrail() {
   });
 }
 
-function createRow(item, cells, selected) {
+// Multi-select state accessor for the inbox/review row contexts.
+function multiCtx(context) {
+  if (context === "inbox") {
+    return {
+      get edit() {
+        return isInboxMultiEdit;
+      },
+      set edit(v) {
+        isInboxMultiEdit = v;
+      },
+      keys: inboxSelectedKeys,
+      sync: syncInboxMultiUi,
+      rerender: () => renderInboxRows(currentPlan?.items ?? []),
+    };
+  }
+  if (context === "review") {
+    return {
+      get edit() {
+        return isReviewMultiEdit;
+      },
+      set edit(v) {
+        isReviewMultiEdit = v;
+      },
+      keys: reviewSelectedKeys,
+      sync: syncReviewMultiUi,
+      rerender: () => renderReviewRows(currentPlan?.items ?? []),
+    };
+  }
+  return null;
+}
+
+function createRow(item, cells, selected, multiContext = null) {
+  const ctx = multiContext ? multiCtx(multiContext) : null;
   const row = document.createElement("button");
   row.type = "button";
   row.className = "table-row table-row-button";
   row.classList.toggle("is-selected", selected);
+  if (ctx && ctx.edit) {
+    row.classList.toggle("is-bulk-selected", ctx.keys.has(item.source_path));
+  }
   row.dataset.sourcePath = item.source_path;
 
   cells.forEach((cell) => {
     const span = document.createElement("span");
-    span.textContent = formatTableCellValue(cell);
+    const text = String(cell ?? "");
+    span.textContent = text;
+    span.title = text;
     row.appendChild(span);
   });
 
+  if (multiContext) {
+    installRowLongPressSelection(row, item, multiContext);
+  }
+
   row.addEventListener("click", () => {
+    if (row.dataset.longPressFired === "true") {
+      row.dataset.longPressFired = "";
+      return;
+    }
+    if (ctx && ctx.edit) {
+      toggleMultiItem(multiContext, item);
+      return;
+    }
     selectedItemKey = item.source_path;
     setActiveTab("review");
     renderPlan(currentPlan);
@@ -2057,12 +4072,45 @@ function createRow(item, cells, selected) {
   return row;
 }
 
-function formatTableCellValue(value) {
-  const text = String(value ?? "");
-  if (!text.includes("/")) {
-    return text;
+function toggleMultiItem(context, item) {
+  const ctx = multiCtx(context);
+  if (!ctx) return;
+  if (ctx.keys.has(item.source_path)) {
+    ctx.keys.delete(item.source_path);
+  } else {
+    ctx.keys.add(item.source_path);
   }
-  return text.replaceAll("/", "/\n");
+  ctx.sync();
+  ctx.rerender();
+}
+
+// Long-press a row to enter multi-select mode and select it. Subsequent
+// taps/clicks then toggle selection (like file managers on touch/trackpad).
+function installRowLongPressSelection(element, item, context) {
+  let timer = null;
+  const clearTimer = () => {
+    if (timer) {
+      window.clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  element.addEventListener("pointerdown", () => {
+    if (!item?.source_path) {
+      return;
+    }
+    clearTimer();
+    timer = window.setTimeout(() => {
+      const ctx = multiCtx(context);
+      if (!ctx) return;
+      ctx.edit = true;
+      element.dataset.longPressFired = "true";
+      toggleMultiItem(context, item);
+    }, 450);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach((eventName) => {
+    element.addEventListener(eventName, clearTimer);
+  });
 }
 
 function getSelectedItem() {
@@ -2083,17 +4131,121 @@ function renderInboxRows(items) {
 
   clearNode(inboxRows);
 
+  // Only files that physically live in the Inbox belong here. Items already
+  // moved into collections (Serien/, Hörbücher/, …) must not show up.
   items.forEach((item) => {
+    if (!String(item.source_path || "").startsWith("Inbox/")) {
+      return;
+    }
+    // Audiobook sub-parts are hidden by default under their group representative.
+    if (item.is_audiobook_part) {
+      return;
+    }
     const status = item.duplicate_of
       ? "Duplikat"
       : needsReviewInUi(item)
       ? "Review"
+      : item.audiobook_parts
+      ? `Hörbuch (${item.audiobook_parts.length} Teile)`
       : "klar";
     const target = item.duplicate_of || item.needs_review
       ? "Inbox/_review_queue"
       : item.target_path ?? "Inbox/_review_queue";
-    inboxRows.appendChild(createRow(item, [item.source_path, status, target], false));
+    const displayName = item.title || basename(item.source_path);
+    const displayTarget = target.startsWith("Inbox/") ? target : basename(target);
+    inboxRows.appendChild(createRow(item, [displayName, status, displayTarget], false, "inbox"));
   });
+}
+
+function syncMultiUi(toggleBtn, deleteBtn, edit, keys) {
+  if (toggleBtn) {
+    toggleBtn.classList.toggle("is-active", edit);
+    toggleBtn.textContent = edit ? `Auswahl beenden (${keys.size})` : "Mehrfachauswahl";
+  }
+  if (deleteBtn) {
+    deleteBtn.hidden = !edit;
+    deleteBtn.disabled = keys.size === 0;
+    deleteBtn.textContent = keys.size > 0 ? `Auswahl löschen (${keys.size})` : "Auswahl löschen";
+  }
+}
+
+function syncInboxMultiUi() {
+  syncMultiUi(inboxMultiToggle, inboxDeleteSelected, isInboxMultiEdit, inboxSelectedKeys);
+}
+
+function syncReviewMultiUi() {
+  syncMultiUi(reviewMultiToggle, reviewDeleteSelected, isReviewMultiEdit, reviewSelectedKeys);
+}
+
+// Moves the selected files (inbox or review context) to the vault .trash.
+async function deleteSelectedFiles(context) {
+  const ctx = multiCtx(context);
+  if (!ctx || !ctx.keys.size) {
+    return;
+  }
+
+  // Expand audiobook group representatives to include all their parts so the
+  // whole book is removed, not just the first file.
+  const selectedItems = (currentPlan?.items ?? []).filter((item) =>
+    ctx.keys.has(item.source_path)
+  );
+  const paths = new Set();
+  selectedItems.forEach((item) => {
+    paths.add(item.source_path);
+    if (Array.isArray(item.audiobook_parts)) {
+      item.audiobook_parts.forEach((p) => paths.add(p));
+    }
+  });
+
+  const count = paths.size;
+  const confirmed = await showConfirmDialog({
+    label: "Löschen",
+    title: `${count} Datei(en) löschen?`,
+    body: `Die ausgewählten Dateien werden in den .trash-Ordner des Vaults verschoben. Du kannst sie dort später wiederherstellen oder endgültig entfernen.`,
+    confirmLabel: "In .trash verschieben",
+    danger: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  if (statusStrip) {
+    statusStrip.textContent = `${count} Datei(en) werden gelöscht...`;
+  }
+
+  const response = await fetch("/api/delete-files", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vault_root: getVaultRoot(),
+      paths: Array.from(paths),
+      permanent: false,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  const result = await response.json();
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  const deleted = Array.isArray(result.deleted) ? result.deleted : [];
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  clearAppliedLocalState(deleted);
+  ctx.keys.clear();
+  ctx.edit = false;
+  ctx.sync();
+  updateAuditTrail(`${deleted.length} Datei(en) in den .trash verschoben.`);
+
+  if (statusStrip) {
+    statusStrip.textContent = skipped.length
+      ? `${deleted.length} gelöscht, ${skipped.length} übersprungen.`
+      : `${deleted.length} Datei(en) gelöscht.`;
+  }
+
+  await loadPlan();
 }
 
 function renderReviewRows(items) {
@@ -2115,7 +4267,12 @@ function renderReviewRows(items) {
       : "Prüfung";
     const action = item.steps[item.steps.length - 1] ?? "Prüfen";
     reviewRows.appendChild(
-      createRow(item, [item.source_path, status, action], item.source_path === selectedItemKey)
+      createRow(
+        item,
+        [item.title || basename(item.source_path), status, action],
+        item.source_path === selectedItemKey,
+        "review"
+      )
     );
   });
 
@@ -2203,6 +4360,12 @@ function renderDetail(item) {
   if (detailStatus) detailStatus.value = item.status ?? (needsReviewInUi(item) ? "needs-review" : "inbox");
   if (detailNotes) detailNotes.value = item.notes ?? "";
   if (detailSidecarPreview) detailSidecarPreview.textContent = item.sidecar_preview;
+  if (detailFetchMetadata) {
+    detailFetchMetadata.textContent =
+      canonicalMediaType(mediaSelectionValue(item)) === "audiobook"
+        ? "Audible abrufen"
+        : "AniList abrufen";
+  }
   if (currentActiveTab() !== "collections") {
     renderInspector(item);
   }
@@ -2350,6 +4513,13 @@ function propertyEntriesFor(value) {
     ["reviews", item.reviews],
     ["cover_image_extra_large", item.cover_image_extra_large],
     ["banner_image", item.banner_image],
+    ["audible_asin", item.audible_asin],
+    ["author", item.author],
+    ["narrator", item.narrator],
+    ["publisher", item.publisher],
+    ["runtime_minutes", item.runtime_minutes],
+    ["series_title", item.series_title],
+    ["series_sequence", item.series_sequence],
   ].filter(([, entryValue]) => {
     if (Array.isArray(entryValue)) {
       return entryValue.length;
@@ -2437,8 +4607,24 @@ function renderInspector(value) {
     inspectorEditToggle.classList.toggle("is-active", document.body.classList.contains("inspector-editing"));
     inspectorEditToggle.textContent = "✎";
   }
+  if (inspectorPlay) {
+    const srcPath = item?.source_path || item?.target_path || "";
+    const ext = playerFileExt(srcPath);
+    const playable =
+      isVideoFile(srcPath) ||
+      isAudioFile(srcPath) ||
+      PLAYER_UNSUPPORTED_EXTS.has(ext) ||
+      PLAYER_PDF_EXTS.has(ext) ||
+      PLAYER_IMAGE_EXTS.has(ext) ||
+      PLAYER_EPUB_EXTS.has(ext);
+    inspectorPlay.hidden = !item || !playable;
+  }
   if (inspectorFetchMetadata) {
     inspectorFetchMetadata.disabled = !metadataAllowed;
+    inspectorFetchMetadata.textContent =
+      canonicalMediaType(item ? mediaSelectionValue(item) : "") === "audiobook"
+        ? "Audible abrufen"
+        : "AniList abrufen";
   }
   if (inspectorNotDuplicate) {
     const duplicateRelevant = selectionHasDuplicateFlag(selection) || selectionHasDuplicateOverride(selection);
@@ -2482,6 +4668,12 @@ function renderPlan(plan) {
 
   const selected = getSelectedItem();
   renderDetail(selected);
+
+  const readyCount = plan.items.filter((item) => isReadyForImport(item)).length;
+  if (applyImportButton) {
+    applyImportButton.textContent =
+      readyCount > 0 ? `Import anwenden (${readyCount})` : "Import anwenden";
+  }
 
   if (statusStrip) {
     const rootText = plan.vault_root ? ` Vault: ${plan.vault_root}.` : "";
@@ -2539,14 +4731,9 @@ function findCollectionNode(root, path) {
 }
 
 function sortedChildren(node) {
-  return Array.from(node.children.values()).sort((left, right) => {
-    const leftSeason = left.label.match(/^Staffel\s+(\d+)$/i);
-    const rightSeason = right.label.match(/^Staffel\s+(\d+)$/i);
-    if (leftSeason && rightSeason) {
-      return Number.parseInt(leftSeason[1], 10) - Number.parseInt(rightSeason[1], 10);
-    }
-    return left.label.localeCompare(right.label, "de");
-  });
+  return Array.from(node.children.values()).sort((left, right) =>
+    naturalCompare(left.label, right.label)
+  );
 }
 
 function parentPath(path) {
@@ -2568,6 +4755,25 @@ function collectionNodeKind(node) {
   if (node.path.endsWith("/Serien") || node.path.endsWith("/Filme")) {
     return "group";
   }
+  if (node.path.endsWith("/Hörbücher") || node.path === "Hörbücher") {
+    return "group";
+  }
+  if (node.path.startsWith("Hörbücher/")) {
+    // Leaf node: all direct items are audiobook parts → render as audiobook profile.
+    if (
+      node.directItems.length > 0 &&
+      node.directItems.every(
+        (item) =>
+          item.is_audiobook_part ||
+          item.audiobook_parts?.length > 0 ||
+          canonicalMediaType(mediaSelectionValue(item)) === "audiobook"
+      )
+    ) {
+      return "audiobook";
+    }
+    // Intermediate author/series folder: no direct items, only child nodes.
+    return "group";
+  }
   if (sortedChildren(node).some((child) => child.label.startsWith("Staffel "))) {
     return "series";
   }
@@ -2585,6 +4791,8 @@ function nodeTypeLabel(node) {
       return "Staffel";
     case "movie":
       return "Film";
+    case "audiobook":
+      return "Hörbuch";
     case "group":
       return "Ordner";
     default:
@@ -2604,7 +4812,11 @@ function nodeDisplayTitle(node, item = null) {
 }
 
 function representativeItem(node) {
-  return node.items.find((item) => item.anilist_id || item.series_title) ?? node.items[0] ?? null;
+  return (
+    node.items.find((item) => item.anilist_id || item.audible_asin || item.series_title) ??
+    node.items[0] ??
+    null
+  );
 }
 
 function normalizeSelection(value) {
@@ -2650,7 +4862,7 @@ function selectionEditable(selection) {
     return true;
   }
   const kind = collectionNodeKind(selection.node);
-  return ["series", "season", "movie"].includes(kind);
+  return ["series", "season", "movie", "audiobook"].includes(kind);
 }
 
 function selectionSupportsMetadata(selection) {
@@ -2755,6 +4967,13 @@ function selectionYamlPreview(selection) {
   appendYamlValue(lines, "year", primary.year);
   appendYamlValue(lines, "anilist_id", primary.anilist_id);
   appendYamlValue(lines, "anilist_url", primary.anilist_url);
+  appendYamlValue(lines, "audible_asin", primary.audible_asin);
+  appendYamlValue(lines, "author", primary.author);
+  appendYamlValue(lines, "narrator", primary.narrator);
+  appendYamlValue(lines, "publisher", primary.publisher);
+  appendYamlValue(lines, "runtime_minutes", primary.runtime_minutes);
+  appendYamlValue(lines, "series_title", primary.series_title);
+  appendYamlValue(lines, "series_sequence", primary.series_sequence);
   appendYamlValue(lines, "genres", primary.genres);
   appendYamlValue(lines, "tags", primary.tags);
   appendYamlValue(lines, "cover_image_extra_large", primary.cover_image_extra_large);
@@ -2776,6 +4995,9 @@ function collectionDescriptionFor(node) {
   }
   if (kind === "movie") {
     return "Filmübersicht. Die zugehörige Datei kann unten ausgewählt und korrigiert werden.";
+  }
+  if (kind === "audiobook") {
+    return "Hörbuch mit mehreren Teilen. Metadaten über den Audible-Button abrufen.";
   }
   return "Ordneransicht innerhalb der geplanten Vault-Struktur.";
 }
@@ -2938,7 +5160,8 @@ function renderCollectionProfile(node) {
   clearNode(collectionProfile);
 
   const primary = representativeItem(node);
-  if (!primary || ["root", "group", "folder"].includes(collectionNodeKind(node))) {
+  const nodeKind = collectionNodeKind(node);
+  if (!primary || ["root", "group", "folder"].includes(nodeKind)) {
     return;
   }
 
@@ -2988,7 +5211,9 @@ function renderCollectionProfile(node) {
   description.className = "collection-profile-description";
   description.textContent =
     primary.description?.replace(/<[^>]*>/g, "") ||
-    "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.";
+    (nodeKind === "audiobook"
+      ? "Noch keine Beschreibung vorhanden. Audible-Abgleich in der rechten Seitenleiste starten."
+      : "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.");
 
   const tagBar = document.createElement("div");
   tagBar.className = "media-tagbar";
@@ -3018,7 +5243,6 @@ function renderCollectionProfile(node) {
 
   collectionProfile.appendChild(profile);
 
-  const kind = collectionNodeKind(node);
   const children = sortedChildren(node);
   if (children.length) {
     const stack = document.createElement("div");
@@ -3188,22 +5412,37 @@ function createMediaSection(title, subtitle = "") {
 function createDetailsGrid(item) {
   const grid = document.createElement("div");
   grid.className = "media-details-grid";
-  [
-    ["Typ", item.format || mediaTypeLabel(mediaSelectionValue(item))],
-    ["Status", item.status ? statusLabel(item.status) : "-"],
-    ["Staffel", item.airing_season || "-"],
-    ["Ausgestrahlt", [datePartsLabel(item.start_date), datePartsLabel(item.end_date)].filter(Boolean).join(" - ")],
-    ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
-    ["Score", typeof item.average_score === "number" ? scoreLabel(item.average_score) : "-"],
-    [
-      "Studios",
-      (item.studios || [])
-        .map((studio) => (typeof studio === "string" ? studio : studio?.name))
-        .filter(Boolean)
-        .join(", "),
-    ],
-    ["Synonyme", (item.synonyms || []).slice(0, 4).join(", ")],
-  ].forEach(([label, value]) => {
+  const isAudiobook = canonicalMediaType(mediaSelectionValue(item)) === "audiobook";
+
+  const rows = isAudiobook
+    ? [
+        ["Typ", "Hörbuch"],
+        ["Status", item.status ? statusLabel(item.status) : "-"],
+        ["Sprecher", item.narrator || "-"],
+        ["Veröffentlicht", item.year ? String(item.year) : (datePartsLabel(item.start_date) || "-")],
+        ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
+        ["Verlag", item.publisher || "-"],
+        ["Autor", item.author || "-"],
+        ["Serie", item.series_title ? `${item.series_title}${item.series_sequence ? ` #${item.series_sequence}` : ""}` : "-"],
+      ]
+    : [
+        ["Typ", item.format || mediaTypeLabel(mediaSelectionValue(item))],
+        ["Status", item.status ? statusLabel(item.status) : "-"],
+        ["Staffel", item.airing_season || "-"],
+        ["Ausgestrahlt", [datePartsLabel(item.start_date), datePartsLabel(item.end_date)].filter(Boolean).join(" - ")],
+        ["Dauer", typeof item.runtime_minutes === "number" ? `${item.runtime_minutes}m` : "-"],
+        ["Score", typeof item.average_score === "number" ? scoreLabel(item.average_score) : "-"],
+        [
+          "Studios",
+          (item.studios || [])
+            .map((studio) => (typeof studio === "string" ? studio : studio?.name))
+            .filter(Boolean)
+            .join(", "),
+        ],
+        ["Synonyme", (item.synonyms || []).slice(0, 4).join(", ")],
+      ];
+
+  rows.forEach(([label, value]) => {
     const block = document.createElement("div");
     const span = document.createElement("span");
     span.textContent = label;
@@ -3314,6 +5553,16 @@ function createPosterCard(value, ordinal = null) {
       selectedCollectionItemKey = item.source_path;
       renderInspector(item);
       renderCollectionRows(findCollectionNode(buildCollectionTree(currentPlan?.items ?? []), selectedCollectionKey));
+      const srcPath = item.source_path || item.target_path || "";
+      const cardExt = playerFileExt(srcPath);
+      const cardPlayable =
+        isVideoFile(srcPath) ||
+        isAudioFile(srcPath) ||
+        PLAYER_UNSUPPORTED_EXTS.has(cardExt) ||
+        PLAYER_PDF_EXTS.has(cardExt) ||
+        PLAYER_IMAGE_EXTS.has(cardExt) ||
+        PLAYER_EPUB_EXTS.has(cardExt);
+      if (cardPlayable) openPlayer(item);
     }
   });
 
@@ -3354,7 +5603,22 @@ function createPosterCard(value, ordinal = null) {
   return button;
 }
 
-function createCollectionItemRow(item) {
+function audiobookItemLabel(item, groupSize = 0) {
+  if (item.title && !item.is_audiobook_part) {
+    return item.title;
+  }
+  const fname = fileStem(basename(item.source_path));
+  // Extract trailing number: _001, _1, part01, -01, etc.
+  const match = fname.match(/[_\-\s]0*(\d+)\s*$/);
+  if (match) {
+    const nr = parseInt(match[1], 10);
+    const padLen = groupSize >= 100 ? 3 : 2;
+    return `Kapitel ${String(nr).padStart(padLen, "0")}`;
+  }
+  return fname;
+}
+
+function createCollectionItemRow(item, groupSize = 0) {
   const row = document.createElement("button");
   row.type = "button";
   row.className = "table-row table-row-button";
@@ -3381,14 +5645,36 @@ function createCollectionItemRow(item) {
   });
 
   [
-    item.source_path,
+    audiobookItemLabel(item, groupSize),
     mediaTypeLabel(mediaSelectionValue(item)),
-    item.target_path || statusLabel(item.status || "inbox"),
+    item.target_path ? basename(item.target_path) : statusLabel(item.status || "inbox"),
   ].forEach((cell) => {
     const span = document.createElement("span");
     span.textContent = cell;
     row.appendChild(span);
   });
+
+  const rowSrcPath = item.source_path || item.target_path || "";
+  const rowExt = playerFileExt(rowSrcPath);
+  const rowPlayable =
+    isVideoFile(rowSrcPath) ||
+    isAudioFile(rowSrcPath) ||
+    PLAYER_UNSUPPORTED_EXTS.has(rowExt) ||
+    PLAYER_PDF_EXTS.has(rowExt) ||
+    PLAYER_IMAGE_EXTS.has(rowExt) ||
+    PLAYER_EPUB_EXTS.has(rowExt);
+  if (rowPlayable) {
+    const playCell = document.createElement("button");
+    playCell.type = "button";
+    playCell.className = "action-button compact icon-button";
+    playCell.textContent = "▶";
+    playCell.title = "Abspielen";
+    playCell.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openPlayer(item);
+    });
+    row.appendChild(playCell);
+  }
 
   return row;
 }
@@ -3405,8 +5691,9 @@ function renderCollectionRows(node) {
   });
 
   if (!sortedChildren(node).length) {
+    const groupSize = node.directItems.length;
     sortedCollectionItems(node.directItems).forEach((item) => {
-      collectionRows.appendChild(createCollectionItemRow(item));
+      collectionRows.appendChild(createCollectionItemRow(item, groupSize));
     });
   }
 
@@ -3462,7 +5749,10 @@ function compareCollectionItem(left, right) {
     return leftEpisode - rightEpisode;
   }
 
-  return String(left.title || left.source_path).localeCompare(String(right.title || right.source_path), "de");
+  return naturalCompare(
+    left.title || basename(left.source_path),
+    right.title || basename(right.source_path)
+  );
 }
 
 function sortedCollectionItems(items) {
@@ -3910,6 +6200,8 @@ async function loadPlan() {
     }
 
     renderPlan(currentPlan);
+    // Load dashboard asynchronously so it doesn't block the plan render.
+    loadDashboard().catch(() => {});
   } catch (error) {
     if (statusStrip) {
       statusStrip.textContent = `Vault-Scan konnte nicht geladen werden: ${error.message}`;
@@ -3923,6 +6215,12 @@ tabs.forEach((button) => {
     setActiveTab(tab, { resetCollections: tab === "collections" });
     if (tab === "collections" && currentPlan) {
       renderCollections(currentPlan.items);
+    }
+    if (tab === "overview") {
+      loadDashboard().catch(() => {});
+    }
+    if (tab === "playlists") {
+      loadPlaylists().catch(() => {});
     }
   });
 });
@@ -3968,6 +6266,75 @@ if (applyImportButton) {
         statusStrip.textContent = `Import konnte nicht angewendet werden: ${error.message}`;
       }
     }
+  });
+}
+
+if (inboxMultiToggle) {
+  inboxMultiToggle.addEventListener("click", () => {
+    isInboxMultiEdit = !isInboxMultiEdit;
+    if (!isInboxMultiEdit) {
+      inboxSelectedKeys.clear();
+    }
+    syncInboxMultiUi();
+    renderInboxRows(currentPlan?.items ?? []);
+  });
+}
+
+if (inboxDeleteSelected) {
+  inboxDeleteSelected.addEventListener("click", async () => {
+    try {
+      await deleteSelectedFiles("inbox");
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (reviewMultiToggle) {
+  reviewMultiToggle.addEventListener("click", () => {
+    isReviewMultiEdit = !isReviewMultiEdit;
+    if (!isReviewMultiEdit) {
+      reviewSelectedKeys.clear();
+    }
+    syncReviewMultiUi();
+    renderReviewRows(currentPlan?.items ?? []);
+  });
+}
+
+if (reviewDeleteSelected) {
+  reviewDeleteSelected.addEventListener("click", async () => {
+    try {
+      await deleteSelectedFiles("review");
+    } catch (error) {
+      if (statusStrip) {
+        statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (openVaultFolderButton) {
+  openVaultFolderButton.addEventListener("click", async () => {
+    const root = getVaultRoot();
+    if (!root) return;
+    try {
+      await fetch(`mediavault://localhost/api/open-vault-root?root=${encodeURIComponent(root)}`);
+    } catch {
+      // fire-and-forget
+    }
+  });
+}
+
+const vaultSwitchBtn = document.getElementById("vault-switch");
+if (vaultSwitchBtn) {
+  vaultSwitchBtn.addEventListener("click", () => {
+    localStorage.removeItem(storageKey);
+    persistVaultRootState("").catch(() => {});
+    document.body.classList.remove("is-vault-open");
+    syncVaultHint();
+    renderRecentVaults();
   });
 }
 
@@ -4128,6 +6495,9 @@ if (detailFetchMetadata) {
       return;
     }
 
+    const mediaType = canonicalMediaType(detailMediaTypeInput?.value || item.media_type);
+    const isAudiobook = mediaType === "audiobook";
+
     try {
       upsertCorrection(item);
       const draft = {
@@ -4136,15 +6506,20 @@ if (detailFetchMetadata) {
         series_title: detailTitle?.value.trim() || item.series_title,
         media_type: detailMediaTypeInput?.value || item.media_type,
       };
-      await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
+      if (isAudiobook) {
+        await fetchAudibleForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
+      } else {
+        await fetchAniListForItem(draft, detailApiFeedback, [item], normalizeSelection(draft));
+      }
     } catch (error) {
+      const provider = isAudiobook ? "Audible" : "AniList";
       setApiFeedback(
         detailApiFeedback,
-        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        `${provider} konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
         "error"
       );
       if (statusStrip) {
-        statusStrip.textContent = `AniList konnte keine Daten liefern: ${error.message}`;
+        statusStrip.textContent = `${provider} konnte keine Daten liefern: ${error.message}`;
       }
     }
   });
@@ -4302,11 +6677,23 @@ if (inspectorApply) {
   });
 }
 
+if (inspectorPlay) {
+  inspectorPlay.addEventListener("click", () => {
+    const item = inspectorSelection?.item;
+    if (item) openPlayer(item);
+  });
+}
+
 if (inspectorFetchMetadata) {
   inspectorFetchMetadata.addEventListener("click", async () => {
     if (!selectionSupportsMetadata(inspectorSelection) || !inspectorSelection.item) {
       return;
     }
+
+    const mediaType = canonicalMediaType(
+      inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item)
+    );
+    const isAudiobook = mediaType === "audiobook";
 
     try {
       upsertSelectionCorrection(inspectorSelection);
@@ -4318,21 +6705,29 @@ if (inspectorFetchMetadata) {
       };
       const selectionForSearch =
         inspectorSelection.type === "node"
-          ? {
-              ...inspectorSelection,
-              item: inspectorDraft,
-            }
+          ? { ...inspectorSelection, item: inspectorDraft }
           : normalizeSelection(inspectorDraft);
-      await fetchAniListForItem(
-        inspectorDraft,
-        inspectorApiFeedback,
-        inspectorSelection.items,
-        selectionForSearch
-      );
+
+      if (isAudiobook) {
+        await fetchAudibleForItem(
+          inspectorDraft,
+          inspectorApiFeedback,
+          inspectorSelection.items,
+          selectionForSearch
+        );
+      } else {
+        await fetchAniListForItem(
+          inspectorDraft,
+          inspectorApiFeedback,
+          inspectorSelection.items,
+          selectionForSearch
+        );
+      }
     } catch (error) {
+      const provider = isAudiobook ? "Audible" : "AniList";
       setApiFeedback(
         inspectorApiFeedback,
-        `AniList konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
+        `${provider} konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut abrufen.`,
         "error"
       );
     }
@@ -4409,6 +6804,41 @@ if (anilistDialogSearch) {
 if (anilistDialogCancel) {
   anilistDialogCancel.addEventListener("click", () => {
     closeActionModal();
+  });
+}
+
+if (audibleDialogSearch) {
+  audibleDialogSearch.addEventListener("click", async () => {
+    try {
+      await runAudibleDialogSearch();
+    } catch (error) {
+      setApiFeedback(
+        audibleDialogFeedback,
+        `Audible konnte keine Daten liefern: ${error.message}. Titel prüfen und erneut suchen.`,
+        "error"
+      );
+      if (statusStrip) {
+        statusStrip.textContent = `Audible konnte keine Daten liefern: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (audibleDialogCancel) {
+  audibleDialogCancel.addEventListener("click", () => {
+    closeActionModal();
+  });
+}
+
+if (audibleDialogQuery) {
+  audibleDialogQuery.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      audibleDialogSearch?.click();
+    }
+    if (event.key === "Escape") {
+      closeActionModal();
+    }
   });
 }
 
@@ -4542,6 +6972,9 @@ if (collectionBackDashboard) {
 populateSelectors();
 renderAuditTrail();
 syncTemplateInputs();
+initPlayer();
+initPlaylists();
+initAbsSettings();
 bootstrapVault().catch(() => {
   renderRecentVaults();
   syncVaultHint();

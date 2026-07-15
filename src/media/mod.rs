@@ -100,32 +100,31 @@ impl MediaType {
     /// Returns the default vault folder segment for this media type.
     pub fn folder_segment(self) -> &'static str {
         match self {
-            Self::Film => "Movies",
-            Self::Series => "Series",
-            Self::Anime => "Anime",
-            Self::HentaiAnime => "Hentai Anime",
-            Self::HentaiGame => "Hentai Games",
-            Self::HentaiManga => "Hentai Manga",
-            Self::Book => "Books",
-            Self::Ebook => "Ebooks",
+            Self::Film => "Filme",
+            Self::Series => "Serien",
+            Self::Anime | Self::HentaiAnime => "Anime",
+            Self::HentaiGame | Self::HentaiManga => "Hentai",
+            // Books and Ebooks share one folder — they differ only in format, not in content.
+            Self::Book | Self::Ebook => "Bücher",
             Self::Comic => "Comics",
             Self::Manga => "Manga",
-            Self::MusicAlbum => "Music/Albums",
-            Self::MusicTrack => "Music/Tracks",
+            // Albums and tracks live under the same Musik root; artist/album subfolders are
+            // added by the path builder once metadata is available.
+            Self::MusicAlbum | Self::MusicTrack => "Musik",
             Self::Podcast => "Podcasts",
-            Self::Audiobook => "Audiobooks",
-            Self::BoardGame => "Board Games",
-            Self::RPG => "RPGs",
-            Self::VideoGame => "Video Games",
-            Self::Document => "Documents",
-            Self::Photo => "Photos",
+            Self::Audiobook => "Hörbücher",
+            Self::BoardGame => "Brettspiele",
+            Self::RPG => "TTRPG",
+            Self::VideoGame => "Games",
+            Self::Document => "Dokumente",
+            Self::Photo => "Fotos",
             Self::VideoMisc => "Videos",
-            Self::Font => "Fonts",
+            Self::Font => "Schriften",
             Self::Software => "Software",
-            Self::Model3D => "3D Models",
-            Self::Archive => "Archives",
-            Self::Image => "Images",
-            Self::Unclassified => "Unclassified",
+            Self::Model3D => "3D-Modelle",
+            Self::Archive => "Archive",
+            Self::Image => "Bilder",
+            Self::Unclassified => "Unklassifiziert",
         }
     }
 
