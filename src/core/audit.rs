@@ -36,6 +36,9 @@ impl AuditLog {
     }
 
     /// Records a field change and returns the stored event.
+    // Each parameter maps to a distinct audit column; bundling them into a
+    // struct would only shift the argument list to the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_change(
         &mut self,
         entry_id: impl Into<String>,

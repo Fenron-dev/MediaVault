@@ -31,17 +31,12 @@ use crate::error::{Result, VaultError};
 // ---------------------------------------------------------------------------
 
 /// A sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SortDir {
+    #[default]
     Asc,
     Desc,
-}
-
-impl Default for SortDir {
-    fn default() -> Self {
-        Self::Asc
-    }
 }
 
 /// A single sort key used by smart playlists.
@@ -74,21 +69,16 @@ pub struct PlaylistFilter {
 }
 
 /// The type of playlist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlaylistKind {
     /// Manually ordered list of vault-relative paths.
+    #[default]
     Manual,
     /// Dynamically generated from filter + sort rules.
     Smart,
     /// Consecutive episodes of one series (auto-generated).
     Series,
-}
-
-impl Default for PlaylistKind {
-    fn default() -> Self {
-        Self::Manual
-    }
 }
 
 /// A playlist definition as stored on disk.

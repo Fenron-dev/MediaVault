@@ -11,6 +11,7 @@ use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
+use crate::core::duplicate::FileFingerprint;
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
@@ -246,12 +247,23 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
     }
 }
 
+/// Builds an infallible last-resort `500` response.
+///
+/// Used whenever assembling a normal response fails. `http::Response::new`
+/// cannot fail, so this never panics — which is why the response builders below
+/// use it instead of `expect()` (forbidden in library code, CLAUDE.md §4.3).
+fn fallback_response() -> Response<Vec<u8>> {
+    let mut fallback = Response::new(b"Internal Server Error".to_vec());
+    *fallback.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+    fallback
+}
+
 fn response(status: StatusCode, content_type: &str, body: &str) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
         .header(CONTENT_TYPE, content_type)
         .body(body.as_bytes().to_vec())
-        .expect("response construction should succeed")
+        .unwrap_or_else(|_| fallback_response())
 }
 
 fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8>> {
@@ -260,7 +272,7 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8
             .status(status)
             .header(CONTENT_TYPE, "application/json; charset=utf-8")
             .body(body)
-            .expect("JSON response construction should succeed"),
+            .unwrap_or_else(|_| fallback_response()),
         Err(error) => response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "text/plain; charset=utf-8",
@@ -508,7 +520,7 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
                 .header("Content-Range", format!("bytes */{file_size}"))
                 .body(Vec::new())
-                .expect("range error response should build");
+                .unwrap_or_else(|_| fallback_response());
         }
 
         let length = end - start + 1;
@@ -531,7 +543,7 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
             .header("Content-Length", length.to_string())
             .header("Accept-Ranges", "bytes")
             .body(body)
-            .expect("partial content response should build");
+            .unwrap_or_else(|_| fallback_response());
     }
 
     // No Range header — serve the full file, but advertise range support so the
@@ -543,7 +555,7 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
             .header("Content-Length", file_size.to_string())
             .header("Accept-Ranges", "bytes")
             .body(body)
-            .expect("media response should build"),
+            .unwrap_or_else(|_| fallback_response()),
         Err(error) => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
@@ -1172,6 +1184,15 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
     })
 }
 
+/// One static demo fixture: `(relative path, size, fingerprint, classification, metadata)`.
+type DemoFileSpec = (
+    &'static str,
+    u64,
+    Option<FileFingerprint>,
+    Option<FileClassification>,
+    Option<ResolvedMetadata>,
+);
+
 fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     let planner = ImportPlanner::new(ImportConfig {
         duplicate_policy: DuplicatePolicy::AskUser,
@@ -1179,71 +1200,85 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
     });
     let anilist_client = AniListClient::default();
 
-    let files = vec![
-        IncomingFile {
-            source_path: RelativePath::new("Inbox/Violet Evergarden.mkv")
-                .expect("demo relative path should be valid"),
-            size_bytes: 1_843_200_000,
-            fingerprint: None,
-            classification: Some(FileClassification {
+    // Static demo fixtures. `RelativePath::new` is fallible, so we build each
+    // entry lazily and skip any that fails to parse. These literals are always
+    // valid, but expect()/unwrap() are forbidden in library code (CLAUDE.md §4.3).
+    let demo_files: [DemoFileSpec; 4] = [
+        (
+            "Inbox/Violet Evergarden.mkv",
+            1_843_200_000,
+            None,
+            Some(FileClassification {
                 media_type: MediaType::Anime,
                 confidence: 0.97,
                 source: ClassificationSource::Api,
             }),
-            metadata: Some(ResolvedMetadata {
+            Some(ResolvedMetadata {
                 title: Some("Violet Evergarden".to_string()),
                 year: Some(2018),
             }),
-        },
-        IncomingFile {
-            source_path: RelativePath::new("Inbox/unknown_scan.zip")
-                .expect("demo relative path should be valid"),
-            size_bytes: 42_000_000,
-            fingerprint: None,
-            classification: None,
-            metadata: None,
-        },
-        IncomingFile {
-            source_path: RelativePath::new("Inbox/Demo Track 01.flac")
-                .expect("demo relative path should be valid"),
-            size_bytes: 38_200_000,
-            fingerprint: Some(compute_fingerprint(b"shared-demo-fingerprint")),
-            classification: Some(FileClassification {
+        ),
+        ("Inbox/unknown_scan.zip", 42_000_000, None, None, None),
+        (
+            "Inbox/Demo Track 01.flac",
+            38_200_000,
+            Some(compute_fingerprint(b"shared-demo-fingerprint")),
+            Some(FileClassification {
                 media_type: MediaType::MusicTrack,
                 confidence: 0.82,
                 source: ClassificationSource::Filename,
             }),
-            metadata: Some(ResolvedMetadata {
+            Some(ResolvedMetadata {
                 title: Some("Demo Track 01".to_string()),
                 year: None,
             }),
-        },
-        IncomingFile {
-            source_path: RelativePath::new("Inbox/Demo Track 01 copy.flac")
-                .expect("demo relative path should be valid"),
-            size_bytes: 38_200_000,
-            fingerprint: Some(compute_fingerprint(b"shared-demo-fingerprint")),
-            classification: Some(FileClassification {
+        ),
+        (
+            "Inbox/Demo Track 01 copy.flac",
+            38_200_000,
+            Some(compute_fingerprint(b"shared-demo-fingerprint")),
+            Some(FileClassification {
                 media_type: MediaType::MusicTrack,
                 confidence: 0.82,
                 source: ClassificationSource::Filename,
             }),
-            metadata: Some(ResolvedMetadata {
+            Some(ResolvedMetadata {
                 title: Some("Demo Track 01".to_string()),
                 year: None,
             }),
-        },
+        ),
     ];
 
+    let files: Vec<IncomingFile> = demo_files
+        .into_iter()
+        .filter_map(
+            |(path, size_bytes, fingerprint, classification, metadata)| {
+                Some(IncomingFile {
+                    source_path: RelativePath::new(path).ok()?,
+                    size_bytes,
+                    fingerprint,
+                    classification,
+                    metadata,
+                })
+            },
+        )
+        .collect();
+
+    let mut planned_files: Vec<&IncomingFile> = Vec::with_capacity(files.len());
     let mut items = Vec::with_capacity(files.len());
     let mut anilist_results = Vec::with_capacity(files.len());
     let mut seen_fingerprints = HashSet::new();
     let mut demo_cache: AniListCacheMap = HashMap::new();
 
     for file in &files {
-        let mut item = planner
-            .plan_file(file)
-            .expect("demo planning should succeed");
+        // Skip files that cannot be planned so the three parallel vectors stay
+        // aligned. Demo fixtures always plan successfully, but planning is
+        // fallible and expect() is forbidden in library code (CLAUDE.md §4.3).
+        let mut item = match planner.plan_file(file) {
+            Ok(item) => item,
+            Err(_) => continue,
+        };
+        planned_files.push(file);
         anilist_results.push(resolve_anilist_metadata_cached(
             &anilist_client,
             file,
@@ -1293,8 +1328,9 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
         vault_root: None,
         note,
         summary,
-        items: files
+        items: planned_files
             .iter()
+            .copied()
             .zip(items.iter())
             .zip(anilist_results.iter())
             .map(|((file, item), anilist_metadata)| {
@@ -1316,48 +1352,48 @@ fn build_error_plan(note: String, vault_root: Option<String>) -> DemoPlanRespons
 }
 
 fn summarize_demo_plan(plan: &ImportPlan) -> DemoSummary {
-    let mut summary = DemoSummary::default();
-    summary.total_files = plan.items.len();
-    summary.items_needing_review = plan
-        .items
-        .iter()
-        .filter(|item| requires_review(item))
-        .count();
-    summary.duplicates = plan
-        .items
-        .iter()
-        .filter(|item| item.duplicate_of.is_some())
-        .count();
-    summary.planned_moves = plan
-        .items
-        .iter()
-        .filter(|item| {
-            item.steps
-                .iter()
-                .any(|step| matches!(step, PlannedImportStep::MoveFile { .. }))
-        })
-        .count();
-    summary.planned_sidecars = plan
-        .items
-        .iter()
-        .filter(|item| {
-            item.steps
-                .iter()
-                .any(|step| matches!(step, PlannedImportStep::WriteSidecar { .. }))
-        })
-        .count();
-    summary.planned_api_fetches = plan
-        .items
-        .iter()
-        .map(|item| {
-            item.steps
-                .iter()
-                .filter(|step| matches!(step, PlannedImportStep::FetchMetadata { .. }))
-                .count()
-        })
-        .sum();
-    summary.smart_collections = 3;
-    summary
+    DemoSummary {
+        total_files: plan.items.len(),
+        items_needing_review: plan
+            .items
+            .iter()
+            .filter(|item| requires_review(item))
+            .count(),
+        duplicates: plan
+            .items
+            .iter()
+            .filter(|item| item.duplicate_of.is_some())
+            .count(),
+        planned_moves: plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.steps
+                    .iter()
+                    .any(|step| matches!(step, PlannedImportStep::MoveFile { .. }))
+            })
+            .count(),
+        planned_sidecars: plan
+            .items
+            .iter()
+            .filter(|item| {
+                item.steps
+                    .iter()
+                    .any(|step| matches!(step, PlannedImportStep::WriteSidecar { .. }))
+            })
+            .count(),
+        planned_api_fetches: plan
+            .items
+            .iter()
+            .map(|item| {
+                item.steps
+                    .iter()
+                    .filter(|step| matches!(step, PlannedImportStep::FetchMetadata { .. }))
+                    .count()
+            })
+            .sum(),
+        smart_collections: 3,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2033,7 +2069,7 @@ fn build_target_path_preview(
         .and_then(|context| context.season_number)
         .unwrap_or(1);
     let episode_label = anime_context
-        .and_then(|context| format_episode_label(context))
+        .and_then(format_episode_label)
         .unwrap_or_else(|| {
             file.source_path
                 .file_stem()
@@ -2975,7 +3011,7 @@ fn prettify_folder_title(raw: &str) -> String {
         .join(" ")
 }
 
-fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Path>) {
+fn group_audiobook_folders(items: &mut [DemoPlanItem], vault_root: Option<&Path>) {
     // Group item indices by parent directory, counting only Audiobook items.
     let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -3126,7 +3162,7 @@ fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
     }
     let version = data[3];
     // Only handle v2.3 and v2.4; v2.2 uses 3-byte frame IDs (rare today).
-    if version < 3 || version > 4 {
+    if !(3..=4).contains(&version) {
         return None;
     }
     let flags = data[5];
@@ -3442,9 +3478,8 @@ fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassifica
 
 fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
     let mut sidecar = ParsedSidecar::default();
-    let mut lines = raw.lines();
 
-    while let Some(line) = lines.next() {
+    for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "---" {
             continue;
@@ -4197,7 +4232,7 @@ fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
         })
         .collect();
 
-    with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+    with_mtime.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
     let items = with_mtime
         .into_iter()

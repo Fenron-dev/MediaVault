@@ -12,6 +12,8 @@ target/
 
 # Portable vault data and local secrets must never be committed.
 .mediashelf/
+.mediavault/
+*.mediavault.yaml
 .env
 *.local
 *.secret
