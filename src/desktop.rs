@@ -1248,15 +1248,17 @@ fn build_demo_plan(note: Option<String>) -> DemoPlanResponse {
 
     let files: Vec<IncomingFile> = demo_files
         .into_iter()
-        .filter_map(|(path, size_bytes, fingerprint, classification, metadata)| {
-            Some(IncomingFile {
-                source_path: RelativePath::new(path).ok()?,
-                size_bytes,
-                fingerprint,
-                classification,
-                metadata,
-            })
-        })
+        .filter_map(
+            |(path, size_bytes, fingerprint, classification, metadata)| {
+                Some(IncomingFile {
+                    source_path: RelativePath::new(path).ok()?,
+                    size_bytes,
+                    fingerprint,
+                    classification,
+                    metadata,
+                })
+            },
+        )
         .collect();
 
     let mut planned_files: Vec<&IncomingFile> = Vec::with_capacity(files.len());
