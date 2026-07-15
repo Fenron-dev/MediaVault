@@ -17,6 +17,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Install Linux dependencies
         run: |
@@ -38,8 +40,33 @@ jobs:
       - name: Compile check
         run: cargo check --all-targets
 
+      - name: Clippy (warnings are errors)
+        # Enforces CLAUDE.md §14 pre-commit rule as a CI gate.
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Test
         run: cargo test --all-targets
+
+  security-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Generate lockfile
+        # RustSec advisories are matched against Cargo.lock. Generate it on the
+        # fly until a lockfile is committed to the repository (deep-dive 6.2).
+        run: cargo generate-lockfile
+
+      - name: Audit dependencies
+        run: cargo audit
 
   app-build:
     runs-on: macos-latest
