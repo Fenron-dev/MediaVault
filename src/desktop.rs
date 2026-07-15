@@ -95,11 +95,14 @@ pub(crate) fn run() -> Result<()> {
         // processed on a worker thread and answered via the `responder`, so
         // blocking work (AniList HTTP calls, full-file hashing) never runs on
         // the synchronous webview thread and can no longer freeze the UI. (#7)
-        .register_asynchronous_uri_scheme_protocol(PROTOCOL_SCHEME, |_context, request, responder| {
-            std::thread::spawn(move || {
-                responder.respond(handle_request(&request));
-            });
-        })
+        .register_asynchronous_uri_scheme_protocol(
+            PROTOCOL_SCHEME,
+            |_context, request, responder| {
+                std::thread::spawn(move || {
+                    responder.respond(handle_request(&request));
+                });
+            },
+        )
         .run(tauri::generate_context!())
         .map_err(|error| VaultError::AppStartup(error.to_string()))
 }
