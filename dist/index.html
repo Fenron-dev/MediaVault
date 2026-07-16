@@ -56,6 +56,7 @@
           <button class="nav-item" data-tab="review">Prüfung</button>
           <button class="nav-item" data-tab="collections">Sammlungen</button>
           <button class="nav-item" data-tab="playlists">Wiedergabelisten</button>
+          <button class="nav-item" data-tab="webnovels">Webnovels</button>
           <button class="nav-item" data-tab="settings">Einstellungen</button>
         </nav>
 
@@ -430,6 +431,46 @@
           </div>
         </section>
 
+        <section class="view" data-view="webnovels">
+          <div class="panel-grid">
+            <section class="panel">
+              <p class="panel-label">Webnovel-Abos</p>
+              <h3>Novel per Link abonnieren</h3>
+              <p class="body-copy">
+                RoyalRoad, WordPress-Seiten und NovelUpdates werden direkt unterstützt;
+                andere Seiten laufen über den generischen Parser.
+              </p>
+              <div class="stack">
+                <label class="field">
+                  <span>Novel-URL</span>
+                  <input
+                    id="webnovel-url-input"
+                    type="text"
+                    placeholder="https://www.royalroad.com/fiction/..."
+                  />
+                </label>
+                <div class="toolbar">
+                  <button class="action-button primary" id="webnovel-subscribe-btn">Abonnieren</button>
+                  <button class="action-button" id="webnovel-check-all-btn">Jetzt alle prüfen</button>
+                </div>
+                <p class="field-hint" id="webnovel-feedback"></p>
+                <div class="webnovel-progress" id="webnovel-job-progress" hidden>
+                  <p class="field-hint" id="webnovel-job-text"></p>
+                  <div class="webnovel-progress-track">
+                    <div class="webnovel-progress-bar" id="webnovel-job-bar"></div>
+                  </div>
+                </div>
+              </div>
+            </section>
+            <section class="panel">
+              <p class="panel-label">Abonnierte Novels</p>
+              <h3>Abos &amp; Status</h3>
+              <div class="stack webnovel-list" id="webnovel-list"></div>
+              <p class="body-copy" id="webnovel-list-empty">Noch keine Abos vorhanden.</p>
+            </section>
+          </div>
+        </section>
+
         <section class="view" data-view="settings">
           <div class="panel-grid">
             <section class="panel">
@@ -529,6 +570,36 @@
                   </label>
                   <button class="action-button" id="abs-import-btn">Bibliothek importieren</button>
                 </div>
+              </div>
+            </section>
+            <section class="panel">
+              <p class="panel-label">Webnovel-Abos</p>
+              <h3>Automatische Prüfung &amp; EPUB-Ausgabe</h3>
+              <div class="stack">
+                <label class="check-field">
+                  <input type="checkbox" id="webnovel-check-on-start" />
+                  <span>Beim App-Start auf neue Kapitel prüfen</span>
+                </label>
+                <label class="check-field">
+                  <input type="checkbox" id="webnovel-periodic-enabled" />
+                  <span>Periodisch prüfen, solange die App läuft</span>
+                </label>
+                <label class="field">
+                  <span>Intervall (Minuten, mind. 15)</span>
+                  <input id="webnovel-interval-input" type="number" min="15" step="15" />
+                </label>
+                <label class="check-field">
+                  <input type="checkbox" id="webnovel-build-complete" />
+                  <span>Gesamt-EPUB pro Novel erzeugen</span>
+                </label>
+                <label class="check-field">
+                  <input type="checkbox" id="webnovel-build-batch" />
+                  <span>Batch-EPUB pro Abruf erzeugen (laufende Novels)</span>
+                </label>
+                <p class="field-hint">
+                  Beim Neuaufbau des Gesamt-EPUBs wird dessen Lesefortschritt zurückgesetzt.
+                  Zum Weiterlesen laufender Novels die Batch-EPUBs verwenden.
+                </p>
               </div>
             </section>
           </div>

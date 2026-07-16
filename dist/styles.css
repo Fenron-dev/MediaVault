@@ -2252,3 +2252,92 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Webnovel subscriptions --- */
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.webnovel-list {
+  gap: 0.75rem;
+}
+
+.webnovel-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.webnovel-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.webnovel-card-title {
+  font-weight: 600;
+}
+
+.webnovel-card-meta {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.webnovel-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  opacity: 0.85;
+}
+
+.webnovel-badge.is-new {
+  border-color: rgba(94, 234, 155, 0.6);
+  color: #5eea9b;
+}
+
+.webnovel-badge.is-error {
+  border-color: rgba(255, 120, 120, 0.6);
+  color: #ff8b8b;
+}
+
+.webnovel-badge.is-paused,
+.webnovel-badge.is-completed {
+  opacity: 0.6;
+}
+
+.webnovel-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.webnovel-card-actions .action-button {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+}
+
+.webnovel-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.webnovel-progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f8cff, #5eea9b);
+  transition: width 0.4s ease;
+}
