@@ -9,6 +9,8 @@ build = "build.rs"
 tauri-build = "2"
 
 [dependencies]
+# Tree node types used when walking scraper's DOM (same crate scraper uses).
+ego-tree = "0.6"
 rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 # HTML parsing for the webnovel source adapters (ToC + chapter extraction).

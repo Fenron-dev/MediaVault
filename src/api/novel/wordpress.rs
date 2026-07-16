@@ -91,15 +91,15 @@ fn strip_cruft(fragment: &str) -> String {
 }
 
 fn serialize_without(
-    node: scraper::ego_tree::NodeRef<'_, scraper::Node>,
-    skip: &std::collections::HashSet<scraper::ego_tree::NodeId>,
+    node: ego_tree::NodeRef<'_, scraper::Node>,
+    skip: &std::collections::HashSet<ego_tree::NodeId>,
     out: &mut String,
 ) {
     if skip.contains(&node.id()) {
         return;
     }
     match node.value() {
-        scraper::Node::Text(text) => out.push_str(&crate::core::epub::escape_xml(text)),
+        scraper::Node::Text(text) => out.push_str(&crate::core::epub::escape_xml(&text.text)),
         scraper::Node::Element(element) => {
             let name = element.name();
             out.push_str(&format!("<{name}>"));

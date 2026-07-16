@@ -350,9 +350,9 @@ pub fn sanitize_to_xhtml(fragment: &str) -> String {
     collapse_blank_paragraphs(&out)
 }
 
-fn sanitize_node(node: scraper::ego_tree::NodeRef<'_, scraper::Node>, out: &mut String) {
+fn sanitize_node(node: ego_tree::NodeRef<'_, scraper::Node>, out: &mut String) {
     match node.value() {
-        scraper::Node::Text(text) => out.push_str(&crate::core::epub::escape_xml(text)),
+        scraper::Node::Text(text) => out.push_str(&crate::core::epub::escape_xml(&text.text)),
         scraper::Node::Element(element) => {
             let name = element.name();
             if DROP_ELEMENTS.contains(&name) {
