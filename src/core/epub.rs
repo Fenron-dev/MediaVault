@@ -175,7 +175,12 @@ fn render_opf(meta: &EpubMeta, chapters: &[EpubChapter]) -> String {
     let description = meta
         .description
         .as_deref()
-        .map(|text| format!("    <dc:description>{}</dc:description>\n", escape_xml(text)))
+        .map(|text| {
+            format!(
+                "    <dc:description>{}</dc:description>\n",
+                escape_xml(text)
+            )
+        })
         .unwrap_or_default();
 
     format!(

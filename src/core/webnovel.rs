@@ -169,8 +169,9 @@ pub fn save_subscription(system_dir: &Path, subscription: &Subscription) -> Resu
     let dir = webnovels_dir(system_dir);
     fs::create_dir_all(&dir).map_err(VaultError::from)?;
     let path = subscription_file_path(system_dir, &subscription.id);
-    let json = serde_json::to_string_pretty(subscription)
-        .map_err(|e| VaultError::Serialization(format!("subscription JSON serialize error: {e}")))?;
+    let json = serde_json::to_string_pretty(subscription).map_err(|e| {
+        VaultError::Serialization(format!("subscription JSON serialize error: {e}"))
+    })?;
     fs::write(&path, json).map_err(VaultError::from)?;
     Ok(())
 }
@@ -273,11 +274,8 @@ mod tests {
     #[test]
     fn save_load_delete_roundtrip() {
         let dir = temp_system_dir("crud");
-        let mut subscription = Subscription::new(
-            "https://example.com/fiction/123",
-            "royalroad",
-            "Test Novel",
-        );
+        let mut subscription =
+            Subscription::new("https://example.com/fiction/123", "royalroad", "Test Novel");
         subscription.known_chapters.push(KnownChapter {
             index: 1,
             title: "Chapter 1".to_string(),
@@ -312,8 +310,7 @@ mod tests {
         std::fs::create_dir_all(&store).expect("dir should create");
         std::fs::write(store.join("broken.json"), "{ not json").expect("write should succeed");
 
-        let subscription =
-            Subscription::new("https://example.com/fiction/9", "royalroad", "Valid");
+        let subscription = Subscription::new("https://example.com/fiction/9", "royalroad", "Valid");
         save_subscription(&dir, &subscription).expect("save should succeed");
 
         let all = list_subscriptions(&dir).expect("list should succeed");

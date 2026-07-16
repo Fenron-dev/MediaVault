@@ -316,7 +316,20 @@ const DROP_ELEMENTS: [&str; 14] = [
 ];
 /// Elements kept as-is (attributes stripped).
 const KEEP_ELEMENTS: [&str; 15] = [
-    "p", "br", "hr", "em", "strong", "i", "b", "h1", "h2", "h3", "h4", "blockquote", "ul", "ol",
+    "p",
+    "br",
+    "hr",
+    "em",
+    "strong",
+    "i",
+    "b",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "blockquote",
+    "ul",
+    "ol",
     "li",
 ];
 /// Void elements that must be self-closed in XHTML.
@@ -481,7 +494,10 @@ mod tests {
 
     #[test]
     fn detect_source_by_host() {
-        assert_eq!(detect_source("https://www.royalroad.com/fiction/1").id(), "royalroad");
+        assert_eq!(
+            detect_source("https://www.royalroad.com/fiction/1").id(),
+            "royalroad"
+        );
         assert_eq!(
             detect_source("https://www.divinedaolibrary.com/novel-x/").id(),
             "wordpress"

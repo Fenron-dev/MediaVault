@@ -5287,7 +5287,9 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
 
     match save_subscription(&vault.system_dir(), &subscription) {
         Ok(()) => WebnovelSubscribeResponse {
-            subscription: Some(WebnovelSubscriptionSummary::from_subscription(&subscription)),
+            subscription: Some(WebnovelSubscriptionSummary::from_subscription(
+                &subscription,
+            )),
             already_subscribed: false,
             error: None,
         },
@@ -5696,8 +5698,11 @@ fn check_one_subscription(
         };
         let cache_json = serde_json::to_string(&cached)
             .map_err(|error| VaultError::Serialization(error.to_string()))?;
-        fs::write(cache_dir.join(chapter_cache_name(chapter.index)), cache_json)
-            .map_err(VaultError::from)?;
+        fs::write(
+            cache_dir.join(chapter_cache_name(chapter.index)),
+            cache_json,
+        )
+        .map_err(VaultError::from)?;
         chapter.downloaded_at_unix = Some(unix_now());
         downloaded_indices.push(chapter.index);
 

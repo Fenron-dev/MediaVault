@@ -208,7 +208,10 @@ mod tests {
         assert_eq!(info.title, "Martial Test God");
         assert_eq!(info.chapters.len(), 2);
         assert_eq!(info.chapters[0].title, "Chapter 1 – Awakening");
-        assert_eq!(info.chapters[1].url, "https://www.example-wp.com/mtg-chapter-2/");
+        assert_eq!(
+            info.chapters[1].url,
+            "https://www.example-wp.com/mtg-chapter-2/"
+        );
     }
 
     #[test]
