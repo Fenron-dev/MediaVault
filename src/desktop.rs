@@ -5,12 +5,16 @@ use std::env;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
+use crate::api::novel::{detect_source, ChapterRef, PoliteClient};
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
+use crate::core::epub::{write_epub, EpubChapter, EpubMeta};
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
@@ -24,6 +28,10 @@ use crate::core::progress::{
 };
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
+use crate::core::webnovel::{
+    delete_subscription, list_subscriptions, load_subscription, normalize_url, save_subscription,
+    unix_now, KnownChapter, Subscription,
+};
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
 use serde::{Deserialize, Serialize};
@@ -237,6 +245,30 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/list-subtitles" => json_response(
             StatusCode::OK,
             &build_list_subtitles_response(request.uri().query()),
+        ),
+        "/api/webnovel/list" => json_response(
+            StatusCode::OK,
+            &build_webnovel_list_response(request.uri().query()),
+        ),
+        "/api/webnovel/subscribe" => json_response(
+            StatusCode::OK,
+            &build_webnovel_subscribe_response(request.body()),
+        ),
+        "/api/webnovel/unsubscribe" => json_response(
+            StatusCode::OK,
+            &build_webnovel_unsubscribe_response(request.body()),
+        ),
+        "/api/webnovel/update" => json_response(
+            StatusCode::OK,
+            &build_webnovel_update_response(request.body()),
+        ),
+        "/api/webnovel/check" => json_response(
+            StatusCode::OK,
+            &build_webnovel_check_response(request.body()),
+        ),
+        "/api/webnovel/job" => json_response(
+            StatusCode::OK,
+            &build_webnovel_job_response(request.uri().query()),
         ),
         _ => response(
             StatusCode::NOT_FOUND,
@@ -3504,6 +3536,7 @@ fn parse_media_type(value: String) -> Option<MediaType> {
         "hentai-anime" => Some(MediaType::HentaiAnime),
         "book" => Some(MediaType::Book),
         "ebook" => Some(MediaType::Ebook),
+        "webnovel" => Some(MediaType::Webnovel),
         "comic" => Some(MediaType::Comic),
         "manga" => Some(MediaType::Manga),
         "music-album" => Some(MediaType::MusicAlbum),
@@ -5011,4 +5044,827 @@ fn build_abs_sync_progress_response(body: &[u8]) -> AbsSyncProgressResponse {
         }
         Err(e) => AbsSyncProgressResponse::error(e.to_string()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Webnovel subscriptions
+// ---------------------------------------------------------------------------
+
+/// Directory inside a novel's vault folder that caches downloaded chapters.
+const WEBNOVEL_CHAPTER_CACHE_DIR: &str = ".chapters";
+
+/// Registry of running/finished webnovel check jobs, keyed by job id.
+static WEBNOVEL_JOBS: LazyLock<Mutex<HashMap<String, WebnovelJobStatus>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Guards against overlapping check runs (startup, interval, manual).
+static WEBNOVEL_CHECK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Monotonic part of generated job ids.
+static WEBNOVEL_JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Progress snapshot of one check job, polled by the frontend.
+#[derive(Debug, Clone, Serialize)]
+struct WebnovelJobStatus {
+    /// `running`, `done`, or `failed`.
+    state: String,
+    /// Title of the subscription currently being processed.
+    novel_title: String,
+    /// 1-based position of the chapter currently being fetched.
+    current_chapter: usize,
+    /// Number of chapters queued for download in the current subscription.
+    total_chapters: usize,
+    /// Chapters downloaded so far across the whole job.
+    downloaded: usize,
+    /// Final summary or error message once the job is terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+impl WebnovelJobStatus {
+    fn running() -> Self {
+        Self {
+            state: "running".to_string(),
+            novel_title: String::new(),
+            current_chapter: 0,
+            total_chapters: 0,
+            downloaded: 0,
+            message: None,
+        }
+    }
+}
+
+/// Applies a mutation to a job's status under the registry lock.
+fn update_webnovel_job(job_id: &str, apply: impl FnOnce(&mut WebnovelJobStatus)) {
+    if let Ok(mut jobs) = WEBNOVEL_JOBS.lock() {
+        if let Some(status) = jobs.get_mut(job_id) {
+            apply(status);
+        }
+    }
+}
+
+/// Clears the "check running" flag when a worker thread ends — even if the
+/// worker panics, so a crashed job can never wedge future checks.
+struct WebnovelCheckActiveGuard;
+
+impl Drop for WebnovelCheckActiveGuard {
+    fn drop(&mut self) {
+        WEBNOVEL_CHECK_ACTIVE.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Cached chapter content stored under `<novel>/.chapters/ch_<index>.json`.
+///
+/// The cache makes complete-EPUB rebuilds purely local and lets an aborted
+/// download resume without re-fetching anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedChapter {
+    title: String,
+    xhtml: String,
+}
+
+#[derive(Debug, Serialize)]
+struct WebnovelSubscriptionSummary {
+    id: String,
+    url: String,
+    source: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    completed: bool,
+    enabled: bool,
+    known_chapters: usize,
+    downloaded_chapters: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check_unix: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+}
+
+impl WebnovelSubscriptionSummary {
+    fn from_subscription(subscription: &Subscription) -> Self {
+        Self {
+            id: subscription.id.clone(),
+            url: subscription.url.clone(),
+            source: subscription.source.clone(),
+            title: subscription.title.clone(),
+            author: subscription.author.clone(),
+            completed: subscription.completed,
+            enabled: subscription.enabled,
+            known_chapters: subscription.known_chapters.len(),
+            downloaded_chapters: subscription.downloaded_count(),
+            last_check_unix: subscription.last_check_unix,
+            last_error: subscription.last_error.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelListResponse {
+    subscriptions: Vec<WebnovelSubscriptionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_webnovel_list_response(query: Option<&str>) -> WebnovelListResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault = match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => {
+            return WebnovelListResponse {
+                subscriptions: Vec::new(),
+                error: Some(message),
+            }
+        }
+    };
+
+    match list_subscriptions(&vault.system_dir()) {
+        Ok(subscriptions) => WebnovelListResponse {
+            subscriptions: subscriptions
+                .iter()
+                .map(WebnovelSubscriptionSummary::from_subscription)
+                .collect(),
+            error: None,
+        },
+        Err(error) => WebnovelListResponse {
+            subscriptions: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+/// Resolves the active vault or produces a user-facing German error message.
+fn resolve_webnovel_vault(root_override: Option<&str>) -> std::result::Result<Vault, String> {
+    let root = match resolve_vault_root(root_override) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Err("Kein Vault geöffnet.".to_string()),
+        Err(error) => return Err(error.to_string()),
+    };
+    Vault::new(root).map_err(|error| error.to_string())
+}
+
+#[derive(Deserialize)]
+struct WebnovelSubscribeRequest {
+    url: String,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebnovelSubscribeResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subscription: Option<WebnovelSubscriptionSummary>,
+    /// True when the URL was already subscribed and no new record was created.
+    already_subscribed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl WebnovelSubscribeResponse {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            subscription: None,
+            already_subscribed: false,
+            error: Some(message.into()),
+        }
+    }
+}
+
+fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
+    let req: WebnovelSubscribeRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSubscribeResponse::error(format!("Invalid request: {error}")),
+    };
+
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSubscribeResponse::error(message),
+    };
+
+    let url = normalize_url(&req.url);
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return WebnovelSubscribeResponse::error("Bitte eine vollständige URL angeben.");
+    }
+
+    // Re-subscribing an existing URL returns the current record unchanged.
+    let id = crate::core::webnovel::subscription_id(&url);
+    match load_subscription(&vault.system_dir(), &id) {
+        Ok(Some(existing)) => {
+            return WebnovelSubscribeResponse {
+                subscription: Some(WebnovelSubscriptionSummary::from_subscription(&existing)),
+                already_subscribed: true,
+                error: None,
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
+    }
+
+    let client = match PoliteClient::new() {
+        Ok(client) => client,
+        Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
+    };
+    let source = detect_source(&url);
+    let info = match source.fetch_novel_info(&client, &url) {
+        Ok(info) => info,
+        Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
+    };
+
+    let mut subscription = Subscription::new(url, source.id(), info.title.clone());
+    subscription.author = info.author.clone();
+    subscription.cover_url = info.cover_url.clone();
+    subscription.description = info.description.clone();
+    subscription.completed = info.completed_hint.unwrap_or(false);
+    subscription.known_chapters = info
+        .chapters
+        .iter()
+        .enumerate()
+        .map(|(position, chapter)| KnownChapter {
+            index: (position + 1) as u32,
+            title: chapter.title.clone(),
+            url: chapter.url.clone(),
+            downloaded_at_unix: None,
+        })
+        .collect();
+
+    match save_subscription(&vault.system_dir(), &subscription) {
+        Ok(()) => WebnovelSubscribeResponse {
+            subscription: Some(WebnovelSubscriptionSummary::from_subscription(&subscription)),
+            already_subscribed: false,
+            error: None,
+        },
+        Err(error) => WebnovelSubscribeResponse::error(error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct WebnovelUnsubscribeRequest {
+    id: String,
+    /// When false, the novel's vault folder (EPUBs + chapter cache) is removed.
+    #[serde(default = "webnovel_default_true")]
+    keep_files: bool,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebnovelSimpleResponse {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl WebnovelSimpleResponse {
+    fn ok() -> Self {
+        Self {
+            ok: true,
+            error: None,
+        }
+    }
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            ok: false,
+            error: Some(message.into()),
+        }
+    }
+}
+
+fn webnovel_default_true() -> bool {
+    true
+}
+
+fn build_webnovel_unsubscribe_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelUnsubscribeRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+
+    let subscription = match load_subscription(&vault.system_dir(), &req.id) {
+        Ok(Some(subscription)) => subscription,
+        Ok(None) => return WebnovelSimpleResponse::error("Abo nicht gefunden."),
+        Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
+    };
+
+    if !req.keep_files {
+        let novel_dir = webnovel_folder(&vault, &subscription.title);
+        if novel_dir.exists() {
+            if let Err(error) = fs::remove_dir_all(&novel_dir) {
+                return WebnovelSimpleResponse::error(format!(
+                    "Dateien konnten nicht gelöscht werden: {error}"
+                ));
+            }
+        }
+    }
+
+    match delete_subscription(&vault.system_dir(), &req.id) {
+        Ok(()) => WebnovelSimpleResponse::ok(),
+        Err(error) => WebnovelSimpleResponse::error(error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+struct WebnovelUpdateRequest {
+    id: String,
+    #[serde(default)]
+    completed: Option<bool>,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+fn build_webnovel_update_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelUpdateRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+
+    let mut subscription = match load_subscription(&vault.system_dir(), &req.id) {
+        Ok(Some(subscription)) => subscription,
+        Ok(None) => return WebnovelSimpleResponse::error("Abo nicht gefunden."),
+        Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
+    };
+
+    if let Some(completed) = req.completed {
+        subscription.completed = completed;
+    }
+    if let Some(enabled) = req.enabled {
+        subscription.enabled = enabled;
+    }
+
+    match save_subscription(&vault.system_dir(), &subscription) {
+        Ok(()) => WebnovelSimpleResponse::ok(),
+        Err(error) => WebnovelSimpleResponse::error(error.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WebnovelCheckRequest {
+    /// Check a single subscription; omitted = all enabled, non-completed ones.
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    root: Option<String>,
+    #[serde(default = "webnovel_default_true")]
+    build_complete: bool,
+    #[serde(default = "webnovel_default_true")]
+    build_batch: bool,
+}
+
+#[derive(Serialize)]
+struct WebnovelCheckResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Options carried into the worker thread for one check run.
+struct WebnovelCheckOptions {
+    only_id: Option<String>,
+    build_complete: bool,
+    build_batch: bool,
+}
+
+fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
+    let req: WebnovelCheckRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => {
+            return WebnovelCheckResponse {
+                job_id: None,
+                error: Some(format!("Invalid request: {error}")),
+            }
+        }
+    };
+
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => {
+            return WebnovelCheckResponse {
+                job_id: None,
+                error: Some(message),
+            }
+        }
+    };
+
+    // Reject overlapping runs; the flag is released by the worker's guard.
+    if WEBNOVEL_CHECK_ACTIVE
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return WebnovelCheckResponse {
+            job_id: None,
+            error: Some("Eine Prüfung läuft bereits.".to_string()),
+        };
+    }
+
+    let job_id = format!(
+        "job-{}-{}",
+        unix_now(),
+        WEBNOVEL_JOB_COUNTER.fetch_add(1, Ordering::SeqCst)
+    );
+    if let Ok(mut jobs) = WEBNOVEL_JOBS.lock() {
+        jobs.insert(job_id.clone(), WebnovelJobStatus::running());
+    }
+
+    let options = WebnovelCheckOptions {
+        only_id: req.id,
+        build_complete: req.build_complete,
+        build_batch: req.build_batch,
+    };
+    let thread_job_id = job_id.clone();
+    std::thread::spawn(move || {
+        let _active = WebnovelCheckActiveGuard;
+        let outcome = run_webnovel_check(&vault, &options, &thread_job_id);
+        update_webnovel_job(&thread_job_id, |status| match &outcome {
+            Ok(message) => {
+                status.state = "done".to_string();
+                status.message = Some(message.clone());
+            }
+            Err(error) => {
+                status.state = "failed".to_string();
+                status.message = Some(error.to_string());
+            }
+        });
+    });
+
+    WebnovelCheckResponse {
+        job_id: Some(job_id),
+        error: None,
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelJobResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<WebnovelJobStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_webnovel_job_response(query: Option<&str>) -> WebnovelJobResponse {
+    let job_id = query.and_then(|q| extract_query_value(q, "job_id"));
+    let Some(job_id) = job_id else {
+        return WebnovelJobResponse {
+            status: None,
+            error: Some("missing job_id".to_string()),
+        };
+    };
+
+    let Ok(mut jobs) = WEBNOVEL_JOBS.lock() else {
+        return WebnovelJobResponse {
+            status: None,
+            error: Some("job registry unavailable".to_string()),
+        };
+    };
+
+    match jobs.get(&job_id).cloned() {
+        Some(status) => {
+            // Terminal jobs are handed out once and then evicted.
+            if status.state != "running" {
+                jobs.remove(&job_id);
+            }
+            WebnovelJobResponse {
+                status: Some(status),
+                error: None,
+            }
+        }
+        None => WebnovelJobResponse {
+            status: None,
+            error: Some("Job nicht gefunden.".to_string()),
+        },
+    }
+}
+
+/// Runs one check job over the selected subscriptions.
+///
+/// Per-subscription failures are recorded in that subscription's `last_error`
+/// and the run continues; only infrastructure failures (store unwritable)
+/// abort the whole job.
+fn run_webnovel_check(
+    vault: &Vault,
+    options: &WebnovelCheckOptions,
+    job_id: &str,
+) -> Result<String> {
+    let system_dir = vault.system_dir();
+    let all = list_subscriptions(&system_dir)?;
+    let selected: Vec<Subscription> = match options.only_id.as_deref() {
+        Some(id) => all
+            .into_iter()
+            .filter(|subscription| subscription.id == id)
+            .collect(),
+        None => all
+            .into_iter()
+            .filter(|subscription| subscription.enabled && !subscription.completed)
+            .collect(),
+    };
+
+    if selected.is_empty() {
+        return Ok("Keine passenden Abonnements.".to_string());
+    }
+
+    let client = PoliteClient::new()?;
+    let mut new_chapters = 0usize;
+    let mut failures = 0usize;
+
+    for mut subscription in selected {
+        update_webnovel_job(job_id, |status| {
+            status.novel_title = subscription.title.clone();
+            status.current_chapter = 0;
+            status.total_chapters = 0;
+        });
+
+        match check_one_subscription(vault, &client, &mut subscription, options, job_id) {
+            Ok(downloaded) => {
+                new_chapters += downloaded;
+                subscription.last_error = None;
+            }
+            Err(error) => {
+                failures += 1;
+                subscription.last_error = Some(error.to_string());
+            }
+        }
+        subscription.last_check_unix = Some(unix_now());
+        save_subscription(&system_dir, &subscription)?;
+    }
+
+    let mut message = format!("{new_chapters} neue Kapitel geladen.");
+    if failures > 0 {
+        message.push_str(&format!(" {failures} Abo(s) mit Fehlern."));
+    }
+    Ok(message)
+}
+
+/// Checks one subscription: refresh ToC, download pending chapters, build EPUBs.
+fn check_one_subscription(
+    vault: &Vault,
+    client: &PoliteClient,
+    subscription: &mut Subscription,
+    options: &WebnovelCheckOptions,
+    job_id: &str,
+) -> Result<usize> {
+    let source = detect_source(&subscription.url);
+    let info = source.fetch_novel_info(client, &subscription.url)?;
+
+    // Fill metadata gaps and pick up a "finished" flag from the source.
+    if subscription.author.is_none() {
+        subscription.author = info.author.clone();
+    }
+    if subscription.description.is_none() {
+        subscription.description = info.description.clone();
+    }
+    if info.completed_hint == Some(true) {
+        subscription.completed = true;
+    }
+
+    // Diff the ToC against known chapters by normalized URL. Known chapters
+    // that vanished upstream are kept — local content is never discarded.
+    let known: HashSet<String> = subscription
+        .known_chapters
+        .iter()
+        .map(|chapter| normalize_url(&chapter.url))
+        .collect();
+    let mut next_index = subscription
+        .known_chapters
+        .iter()
+        .map(|chapter| chapter.index)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    for chapter in &info.chapters {
+        if !known.contains(&normalize_url(&chapter.url)) {
+            subscription.known_chapters.push(KnownChapter {
+                index: next_index,
+                title: chapter.title.clone(),
+                url: chapter.url.clone(),
+                downloaded_at_unix: None,
+            });
+            next_index += 1;
+        }
+    }
+
+    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
+    fs::create_dir_all(&cache_dir).map_err(VaultError::from)?;
+
+    let pending: Vec<usize> = subscription
+        .known_chapters
+        .iter()
+        .enumerate()
+        .filter(|(_, chapter)| chapter.downloaded_at_unix.is_none())
+        .map(|(position, _)| position)
+        .collect();
+    update_webnovel_job(job_id, |status| {
+        status.total_chapters = pending.len();
+    });
+
+    let mut downloaded_indices: Vec<u32> = Vec::new();
+    let mut fetch_error: Option<VaultError> = None;
+    for (position, chapter_position) in pending.iter().enumerate() {
+        update_webnovel_job(job_id, |status| {
+            status.current_chapter = position + 1;
+        });
+
+        let chapter_ref = {
+            let chapter = &subscription.known_chapters[*chapter_position];
+            ChapterRef {
+                title: chapter.title.clone(),
+                url: chapter.url.clone(),
+            }
+        };
+        let content = match source.fetch_chapter(client, &chapter_ref) {
+            Ok(content) => content,
+            Err(error) => {
+                // Abort the download loop but keep everything fetched so far;
+                // the next run resumes exactly here.
+                fetch_error = Some(error);
+                break;
+            }
+        };
+
+        let chapter = &mut subscription.known_chapters[*chapter_position];
+        let cached = CachedChapter {
+            title: content.title,
+            xhtml: content.xhtml,
+        };
+        let cache_json = serde_json::to_string(&cached)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        fs::write(cache_dir.join(chapter_cache_name(chapter.index)), cache_json)
+            .map_err(VaultError::from)?;
+        chapter.downloaded_at_unix = Some(unix_now());
+        downloaded_indices.push(chapter.index);
+
+        // Persist after every chapter so an aborted run can resume.
+        save_subscription(&vault.system_dir(), subscription)?;
+        update_webnovel_job(job_id, |status| {
+            status.downloaded += 1;
+        });
+    }
+
+    // Build EPUBs from whatever is cached — also after a partial run.
+    if !downloaded_indices.is_empty() {
+        if options.build_batch && !subscription.completed {
+            build_batch_epub(vault, subscription, &downloaded_indices)?;
+        }
+        if options.build_complete {
+            build_complete_epub(vault, subscription)?;
+        }
+    }
+
+    if let Some(error) = fetch_error {
+        return Err(error);
+    }
+    Ok(downloaded_indices.len())
+}
+
+/// The novel's folder inside the vault: `Webnovels/<safe title>/`.
+fn webnovel_folder(vault: &Vault, title: &str) -> PathBuf {
+    vault
+        .root()
+        .join(MediaType::Webnovel.folder_segment())
+        .join(sanitize_path_segment(title))
+}
+
+/// Cache file name for a chapter index.
+fn chapter_cache_name(index: u32) -> String {
+    format!("ch_{index:04}.json")
+}
+
+/// Loads cached chapters for the given indices, in ascending index order.
+fn load_cached_chapters(cache_dir: &Path, indices: &[u32]) -> Result<Vec<EpubChapter>> {
+    let mut sorted = indices.to_vec();
+    sorted.sort_unstable();
+
+    let mut chapters = Vec::with_capacity(sorted.len());
+    for index in sorted {
+        let path = cache_dir.join(chapter_cache_name(index));
+        let raw = fs::read_to_string(&path).map_err(VaultError::from)?;
+        let cached: CachedChapter = serde_json::from_str(&raw)
+            .map_err(|error| VaultError::Serialization(error.to_string()))?;
+        chapters.push(EpubChapter {
+            title: cached.title,
+            xhtml_body: cached.xhtml,
+        });
+    }
+    Ok(chapters)
+}
+
+/// Builds the per-run batch EPUB ("<title> - Kapitel 0045-0063.epub").
+///
+/// Batch files are never rewritten afterwards, so reading progress in them
+/// survives future complete-EPUB rebuilds.
+fn build_batch_epub(vault: &Vault, subscription: &Subscription, indices: &[u32]) -> Result<()> {
+    let min = indices.iter().min().copied().unwrap_or(0);
+    let max = indices.iter().max().copied().unwrap_or(0);
+    let safe_title = sanitize_path_segment(&subscription.title);
+    let file_name = if min == max {
+        format!("{safe_title} - Kapitel {min:04}.epub")
+    } else {
+        format!("{safe_title} - Kapitel {min:04}-{max:04}.epub")
+    };
+
+    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
+    let chapters = load_cached_chapters(&cache_dir, indices)?;
+
+    let meta = EpubMeta {
+        title: if min == max {
+            format!("{} – Kapitel {min}", subscription.title)
+        } else {
+            format!("{} – Kapitel {min}–{max}", subscription.title)
+        },
+        author: subscription.author.clone(),
+        language: "en".to_string(),
+        identifier: format!("{}#batch-{min}-{max}", subscription.url),
+        description: subscription.description.clone(),
+    };
+    write_epub(&novel_dir.join(&file_name), &meta, &chapters)?;
+
+    let entry_id = format!("{}-batch-{min:04}-{max:04}", subscription.id);
+    write_webnovel_sidecar(vault, subscription, &file_name, &entry_id, Some((min, max)))
+}
+
+/// Rebuilds the complete EPUB from every cached chapter.
+fn build_complete_epub(vault: &Vault, subscription: &Subscription) -> Result<()> {
+    let indices: Vec<u32> = subscription
+        .known_chapters
+        .iter()
+        .filter(|chapter| chapter.downloaded_at_unix.is_some())
+        .map(|chapter| chapter.index)
+        .collect();
+    if indices.is_empty() {
+        return Ok(());
+    }
+
+    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
+    let chapters = load_cached_chapters(&cache_dir, &indices)?;
+
+    let safe_title = sanitize_path_segment(&subscription.title);
+    let file_name = format!("{safe_title}.epub");
+    let meta = EpubMeta {
+        title: subscription.title.clone(),
+        author: subscription.author.clone(),
+        language: "en".to_string(),
+        identifier: subscription.url.clone(),
+        description: subscription.description.clone(),
+    };
+    write_epub(&novel_dir.join(&file_name), &meta, &chapters)?;
+
+    // The rebuild shifts EPUB CFIs, so a stored reading position would point
+    // at the wrong place — drop it. Batch EPUBs keep in-progress reads.
+    let relative = format!(
+        "{}/{}/{}",
+        MediaType::Webnovel.folder_segment(),
+        safe_title,
+        file_name
+    );
+    delete_progress(&vault.progress_dir(), &relative).ok();
+
+    write_webnovel_sidecar(vault, subscription, &file_name, &subscription.id, None)
+}
+
+/// Writes the `.mediavault.yaml` sidecar next to a generated EPUB.
+fn write_webnovel_sidecar(
+    vault: &Vault,
+    subscription: &Subscription,
+    file_name: &str,
+    entry_id: &str,
+    chapter_range: Option<(u32, u32)>,
+) -> Result<()> {
+    let safe_title = sanitize_path_segment(&subscription.title);
+    let relative = RelativePath::new(
+        PathBuf::from(MediaType::Webnovel.folder_segment())
+            .join(&safe_title)
+            .join(file_name),
+    )?;
+
+    let mut entry = MediaEntry::new(entry_id, MediaType::Webnovel, relative.clone(), file_name);
+    entry.source = PropertySource::Api;
+    entry.created_at_unix = unix_now();
+    entry.updated_at_unix = entry.created_at_unix;
+    entry.properties.title = Some(subscription.title.clone());
+    entry.properties.description = subscription.description.clone();
+    entry.properties.series_title = Some(subscription.title.clone());
+    entry.properties.status = Some(if subscription.completed {
+        MediaStatus::Completed
+    } else {
+        MediaStatus::InLibrary
+    });
+    if let Some((start, end)) = chapter_range {
+        entry.properties.episode_start = Some(start.min(u32::from(u16::MAX)) as u16);
+        entry.properties.episode_end = Some(end.min(u32::from(u16::MAX)) as u16);
+    }
+
+    let yaml = render_sidecar_yaml(&entry)?;
+    let sidecar_relative = sidecar_path_for(&relative)?;
+    fs::write(vault.root().join(sidecar_relative.as_path()), yaml).map_err(VaultError::from)?;
+    Ok(())
 }
