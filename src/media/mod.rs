@@ -6,7 +6,7 @@ use std::fmt::{self, Display, Formatter};
 use crate::core::vault::RelativePath;
 
 /// All supported media types in the current foundation.
-pub const ALL_MEDIA_TYPES: [MediaType; 25] = [
+pub const ALL_MEDIA_TYPES: [MediaType; 26] = [
     MediaType::Film,
     MediaType::Series,
     MediaType::Anime,
@@ -15,6 +15,7 @@ pub const ALL_MEDIA_TYPES: [MediaType; 25] = [
     MediaType::HentaiManga,
     MediaType::Book,
     MediaType::Ebook,
+    MediaType::Webnovel,
     MediaType::Comic,
     MediaType::Manga,
     MediaType::MusicAlbum,
@@ -53,6 +54,8 @@ pub enum MediaType {
     Book,
     /// E-books with book-like treatment.
     Ebook,
+    /// Serialized web novels downloaded chapter-by-chapter from the web.
+    Webnovel,
     /// Comics and graphic novels.
     Comic,
     /// Manga.
@@ -106,6 +109,9 @@ impl MediaType {
             Self::HentaiGame | Self::HentaiManga => "Hentai",
             // Books and Ebooks share one folder — they differ only in format, not in content.
             Self::Book | Self::Ebook => "Bücher",
+            // Webnovels get their own root: they are living serials managed by
+            // the subscription engine, not static imported files.
+            Self::Webnovel => "Webnovels",
             Self::Comic => "Comics",
             Self::Manga => "Manga",
             // Albums and tracks live under the same Musik root; artist/album subfolders are
@@ -134,6 +140,8 @@ impl MediaType {
             Self::Film | Self::Series => Some("tmdb"),
             Self::Anime | Self::HentaiAnime => Some("anilist"),
             Self::Book | Self::Ebook | Self::Audiobook => Some("openlibrary"),
+            // Metadata comes from the subscribed source site itself.
+            Self::Webnovel => None,
             Self::Comic | Self::Manga | Self::HentaiManga => Some("mangadex"),
             Self::MusicAlbum | Self::MusicTrack => Some("musicbrainz"),
             Self::Podcast => Some("podcastindex"),
@@ -173,6 +181,7 @@ impl Display for MediaType {
             Self::HentaiManga => "hentai-manga",
             Self::Book => "book",
             Self::Ebook => "ebook",
+            Self::Webnovel => "webnovel",
             Self::Comic => "comic",
             Self::Manga => "manga",
             Self::MusicAlbum => "music-album",
