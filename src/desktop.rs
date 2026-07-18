@@ -12,7 +12,9 @@ use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::api::goodreads::GoodreadsClient;
-use crate::api::novel::{detect_image_media_type, detect_source, ChapterRef, PoliteClient};
+use crate::api::novel::{
+    detect_image_media_type, detect_source, sanitize_to_xhtml, ChapterRef, PoliteClient,
+};
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
 use crate::core::epub::{write_epub, EpubChapter, EpubCover, EpubMeta};
@@ -30,8 +32,8 @@ use crate::core::progress::{
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
 use crate::core::webnovel::{
-    delete_subscription, list_subscriptions, load_subscription, normalize_url, save_subscription,
-    unix_now, KnownChapter, Subscription,
+    blocked_reason, delete_subscription, list_subscriptions, load_subscription, normalize_url,
+    save_subscription, unix_now, KnownChapter, Subscription,
 };
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
@@ -2934,11 +2936,16 @@ fn should_skip_scanned_file(path: &Path) -> bool {
         return false;
     };
 
+    let lower = name.to_lowercase();
     is_hidden_system_entry(name)
         || name.ends_with(".mediavault.yaml")
         || name.ends_with(LEGACY_SIDECAR_SUFFIX)
         // NFO files are metadata companions, not independent media entries.
-        || name.to_lowercase().ends_with(".nfo")
+        || lower.ends_with(".nfo")
+        // Cover art files (cover.jpg, poster.png, …) are companions of the
+        // media next to them — indexing them as standalone images put every
+        // downloaded webnovel cover into the "Bilder" collection.
+        || COVER_FILENAMES.contains(&lower.as_str())
 }
 
 /// Audio file extensions that qualify a file to be counted as an audiobook part.
@@ -5244,6 +5251,9 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return WebnovelSubscribeResponse::error("Bitte eine vollständige URL angeben.");
     }
+    if let Some(reason) = blocked_reason(&vault.system_dir(), &url) {
+        return WebnovelSubscribeResponse::error(reason);
+    }
 
     // Re-subscribing an existing URL returns the current record unchanged.
     let id = crate::core::webnovel::subscription_id(&url);
@@ -5649,6 +5659,9 @@ fn check_one_subscription(
     options: &WebnovelCheckOptions,
     job_id: &str,
 ) -> Result<usize> {
+    if let Some(reason) = blocked_reason(&vault.system_dir(), &subscription.url) {
+        return Err(VaultError::ExternalApi(reason));
+    }
     let source = detect_source(&subscription.url);
     let info = source.fetch_novel_info(client, &subscription.url)?;
 
@@ -5933,7 +5946,10 @@ fn load_cached_chapters(cache_dir: &Path, indices: &[u32]) -> Result<Vec<EpubCha
             .map_err(|error| VaultError::Serialization(error.to_string()))?;
         chapters.push(EpubChapter {
             title: cached.title,
-            xhtml_body: cached.xhtml,
+            // Chapters are sanitized at download time already; sanitizing
+            // again at build time is defense in depth — a tampered or legacy
+            // cache file can still never put scripts into an EPUB.
+            xhtml_body: sanitize_to_xhtml(&cached.xhtml),
         });
     }
     Ok(chapters)

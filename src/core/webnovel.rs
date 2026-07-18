@@ -237,6 +237,61 @@ pub fn list_subscriptions(system_dir: &Path) -> Result<Vec<Subscription>> {
 }
 
 // ---------------------------------------------------------------------------
+// Host blocklist
+// ---------------------------------------------------------------------------
+
+/// Hosts that are never fetched. Built-in entries cover domains that are
+/// parked ad-landers or otherwise known to be unusable/unsafe.
+const BUILTIN_BLOCKED_HOSTS: [&str; 1] = [
+    // Parked domain: every request lands on an advertising page.
+    "novelive.com",
+];
+
+/// User-curated blocklist file (a plain JSON array of host names).
+pub fn blocklist_file_path(system_dir: &Path) -> PathBuf {
+    system_dir.join("webnovel_blocklist.json")
+}
+
+/// Returns the merged blocklist: built-in hosts plus the user's file.
+///
+/// The file is optional and errors are treated as an empty list — a broken
+/// blocklist must never disable the built-in protections.
+pub fn load_blocked_hosts(system_dir: &Path) -> Vec<String> {
+    let mut hosts: Vec<String> = BUILTIN_BLOCKED_HOSTS
+        .iter()
+        .map(|host| host.to_string())
+        .collect();
+    if let Ok(raw) = fs::read_to_string(blocklist_file_path(system_dir)) {
+        if let Ok(user_hosts) = serde_json::from_str::<Vec<String>>(&raw) {
+            for host in user_hosts {
+                let host = host.trim().to_lowercase();
+                if !host.is_empty() && !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+        }
+    }
+    hosts
+}
+
+/// Checks a subscription URL against the blocklist.
+///
+/// Returns a user-facing German message when the URL's host (or a parent
+/// domain of it) is blocked.
+pub fn blocked_reason(system_dir: &Path, url: &str) -> Option<String> {
+    let host = crate::api::novel::host_of(url)?;
+    for blocked in load_blocked_hosts(system_dir) {
+        if host == blocked || host.ends_with(&format!(".{blocked}")) {
+            return Some(format!(
+                "Die Seite „{host}“ steht auf der Blockliste \
+                 (Datei: .mediavault/webnovel_blocklist.json im Vault)."
+            ));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
 
@@ -324,6 +379,33 @@ mod tests {
             .expect("load should succeed")
             .is_none());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn blocklist_merges_builtin_and_user_entries() {
+        let dir = temp_system_dir("blocklist");
+        std::fs::create_dir_all(&dir).expect("dir should create");
+        std::fs::write(
+            blocklist_file_path(&dir),
+            r#"["evil-novels.example", " Mixed.Case.example "]"#,
+        )
+        .expect("write should succeed");
+
+        assert!(blocked_reason(&dir, "https://novelive.com/x").is_some());
+        assert!(blocked_reason(&dir, "https://www.evil-novels.example/novel/1").is_some());
+        assert!(blocked_reason(&dir, "https://mixed.case.example/n").is_some());
+        assert!(blocked_reason(&dir, "https://www.royalroad.com/fiction/1").is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn broken_blocklist_keeps_builtin_protection() {
+        let dir = temp_system_dir("blocklist-broken");
+        std::fs::create_dir_all(&dir).expect("dir should create");
+        std::fs::write(blocklist_file_path(&dir), "{ not json").expect("write should succeed");
+        assert!(blocked_reason(&dir, "https://novelive.com/x").is_some());
         std::fs::remove_dir_all(&dir).ok();
     }
 
