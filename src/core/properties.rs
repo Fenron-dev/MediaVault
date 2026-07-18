@@ -38,6 +38,7 @@ fn render_properties(document: &mut String, properties: &MediaProperties) {
         "title_original",
         properties.title_original.clone(),
     );
+    render_optional_string(document, "author", properties.author.clone());
     render_optional_string(document, "description", properties.description.clone());
     render_optional_string(
         document,

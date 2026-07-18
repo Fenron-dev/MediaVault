@@ -1199,6 +1199,11 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
         if plan_item.cover_url.is_none() {
             plan_item.cover_url = find_cover_url(&vault, &plan_item.source_path);
         }
+        plan_item.modified_at = fs::metadata(vault.root().join(&plan_item.source_path))
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs());
     }
 
     // Append parts list to the sidecar YAML preview for audiobook group representatives.
@@ -1504,6 +1509,7 @@ struct ParsedSidecar {
     status: Option<MediaStatus>,
     description: Option<String>,
     rating_external: Option<f32>,
+    author: Option<String>,
     genres: Vec<String>,
     tags: Vec<String>,
 }
@@ -1660,6 +1666,9 @@ struct DemoPlanItem {
     genres: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tags: Vec<String>,
+    /// File modification time (UNIX seconds), for date sorting in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at: Option<u64>,
     collection_path: String,
     size_bytes: u64,
     folder_segment: String,
@@ -1804,6 +1813,7 @@ impl DemoPlanItem {
                 .map(|value| value.genres.clone())
                 .unwrap_or_default(),
             tags: sidecar.map(|value| value.tags.clone()).unwrap_or_default(),
+            modified_at: None,
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
@@ -1816,7 +1826,7 @@ impl DemoPlanItem {
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
             audiobook_parts: None,
             is_audiobook_part: false,
-            author: None,
+            author: sidecar.and_then(|value| value.author.clone()),
         }
     }
 }
@@ -3577,6 +3587,7 @@ fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
             "anilist_url" => sidecar.anilist_url = Some(unquote_yaml(value)),
             "status" => sidecar.status = parse_media_status(unquote_yaml(value).as_str()),
             "description" => sidecar.description = Some(unquote_yaml(value)),
+            "author" => sidecar.author = Some(unquote_yaml(value)),
             "rating_external" => sidecar.rating_external = value.parse::<f32>().ok(),
             _ => {}
         }
@@ -6153,6 +6164,7 @@ fn write_webnovel_sidecar(
     entry.created_at_unix = unix_now();
     entry.updated_at_unix = entry.created_at_unix;
     entry.properties.title = Some(subscription.title.clone());
+    entry.properties.author = subscription.author.clone();
     entry.properties.description = subscription.description.clone();
     entry.properties.series_title = Some(subscription.title.clone());
     entry.properties.genres = subscription.genres.clone();

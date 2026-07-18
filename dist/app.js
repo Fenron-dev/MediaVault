@@ -4827,6 +4827,12 @@ function collectionNodeKind(node) {
   if (!node.path) {
     return "root";
   }
+  if (node.path === "Webnovels") {
+    return "group";
+  }
+  if (node.path.startsWith("Webnovels/")) {
+    return "webnovel";
+  }
   if (node.path.includes("/Staffel ")) {
     return "season";
   }
@@ -4874,6 +4880,8 @@ function nodeTypeLabel(node) {
       return "Film";
     case "audiobook":
       return "Hörbuch";
+    case "webnovel":
+      return "Webnovel";
     case "group":
       return "Ordner";
     default:
@@ -5265,6 +5273,20 @@ function renderCollectionProfile(node) {
 
   const primary = representativeItem(node);
   const nodeKind = collectionNodeKind(node);
+
+  // Novel folders get their own file table inside the profile; the standard
+  // content grid below would duplicate it. The shared inspector is only
+  // useful once a single file is picked (via the table), so hide it here.
+  const isNovelNode = nodeKind === "webnovel";
+  const viewbar = document.getElementById("collection-viewbar");
+  const cardGrid = document.getElementById("collection-cards");
+  if (viewbar) viewbar.hidden = isNovelNode;
+  if (cardGrid) cardGrid.hidden = isNovelNode;
+  if (isNovelNode && inspectorSelection?.type !== "file") {
+    document.body.classList.add("inspector-hidden");
+  } else if (document.body.classList.contains("is-collections")) {
+    document.body.classList.remove("inspector-hidden");
+  }
   if (!primary || ["root", "group", "folder"].includes(nodeKind)) {
     return;
   }
@@ -5302,12 +5324,16 @@ function renderCollectionProfile(node) {
   name.className = "media-title";
   const meta = document.createElement("p");
   const parts = [
+    primary.author,
     primary.format,
     primary.airing_season,
     primary.year,
     typeof primary.episode_count === "number" ? `${primary.episode_count} Folgen` : "",
     typeof primary.runtime_minutes === "number" ? `${primary.runtime_minutes} Min.` : "",
     typeof primary.average_score === "number" ? `${Math.round(primary.average_score)} / 100` : "",
+    typeof primary.rating_external === "number"
+      ? `★ ${primary.rating_external.toFixed(2)} (Goodreads)`
+      : "",
   ].filter(Boolean);
   meta.textContent = parts.join(" · ") || "Noch keine externen Metadaten vorhanden.";
 
@@ -5315,15 +5341,20 @@ function renderCollectionProfile(node) {
   description.className = "collection-profile-description";
   description.textContent =
     primary.description?.replace(/<[^>]*>/g, "") ||
-    (nodeKind === "audiobook"
+    (nodeKind === "webnovel"
+      ? "Noch keine Beschreibung vorhanden — beim nächsten Webnovel-Check werden Metadaten ergänzt."
+      : nodeKind === "audiobook"
       ? "Noch keine Beschreibung vorhanden. Audible-Abgleich in der rechten Seitenleiste starten."
       : "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.");
 
   const tagBar = document.createElement("div");
   tagBar.className = "media-tagbar";
-  (primary.genres || []).slice(0, 8).forEach((genre) => {
-    const tag = document.createElement("span");
+  [...(primary.genres || []), ...(primary.tags || [])].slice(0, 12).forEach((genre) => {
+    const tag = document.createElement("button");
+    tag.type = "button";
+    tag.className = "tag-chip";
     tag.textContent = genre;
+    tag.addEventListener("click", () => setCollectionTagFilter(genre));
     tagBar.appendChild(tag);
   });
 
@@ -5347,6 +5378,45 @@ function renderCollectionProfile(node) {
 
   collectionProfile.appendChild(profile);
 
+  if (nodeKind === "webnovel") {
+    // Novel view: hero + description + read button + sortable file table.
+    // Relations/characters do not exist for novels; keep the page focused.
+    const stack = document.createElement("div");
+    stack.className = "media-section-stack";
+
+    const synopsis = createMediaSection("Beschreibung");
+    const synopsisBody = document.createElement("p");
+    synopsisBody.className = "media-synopsis";
+    synopsisBody.textContent = description.textContent;
+    synopsis.appendChild(synopsisBody);
+    stack.appendChild(synopsis);
+
+    const readRow = document.createElement("div");
+    readRow.className = "toolbar";
+    const readButton = document.createElement("button");
+    readButton.className = "action-button primary";
+    readButton.textContent = "▶ Weiterlesen";
+    readButton.addEventListener("click", () => {
+      const target = webnovelPrimaryFile(node);
+      if (target) {
+        openPlayer({
+          source_path: target.source_path,
+          target_path: target.target_path || target.source_path,
+          title: target.title || node.label,
+        });
+      }
+    });
+    readRow.appendChild(readButton);
+    stack.appendChild(readRow);
+
+    const files = createMediaSection("Dateien", `${node.items.length} Dateien`);
+    files.appendChild(buildWebnovelFileTable(node));
+    stack.appendChild(files);
+
+    collectionProfile.appendChild(stack);
+    return;
+  }
+
   const children = sortedChildren(node);
   if (children.length) {
     const stack = document.createElement("div");
@@ -5359,23 +5429,126 @@ function renderCollectionProfile(node) {
     });
     seasons.appendChild(cards);
     stack.appendChild(seasons);
-    appendCollectionMetadataSections(stack, primary, description.textContent);
+    appendCollectionMetadataSections(stack, primary, description.textContent, nodeKind);
     collectionProfile.appendChild(stack);
   } else {
     const stack = document.createElement("div");
     stack.className = "media-section-stack";
-    appendCollectionMetadataSections(stack, primary, description.textContent);
+    appendCollectionMetadataSections(stack, primary, description.textContent, nodeKind);
     collectionProfile.appendChild(stack);
   }
 }
 
-function appendCollectionMetadataSections(stack, item, synopsisText) {
+// Picks the "main" file of a novel folder: the complete EPUB (no chapter
+// range in the name) wins over batch EPUBs.
+function webnovelPrimaryFile(node) {
+  const epubs = node.items.filter((item) =>
+    String(item.source_path ?? "").toLowerCase().endsWith(".epub"),
+  );
+  return (
+    epubs.find((item) => !/Kapitel \d/.test(item.source_path)) ?? epubs[0] ?? node.items[0] ?? null
+  );
+}
+
+let webnovelFileSortKey = "chapter";
+let webnovelFileSortDir = 1;
+
+function buildWebnovelFileTable(node) {
+  const table = document.createElement("table");
+  table.className = "webnovel-file-table";
+
+  const columns = [
+    ["chapter", "Kapitel"],
+    ["name", "Name"],
+    ["date", "Datum"],
+  ];
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  columns.forEach(([key, label]) => {
+    const th = document.createElement("th");
+    const arrow = webnovelFileSortKey === key ? (webnovelFileSortDir > 0 ? " ▲" : " ▼") : "";
+    th.textContent = label + arrow;
+    th.addEventListener("click", () => {
+      if (webnovelFileSortKey === key) {
+        webnovelFileSortDir = -webnovelFileSortDir;
+      } else {
+        webnovelFileSortKey = key;
+        webnovelFileSortDir = 1;
+      }
+      renderCollections(currentPlan?.items ?? []);
+    });
+    headRow.appendChild(th);
+  });
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const sortValue = (item) => {
+    switch (webnovelFileSortKey) {
+      case "name":
+        return String(item.title || item.source_path || "").toLowerCase();
+      case "date":
+        return item.modified_at ?? 0;
+      default:
+        return item.episode_start ?? -1;
+    }
+  };
+  const rowsData = [...node.items].sort((a, b) => {
+    const va = sortValue(a);
+    const vb = sortValue(b);
+    if (va < vb) return -1 * webnovelFileSortDir;
+    if (va > vb) return 1 * webnovelFileSortDir;
+    return 0;
+  });
+
+  const body = document.createElement("tbody");
+  rowsData.forEach((item) => {
+    const tr = document.createElement("tr");
+    const chapter = document.createElement("td");
+    chapter.textContent =
+      typeof item.episode_start === "number"
+        ? item.episode_end && item.episode_end !== item.episode_start
+          ? `${item.episode_start}–${item.episode_end}`
+          : `${item.episode_start}`
+        : "Gesamt";
+    const name = document.createElement("td");
+    name.textContent =
+      String(item.source_path ?? "").split("/").pop() || item.title || "-";
+    const date = document.createElement("td");
+    date.textContent = item.modified_at
+      ? new Date(item.modified_at * 1000).toLocaleDateString("de-DE")
+      : "-";
+    tr.append(chapter, name, date);
+    tr.addEventListener("click", () => {
+      selectedCollectionItemKey = item.source_path;
+      document.body.classList.remove("inspector-hidden");
+      renderInspector(item);
+    });
+    tr.addEventListener("dblclick", () => {
+      openPlayer({
+        source_path: item.source_path,
+        target_path: item.target_path || item.source_path,
+        title: item.title || node.label,
+      });
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  return table;
+}
+
+function appendCollectionMetadataSections(stack, item, synopsisText, nodeKind = "") {
   const synopsis = createMediaSection("Synopsis");
   const synopsisBody = document.createElement("p");
   synopsisBody.className = "media-synopsis";
   synopsisBody.textContent = synopsisText;
   synopsis.appendChild(synopsisBody);
   stack.appendChild(synopsis);
+
+  // Season view stays lean: cover + synopsis + the episode list below are
+  // enough — relations, characters, and staff belong to the series level.
+  if (nodeKind === "season") {
+    return;
+  }
 
   const details = createMediaSection("Details");
   details.appendChild(createDetailsGrid(item));
