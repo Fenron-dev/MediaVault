@@ -443,7 +443,9 @@
                 <button class="webnovel-chip" data-webnovel-filter="paused">Pausiert</button>
                 <button class="webnovel-chip" data-webnovel-filter="error">Fehler</button>
                 <button class="webnovel-chip" data-webnovel-filter="new">Neue Kapitel</button>
+                <button class="webnovel-chip" data-webnovel-filter="trash">Papierkorb</button>
               </div>
+              <button class="action-button" id="webnovel-multi-toggle">Mehrfachauswahl</button>
               <select class="action-button" id="webnovel-sort" title="Sortierung">
                 <option value="title">Name (A–Z)</option>
                 <option value="last_check">Zuletzt geprüft</option>
@@ -453,6 +455,12 @@
               <button class="action-button" id="webnovel-view-toggle" title="Zwischen Karten- und Listenansicht wechseln">
                 Listenansicht
               </button>
+            </div>
+            <div class="webnovel-bulkbar" id="webnovel-bulkbar" hidden>
+              <span id="webnovel-bulk-count">0 ausgewählt</span>
+              <button class="action-button" id="webnovel-bulk-pause">Pausieren</button>
+              <button class="action-button" id="webnovel-bulk-resume">Fortsetzen</button>
+              <button class="action-button danger" id="webnovel-bulk-delete">In den Papierkorb</button>
             </div>
             <div class="stack webnovel-list" id="webnovel-list"></div>
             <p class="body-copy" id="webnovel-list-empty">Noch keine Abos vorhanden.</p>

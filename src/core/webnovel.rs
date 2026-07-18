@@ -86,6 +86,9 @@ pub struct Subscription {
     pub last_error: Option<String>,
     /// UNIX timestamp of subscription creation.
     pub created_at_unix: u64,
+    /// Set while the subscription sits in the in-app trash (soft delete).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trashed_at_unix: Option<u64>,
 }
 
 /// One chapter as tracked by a subscription.
@@ -131,6 +134,7 @@ impl Subscription {
             last_check_unix: None,
             last_error: None,
             created_at_unix: unix_now(),
+            trashed_at_unix: None,
         }
     }
 
@@ -197,6 +201,77 @@ pub fn save_subscription(system_dir: &Path, subscription: &Subscription) -> Resu
         VaultError::Serialization(format!("subscription JSON serialize error: {e}"))
     })?;
     fs::write(&path, json).map_err(VaultError::from)?;
+    Ok(())
+}
+
+/// Directory holding soft-deleted subscription records.
+pub fn webnovel_trash_dir(system_dir: &Path) -> PathBuf {
+    webnovels_dir(system_dir).join("trash")
+}
+
+fn trashed_file_path(system_dir: &Path, subscription_id: &str) -> PathBuf {
+    webnovel_trash_dir(system_dir).join(format!("{subscription_id}.json"))
+}
+
+/// Moves a subscription record into the in-app trash (reversible).
+///
+/// Returns `Ok(None)` when no active subscription with this id exists.
+pub fn trash_subscription(
+    system_dir: &Path,
+    subscription_id: &str,
+) -> Result<Option<Subscription>> {
+    let Some(mut subscription) = load_subscription(system_dir, subscription_id)? else {
+        return Ok(None);
+    };
+    subscription.trashed_at_unix = Some(unix_now());
+    let trash_dir = webnovel_trash_dir(system_dir);
+    fs::create_dir_all(&trash_dir).map_err(VaultError::from)?;
+    let json = serde_json::to_string_pretty(&subscription)
+        .map_err(|e| VaultError::Serialization(format!("subscription serialize error: {e}")))?;
+    fs::write(trashed_file_path(system_dir, subscription_id), json).map_err(VaultError::from)?;
+    fs::remove_file(subscription_file_path(system_dir, subscription_id))
+        .map_err(VaultError::from)?;
+    Ok(Some(subscription))
+}
+
+/// Restores a trashed subscription back into the active list.
+pub fn restore_subscription(system_dir: &Path, subscription_id: &str) -> Result<Subscription> {
+    let path = trashed_file_path(system_dir, subscription_id);
+    let raw = fs::read_to_string(&path).map_err(VaultError::from)?;
+    let mut subscription: Subscription = serde_json::from_str(&raw)
+        .map_err(|e| VaultError::Serialization(format!("subscription parse error: {e}")))?;
+    subscription.trashed_at_unix = None;
+    save_subscription(system_dir, &subscription)?;
+    fs::remove_file(&path).map_err(VaultError::from)?;
+    Ok(subscription)
+}
+
+/// Lists all trashed subscriptions (newest first).
+pub fn list_trashed_subscriptions(system_dir: &Path) -> Result<Vec<Subscription>> {
+    let dir = webnovel_trash_dir(system_dir);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut trashed: Vec<Subscription> = fs::read_dir(&dir)
+        .map_err(VaultError::from)?
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                return None;
+            }
+            serde_json::from_str(&fs::read_to_string(&path).ok()?).ok()
+        })
+        .collect();
+    trashed.sort_by_key(|subscription| std::cmp::Reverse(subscription.trashed_at_unix));
+    Ok(trashed)
+}
+
+/// Permanently removes a trashed subscription record.
+pub fn purge_trashed_subscription(system_dir: &Path, subscription_id: &str) -> Result<()> {
+    let path = trashed_file_path(system_dir, subscription_id);
+    if path.exists() {
+        fs::remove_file(&path).map_err(VaultError::from)?;
+    }
     Ok(())
 }
 

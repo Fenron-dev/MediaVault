@@ -32,9 +32,10 @@ use crate::core::progress::{
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
 use crate::core::webnovel::{
-    blocked_reason, delete_subscription, list_subscriptions, load_blocklist_entries,
-    load_subscription, normalize_url, save_subscription, save_user_blocklist, unix_now,
-    BlocklistEntry, KnownChapter, Subscription,
+    blocked_reason, list_subscriptions, list_trashed_subscriptions, load_blocklist_entries,
+    load_subscription, normalize_url, purge_trashed_subscription, restore_subscription,
+    save_subscription, save_user_blocklist, trash_subscription, unix_now, BlocklistEntry,
+    KnownChapter, Subscription,
 };
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
@@ -273,6 +274,18 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/webnovel/check" => json_response(
             StatusCode::OK,
             &build_webnovel_check_response(request.body()),
+        ),
+        "/api/webnovel/trash" => json_response(
+            StatusCode::OK,
+            &build_webnovel_trash_response(request.uri().query()),
+        ),
+        "/api/webnovel/restore" => json_response(
+            StatusCode::OK,
+            &build_webnovel_restore_response(request.body()),
+        ),
+        "/api/webnovel/purge" => json_response(
+            StatusCode::OK,
+            &build_webnovel_purge_response(request.body()),
         ),
         "/api/webnovel/blocklist" => json_response(
             StatusCode::OK,
@@ -1669,6 +1682,9 @@ struct DemoPlanItem {
     /// File modification time (UNIX seconds), for date sorting in the UI.
     #[serde(skip_serializing_if = "Option::is_none")]
     modified_at: Option<u64>,
+    /// Lifecycle status from the sidecar (completed, in-library, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
     collection_path: String,
     size_bytes: u64,
     folder_segment: String,
@@ -1814,6 +1830,9 @@ impl DemoPlanItem {
                 .unwrap_or_default(),
             tags: sidecar.map(|value| value.tags.clone()).unwrap_or_default(),
             modified_at: None,
+            status: sidecar
+                .and_then(|value| value.status)
+                .map(|status| status.to_string()),
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
@@ -5468,27 +5487,159 @@ fn build_webnovel_unsubscribe_response(body: &[u8]) -> WebnovelSimpleResponse {
         Err(message) => return WebnovelSimpleResponse::error(message),
     };
 
-    let subscription = match load_subscription(&vault.system_dir(), &req.id) {
+    // Soft delete: the record moves to the in-app trash and can be restored.
+    let subscription = match trash_subscription(&vault.system_dir(), &req.id) {
         Ok(Some(subscription)) => subscription,
         Ok(None) => return WebnovelSimpleResponse::error("Abo nicht gefunden."),
         Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
     };
 
     if !req.keep_files {
+        // Files move into the vault .trash folder (same convention as
+        // delete-files) instead of being removed — reversible via restore.
         let novel_dir = webnovel_folder(&vault, &subscription.title);
         if novel_dir.exists() {
-            if let Err(error) = fs::remove_dir_all(&novel_dir) {
+            let trash_target = vault
+                .root()
+                .join(".trash")
+                .join(MediaType::Webnovel.folder_segment())
+                .join(sanitize_path_segment(&subscription.title));
+            if let Some(parent) = trash_target.parent() {
+                fs::create_dir_all(parent).ok();
+            }
+            if trash_target.exists() {
+                fs::remove_dir_all(&trash_target).ok();
+            }
+            if let Err(error) = fs::rename(&novel_dir, &trash_target) {
                 return WebnovelSimpleResponse::error(format!(
-                    "Dateien konnten nicht gelöscht werden: {error}"
+                    "Dateien konnten nicht in den Papierkorb verschoben werden: {error}"
                 ));
             }
         }
     }
 
-    match delete_subscription(&vault.system_dir(), &req.id) {
-        Ok(()) => WebnovelSimpleResponse::ok(),
-        Err(error) => WebnovelSimpleResponse::error(error.to_string()),
+    WebnovelSimpleResponse::ok()
+}
+
+/// Vault-trash location of a novel's files.
+fn webnovel_trash_folder(vault: &Vault, title: &str) -> PathBuf {
+    vault
+        .root()
+        .join(".trash")
+        .join(MediaType::Webnovel.folder_segment())
+        .join(sanitize_path_segment(title))
+}
+
+#[derive(Serialize)]
+struct WebnovelTrashEntry {
+    id: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trashed_at_unix: Option<u64>,
+    /// True when the novel's files also sit in the vault trash.
+    files_in_trash: bool,
+}
+
+#[derive(Serialize)]
+struct WebnovelTrashResponse {
+    entries: Vec<WebnovelTrashEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_webnovel_trash_response(query: Option<&str>) -> WebnovelTrashResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault = match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => {
+            return WebnovelTrashResponse {
+                entries: Vec::new(),
+                error: Some(message),
+            }
+        }
+    };
+    match list_trashed_subscriptions(&vault.system_dir()) {
+        Ok(trashed) => WebnovelTrashResponse {
+            entries: trashed
+                .iter()
+                .map(|subscription| WebnovelTrashEntry {
+                    id: subscription.id.clone(),
+                    title: subscription.title.clone(),
+                    trashed_at_unix: subscription.trashed_at_unix,
+                    files_in_trash: webnovel_trash_folder(&vault, &subscription.title).exists(),
+                })
+                .collect(),
+            error: None,
+        },
+        Err(error) => WebnovelTrashResponse {
+            entries: Vec::new(),
+            error: Some(error.to_string()),
+        },
     }
+}
+
+#[derive(Deserialize)]
+struct WebnovelTrashActionRequest {
+    id: String,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+fn build_webnovel_restore_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelTrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+    let subscription = match restore_subscription(&vault.system_dir(), &req.id) {
+        Ok(subscription) => subscription,
+        Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
+    };
+    // Bring trashed files back, if any.
+    let trash_source = webnovel_trash_folder(&vault, &subscription.title);
+    if trash_source.exists() {
+        let target = webnovel_folder(&vault, &subscription.title);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        if !target.exists() {
+            fs::rename(&trash_source, &target).ok();
+        }
+    }
+    WebnovelSimpleResponse::ok()
+}
+
+fn build_webnovel_purge_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelTrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+    // Need the title before purging the record to find the trashed folder.
+    let title = list_trashed_subscriptions(&vault.system_dir())
+        .ok()
+        .and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|subscription| subscription.id == req.id)
+                .map(|subscription| subscription.title)
+        });
+    if let Err(error) = purge_trashed_subscription(&vault.system_dir(), &req.id) {
+        return WebnovelSimpleResponse::error(error.to_string());
+    }
+    if let Some(title) = title {
+        let folder = webnovel_trash_folder(&vault, &title);
+        if folder.exists() {
+            fs::remove_dir_all(&folder).ok();
+        }
+    }
+    WebnovelSimpleResponse::ok()
 }
 
 #[derive(Deserialize)]

@@ -5361,6 +5361,20 @@ function renderCollectionProfile(node) {
   heading.appendChild(label);
   heading.appendChild(name);
   heading.appendChild(meta);
+  if (primary.status) {
+    const statusChip = document.createElement("button");
+    statusChip.type = "button";
+    const isCompleted = primary.status === "completed";
+    statusChip.className = `tag-chip status-chip ${isCompleted ? "is-completed" : "is-ongoing"}`;
+    statusChip.textContent = isCompleted ? "abgeschlossen" : "laufend";
+    statusChip.addEventListener("click", () =>
+      setCollectionTagFilter(`status:${primary.status}`),
+    );
+    const statusRow = document.createElement("div");
+    statusRow.className = "media-tagbar";
+    statusRow.appendChild(statusChip);
+    heading.appendChild(statusRow);
+  }
   if (tagBar.childNodes.length) {
     heading.appendChild(tagBar);
   }
@@ -5461,11 +5475,16 @@ function buildWebnovelFileTable(node) {
     ["chapter", "Kapitel"],
     ["name", "Name"],
     ["date", "Datum"],
+    ["", ""],
   ];
   const head = document.createElement("thead");
   const headRow = document.createElement("tr");
   columns.forEach(([key, label]) => {
     const th = document.createElement("th");
+    if (!key) {
+      headRow.appendChild(th);
+      return;
+    }
     const arrow = webnovelFileSortKey === key ? (webnovelFileSortDir > 0 ? " ▲" : " ▼") : "";
     th.textContent = label + arrow;
     th.addEventListener("click", () => {
@@ -5517,7 +5536,37 @@ function buildWebnovelFileTable(node) {
     date.textContent = item.modified_at
       ? new Date(item.modified_at * 1000).toLocaleDateString("de-DE")
       : "-";
-    tr.append(chapter, name, date);
+    const actions = document.createElement("td");
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "action-button icon-button danger";
+    removeBtn.title = "In den Papierkorb verschieben";
+    removeBtn.textContent = "🗑";
+    removeBtn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const fileName = String(item.source_path ?? "").split("/").pop();
+      if (!window.confirm(`„${fileName}“ in den Papierkorb verschieben?`)) {
+        return;
+      }
+      try {
+        await fetch("mediavault://localhost/api/delete-files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vault_root: getVaultRoot(),
+            paths: [item.source_path],
+            permanent: false,
+          }),
+        });
+        if (statusStrip) {
+          statusStrip.textContent = `„${fileName}“ in den Papierkorb verschoben.`;
+        }
+        loadPlan();
+      } catch (error) {
+        if (statusStrip) statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+      }
+    });
+    actions.appendChild(removeBtn);
+    tr.append(chapter, name, date, actions);
     tr.addEventListener("click", () => {
       selectedCollectionItemKey = item.source_path;
       document.body.classList.remove("inspector-hidden");
@@ -5776,6 +5825,27 @@ function toggleBulkItem(item) {
   renderBulkInspector();
 }
 
+// (De)selects every file of a collection node at once (multi mode on
+// title/series cards).
+function toggleBulkNode(node) {
+  const paths = (node.items ?? [])
+    .map((entry) => entry.source_path)
+    .filter(Boolean);
+  if (!paths.length) {
+    return;
+  }
+  const allSelected = paths.every((path) => multiSelectedKeys.has(path));
+  paths.forEach((path) => {
+    if (allSelected) {
+      multiSelectedKeys.delete(path);
+    } else {
+      multiSelectedKeys.add(path);
+    }
+  });
+  renderCollections(currentPlan?.items ?? []);
+  renderBulkInspector();
+}
+
 function installLongPressSelection(element, item) {
   let timer = null;
   const clearTimer = () => {
@@ -5812,6 +5882,13 @@ function createPosterCard(value, ordinal = null) {
     button.classList.toggle("is-bulk-selected", multiSelectedKeys.has(item.source_path));
     installLongPressSelection(button, item);
   }
+  if (isNode) {
+    const nodeItems = node.items ?? [];
+    button.classList.toggle(
+      "is-bulk-selected",
+      nodeItems.length > 0 && nodeItems.every((entry) => multiSelectedKeys.has(entry.source_path)),
+    );
+  }
   button.addEventListener("click", () => {
     if (button.dataset.longPressFired === "true") {
       button.dataset.longPressFired = "";
@@ -5819,6 +5896,12 @@ function createPosterCard(value, ordinal = null) {
     }
     if (!isNode && isMultiEdit) {
       toggleBulkItem(item);
+      return;
+    }
+    if (isNode && isMultiEdit) {
+      // Multi mode on a title card: (de)select ALL files of that title
+      // instead of navigating into it.
+      toggleBulkNode(node);
       return;
     }
     if (isNode) {
@@ -6070,6 +6153,9 @@ function syncCollectionViewMode(node = null) {
 let activeTagFilter = "";
 
 function itemMatchesTagFilter(item, tag) {
+  if (tag.startsWith("status:")) {
+    return String(item.status ?? "").toLowerCase() === tag.slice(7);
+  }
   const haystack = [...(item.genres ?? []), ...(item.tags ?? [])].map((entry) =>
     String(entry).toLowerCase(),
   );
@@ -7348,6 +7434,9 @@ const WEBNOVEL_DEFAULT_DELAY_S = 1.5;
 let webnovelCheckRunning = false;
 let webnovelActiveFilter = "all";
 let webnovelSubscriptionsCache = [];
+let webnovelMultiMode = false;
+const webnovelSelectedIds = new Set();
+let webnovelTrashCache = [];
 let webnovelIntervalTimer = null;
 let webnovelStartCheckDone = false;
 let webnovelInitialized = false;
@@ -7454,10 +7543,80 @@ async function refreshWebnovelList() {
       return;
     }
     webnovelSubscriptionsCache = payload.subscriptions ?? [];
-    renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+    if (webnovelActiveFilter === "trash") {
+      await renderWebnovelTrash();
+    } else {
+      renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+    }
   } catch (error) {
     setWebnovelFeedback(`Abos konnten nicht geladen werden: ${error.message}`, true);
   }
+}
+
+async function renderWebnovelTrash() {
+  if (!webnovelList) return;
+  try {
+    const payload = await webnovelApi(`/api/webnovel/trash?_=${Date.now()}${webnovelRootQuery()}`);
+    webnovelTrashCache = payload.entries ?? [];
+  } catch (error) {
+    setWebnovelFeedback(`Papierkorb nicht ladbar: ${error.message}`, true);
+    return;
+  }
+  clearNode(webnovelList);
+  if (webnovelListEmpty) {
+    webnovelListEmpty.hidden = webnovelTrashCache.length > 0;
+    webnovelListEmpty.textContent = "Der Papierkorb ist leer.";
+  }
+  webnovelTrashCache.forEach((entry) => {
+    const card = document.createElement("article");
+    card.className = "webnovel-card";
+    const body = document.createElement("div");
+    body.className = "webnovel-card-body";
+    const title = document.createElement("span");
+    title.className = "webnovel-card-title";
+    title.textContent = entry.title;
+    body.appendChild(title);
+    const meta = document.createElement("p");
+    meta.className = "webnovel-card-meta";
+    meta.textContent =
+      `gelöscht: ${formatWebnovelTimestamp(entry.trashed_at_unix)}` +
+      (entry.files_in_trash ? " · Dateien im Papierkorb" : " · nur Abo");
+    body.appendChild(meta);
+    const actions = document.createElement("div");
+    actions.className = "webnovel-card-actions";
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "action-button primary";
+    restoreBtn.textContent = "Wiederherstellen";
+    restoreBtn.addEventListener("click", async () => {
+      await webnovelTrashAction("/api/webnovel/restore", entry, "wiederhergestellt");
+    });
+    const purgeBtn = document.createElement("button");
+    purgeBtn.className = "action-button danger";
+    purgeBtn.textContent = "Endgültig löschen";
+    purgeBtn.addEventListener("click", async () => {
+      if (!window.confirm(`„${entry.title}“ ENDGÜLTIG löschen? Das kann nicht widerrufen werden.`)) {
+        return;
+      }
+      await webnovelTrashAction("/api/webnovel/purge", entry, "endgültig gelöscht");
+    });
+    actions.append(restoreBtn, purgeBtn);
+    body.appendChild(actions);
+    card.appendChild(body);
+    webnovelList.appendChild(card);
+  });
+}
+
+async function webnovelTrashAction(path, entry, doneLabel) {
+  try {
+    const payload = await webnovelApi(path, {
+      method: "POST",
+      body: JSON.stringify({ id: entry.id, root: getVaultRoot() || undefined }),
+    });
+    setWebnovelFeedback(payload.error ?? `„${entry.title}“ ${doneLabel}.`, Boolean(payload.error));
+  } catch (error) {
+    setWebnovelFeedback(`Aktion fehlgeschlagen: ${error.message}`, true);
+  }
+  await refreshWebnovelList();
 }
 
 function formatWebnovelTimestamp(unixSeconds) {
@@ -7527,7 +7686,14 @@ function setWebnovelFilter(filter) {
       chip.classList.toggle("is-active", chip.dataset.webnovelFilter === filter);
     });
   }
-  renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+  if (filter === "trash") {
+    renderWebnovelTrash();
+  } else {
+    if (webnovelListEmpty) {
+      webnovelListEmpty.textContent = "Noch keine Abos vorhanden.";
+    }
+    renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+  }
 }
 
 function applyWebnovelViewMode() {
@@ -7630,7 +7796,20 @@ function renderWebnovelList(subscriptions) {
 
     // Cards stay slim; details and all actions live in the detail overlay.
     card.classList.add("is-clickable");
-    card.addEventListener("click", () => openWebnovelDetail(subscription));
+    card.classList.toggle("is-bulk-selected", webnovelSelectedIds.has(subscription.id));
+    card.addEventListener("click", () => {
+      if (webnovelMultiMode) {
+        if (webnovelSelectedIds.has(subscription.id)) {
+          webnovelSelectedIds.delete(subscription.id);
+        } else {
+          webnovelSelectedIds.add(subscription.id);
+        }
+        renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+        updateWebnovelBulkbar();
+        return;
+      }
+      openWebnovelDetail(subscription);
+    });
     webnovelList.appendChild(card);
   });
 }
@@ -7687,27 +7866,29 @@ async function updateWebnovelSubscription(id, patch) {
 }
 
 async function unsubscribeWebnovel(subscription) {
-  const removeFiles = window.confirm(
-    `„${subscription.title}“ abbestellen.\n\nOK = Abo UND heruntergeladene Dateien löschen.\n` +
-      "Abbrechen wählen und erneut versuchen, falls unsicher.\n\n" +
-      "Zum Behalten der Dateien unten „Abbrechen“ wählen und stattdessen pausieren.",
-  );
-  if (!removeFiles) {
+  if (!window.confirm(`„${subscription.title}“ in den Papierkorb verschieben? (widerrufbar)`)) {
     return;
   }
+  const removeFiles = window.confirm(
+    "Auch die heruntergeladenen Dateien in den Papierkorb verschieben?\n\n" +
+      "OK = Abo UND Dateien in den Papierkorb\n" +
+      "Abbrechen = nur das Abo, Dateien bleiben im Vault",
+  );
   try {
     const payload = await webnovelApi("/api/webnovel/unsubscribe", {
       method: "POST",
       body: JSON.stringify({
         id: subscription.id,
-        keep_files: false,
+        keep_files: !removeFiles,
         root: getVaultRoot() || undefined,
       }),
     });
     if (payload.error) {
       setWebnovelFeedback(payload.error, true);
     } else {
-      setWebnovelFeedback(`„${subscription.title}“ wurde entfernt.`);
+      setWebnovelFeedback(
+        `„${subscription.title}“ liegt im Papierkorb (Filter „Papierkorb“ zum Wiederherstellen).`,
+      );
     }
     await refreshWebnovelList();
   } catch (error) {
@@ -8253,3 +8434,79 @@ document.getElementById("webnovel-blocklist-add-btn")?.addEventListener("click",
 });
 
 // Loaded from initWebnovels() once the vault is open.
+
+// ---------------------------------------------------------------------------
+// Webnovels: multi-select bulk actions
+// ---------------------------------------------------------------------------
+
+function updateWebnovelBulkbar() {
+  const bulkbar = document.getElementById("webnovel-bulkbar");
+  const count = document.getElementById("webnovel-bulk-count");
+  if (bulkbar) {
+    bulkbar.hidden = !webnovelMultiMode;
+  }
+  if (count) {
+    count.textContent = `${webnovelSelectedIds.size} ausgewählt`;
+  }
+  const toggle = document.getElementById("webnovel-multi-toggle");
+  if (toggle) {
+    toggle.classList.toggle("is-active", webnovelMultiMode);
+    toggle.textContent = webnovelMultiMode ? "Auswahl beenden" : "Mehrfachauswahl";
+  }
+}
+
+document.getElementById("webnovel-multi-toggle")?.addEventListener("click", () => {
+  webnovelMultiMode = !webnovelMultiMode;
+  if (!webnovelMultiMode) {
+    webnovelSelectedIds.clear();
+  }
+  updateWebnovelBulkbar();
+  renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+});
+
+async function webnovelBulkUpdate(patch, doneLabel) {
+  const ids = [...webnovelSelectedIds];
+  for (const id of ids) {
+    await updateWebnovelSubscription(id, patch);
+  }
+  setWebnovelFeedback(`${ids.length} Abos ${doneLabel}.`);
+}
+
+document.getElementById("webnovel-bulk-pause")?.addEventListener("click", () => {
+  if (webnovelSelectedIds.size) webnovelBulkUpdate({ enabled: false }, "pausiert");
+});
+
+document.getElementById("webnovel-bulk-resume")?.addEventListener("click", () => {
+  if (webnovelSelectedIds.size) webnovelBulkUpdate({ enabled: true }, "fortgesetzt");
+});
+
+document.getElementById("webnovel-bulk-delete")?.addEventListener("click", async () => {
+  const ids = [...webnovelSelectedIds];
+  if (!ids.length) return;
+  if (!window.confirm(`${ids.length} Abos in den Papierkorb verschieben? (widerrufbar)`)) {
+    return;
+  }
+  const removeFiles = window.confirm(
+    "Auch die heruntergeladenen Dateien in den Papierkorb verschieben?\n\n" +
+      "OK = Abos UND Dateien\nAbbrechen = nur die Abos",
+  );
+  for (const id of ids) {
+    try {
+      await webnovelApi("/api/webnovel/unsubscribe", {
+        method: "POST",
+        body: JSON.stringify({
+          id,
+          keep_files: !removeFiles,
+          root: getVaultRoot() || undefined,
+        }),
+      });
+    } catch {
+      // Continue with the remaining ids; errors surface via the final refresh.
+    }
+  }
+  webnovelSelectedIds.clear();
+  webnovelMultiMode = false;
+  updateWebnovelBulkbar();
+  setWebnovelFeedback(`${ids.length} Abos in den Papierkorb verschoben.`);
+  await refreshWebnovelList();
+});
