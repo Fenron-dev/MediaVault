@@ -103,14 +103,30 @@ fn parse_novel_info(page_url: &str, body: &str) -> Result<NovelInfo> {
         )));
     }
 
+    // RoyalRoad exposes fiction tags ("Fantasy", "Time Loop", …) on the page.
+    let tags = collect_texts(&html, "a.fiction-tag");
+
     Ok(NovelInfo {
         title,
         author,
         cover_url,
         description,
         completed_hint,
+        genres: Vec::new(),
+        tags,
         chapters,
     })
+}
+
+/// All matching elements' trimmed text contents.
+fn collect_texts(html: &Html, raw_selector: &str) -> Vec<String> {
+    let Ok(selector) = Selector::parse(raw_selector) else {
+        return Vec::new();
+    };
+    html.select(&selector)
+        .map(|element| element_text(&element))
+        .filter(|text| !text.is_empty())
+        .collect()
 }
 
 /// First matching element's trimmed text content.

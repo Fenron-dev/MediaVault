@@ -51,6 +51,18 @@ pub struct Subscription {
     /// Synopsis/description, if available.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Genre names from the source site or AniList.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub genres: Vec<String>,
+    /// Free-form tags from the source site or AniList.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// AniList media id, when a NOVEL-format match was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anilist_id: Option<u32>,
+    /// AniList detail URL for the matched light novel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anilist_url: Option<String>,
     /// Marked as finished — suppresses batch EPUBs and periodic checks.
     #[serde(default)]
     pub completed: bool,
@@ -101,6 +113,10 @@ impl Subscription {
             author: None,
             cover_url: None,
             description: None,
+            genres: Vec::new(),
+            tags: Vec::new(),
+            anilist_id: None,
+            anilist_url: None,
             completed: false,
             enabled: true,
             known_chapters: Vec::new(),

@@ -465,6 +465,19 @@
             <section class="panel">
               <p class="panel-label">Abonnierte Novels</p>
               <h3>Abos &amp; Status</h3>
+              <div class="webnovel-toolbar">
+                <div class="webnovel-filters" id="webnovel-filters">
+                  <button class="webnovel-chip is-active" data-webnovel-filter="all">Alle</button>
+                  <button class="webnovel-chip" data-webnovel-filter="ongoing">Laufend</button>
+                  <button class="webnovel-chip" data-webnovel-filter="completed">Abgeschlossen</button>
+                  <button class="webnovel-chip" data-webnovel-filter="paused">Pausiert</button>
+                  <button class="webnovel-chip" data-webnovel-filter="error">Fehler</button>
+                  <button class="webnovel-chip" data-webnovel-filter="new">Neue Kapitel</button>
+                </div>
+                <button class="action-button" id="webnovel-view-toggle" title="Zwischen Karten- und Listenansicht wechseln">
+                  Listenansicht
+                </button>
+              </div>
               <div class="stack webnovel-list" id="webnovel-list"></div>
               <p class="body-copy" id="webnovel-list-empty">Noch keine Abos vorhanden.</p>
             </section>
@@ -587,6 +600,16 @@
                 <label class="field">
                   <span>Intervall (Minuten, mind. 15)</span>
                   <input id="webnovel-interval-input" type="number" min="15" step="15" />
+                </label>
+                <label class="field">
+                  <span>Download-Pause zwischen Kapiteln (Sekunden, 0,5–5)</span>
+                  <input
+                    id="webnovel-delay-input"
+                    type="number"
+                    min="0.5"
+                    max="5"
+                    step="0.5"
+                  />
                 </label>
                 <label class="check-field">
                   <input type="checkbox" id="webnovel-build-complete" />

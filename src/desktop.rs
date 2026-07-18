@@ -5272,6 +5272,8 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
     subscription.author = info.author.clone();
     subscription.cover_url = info.cover_url.clone();
     subscription.description = info.description.clone();
+    subscription.genres = info.genres.clone();
+    subscription.tags = info.tags.clone();
     subscription.completed = info.completed_hint.unwrap_or(false);
     subscription.known_chapters = info
         .chapters
@@ -5418,6 +5420,9 @@ struct WebnovelCheckRequest {
     build_complete: bool,
     #[serde(default = "webnovel_default_true")]
     build_batch: bool,
+    /// Per-host request delay in milliseconds (clamped to 500–5000).
+    #[serde(default)]
+    delay_ms: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -5433,6 +5438,7 @@ struct WebnovelCheckOptions {
     only_id: Option<String>,
     build_complete: bool,
     build_batch: bool,
+    delay_ms: Option<u64>,
 }
 
 fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
@@ -5480,6 +5486,7 @@ fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
         only_id: req.id,
         build_complete: req.build_complete,
         build_batch: req.build_batch,
+        delay_ms: req.delay_ms,
     };
     let thread_job_id = job_id.clone();
     std::thread::spawn(move || {
@@ -5572,7 +5579,10 @@ fn run_webnovel_check(
         return Ok("Keine passenden Abonnements.".to_string());
     }
 
-    let client = PoliteClient::new()?;
+    let client = match options.delay_ms {
+        Some(delay_ms) => PoliteClient::with_delay_ms(delay_ms)?,
+        None => PoliteClient::new()?,
+    };
     let mut new_chapters = 0usize;
     let mut failures = 0usize;
 
@@ -5625,9 +5635,19 @@ fn check_one_subscription(
     if subscription.cover_url.is_none() {
         subscription.cover_url = info.cover_url.clone();
     }
+    if subscription.genres.is_empty() {
+        subscription.genres = info.genres.clone();
+    }
+    if subscription.tags.is_empty() {
+        subscription.tags = info.tags.clone();
+    }
     if info.completed_hint == Some(true) {
         subscription.completed = true;
     }
+
+    // For translated light novels, AniList (format NOVEL) fills whatever the
+    // source site did not provide. One lookup, only while gaps remain.
+    enrich_from_anilist(subscription);
 
     // Diff the ToC against known chapters by normalized URL. Known chapters
     // that vanished upstream are kept — local content is never discarded.
@@ -5660,7 +5680,7 @@ fn check_one_subscription(
     fs::create_dir_all(&cache_dir).map_err(VaultError::from)?;
 
     // Fetch the cover once; failures are non-fatal (text matters more).
-    ensure_novel_cover(client, subscription, &novel_dir);
+    let cover_added = ensure_novel_cover(client, subscription, &novel_dir);
 
     let pending: Vec<usize> = subscription
         .known_chapters
@@ -5720,13 +5740,17 @@ fn check_one_subscription(
     }
 
     // Build EPUBs from whatever is cached — also after a partial run.
-    if !downloaded_indices.is_empty() {
-        if options.build_batch && !subscription.completed {
-            build_batch_epub(vault, subscription, &downloaded_indices)?;
-        }
-        if options.build_complete {
-            build_complete_epub(vault, subscription)?;
-        }
+    if !downloaded_indices.is_empty() && options.build_batch && !subscription.completed {
+        build_batch_epub(vault, subscription, &downloaded_indices)?;
+    }
+    // The complete EPUB is also rebuilt when it is missing entirely or when a
+    // cover arrived after the last build (covers embed into the EPUB itself).
+    let safe_title = sanitize_path_segment(&subscription.title);
+    let complete_missing = !novel_dir.join(format!("{safe_title}.epub")).exists();
+    if options.build_complete
+        && (!downloaded_indices.is_empty() || cover_added || complete_missing)
+    {
+        build_complete_epub(vault, subscription)?;
     }
 
     if let Some(error) = fetch_error {
@@ -5742,26 +5766,60 @@ const WEBNOVEL_COVER_NAMES: [&str; 3] = ["cover.jpg", "cover.png", "cover.webp"]
 ///
 /// Non-fatal by design: a missing cover must never block chapter downloads,
 /// so all failures are swallowed after basic validation.
-fn ensure_novel_cover(client: &PoliteClient, subscription: &Subscription, novel_dir: &Path) {
+/// Returns `true` when a cover file was newly written.
+fn ensure_novel_cover(
+    client: &PoliteClient,
+    subscription: &Subscription,
+    novel_dir: &Path,
+) -> bool {
     let Some(cover_url) = subscription.cover_url.as_deref() else {
-        return;
+        return false;
     };
     if load_novel_cover_path(novel_dir).is_some() {
-        return;
+        return false;
     }
     let Ok(bytes) = client.get_bytes(cover_url) else {
-        return;
+        return false;
     };
     // Reject anything that is not actually an image (e.g. an error page).
     let Some(media_type) = detect_image_media_type(&bytes) else {
-        return;
+        return false;
     };
     let file_name = match media_type {
         "image/png" => "cover.png",
         "image/webp" => "cover.webp",
         _ => "cover.jpg",
     };
-    fs::write(novel_dir.join(file_name), bytes).ok();
+    fs::write(novel_dir.join(file_name), bytes).is_ok()
+}
+
+/// Fills metadata gaps (description, genres, tags, cover, AniList link) from
+/// an AniList light-novel lookup. Best effort — errors are ignored.
+fn enrich_from_anilist(subscription: &mut Subscription) {
+    let has_gaps = subscription.description.is_none()
+        || subscription.genres.is_empty()
+        || subscription.cover_url.is_none();
+    if subscription.anilist_id.is_some() || !has_gaps {
+        return;
+    }
+    let anilist = AniListClient::default();
+    let Ok(Some(novel)) = anilist.search_novel(&subscription.title) else {
+        return;
+    };
+    subscription.anilist_id = Some(novel.anilist_id);
+    subscription.anilist_url = novel.anilist_url.clone();
+    if subscription.description.is_none() {
+        subscription.description = novel.description.clone();
+    }
+    if subscription.genres.is_empty() {
+        subscription.genres = novel.genres.clone();
+    }
+    if subscription.tags.is_empty() {
+        subscription.tags = novel.tags.clone();
+    }
+    if subscription.cover_url.is_none() {
+        subscription.cover_url = novel.cover_url.clone();
+    }
 }
 
 /// Returns the existing cover file path inside a novel folder, if any.
@@ -5914,6 +5972,12 @@ fn write_webnovel_sidecar(
     entry.properties.title = Some(subscription.title.clone());
     entry.properties.description = subscription.description.clone();
     entry.properties.series_title = Some(subscription.title.clone());
+    entry.properties.genres = subscription.genres.clone();
+    entry.properties.tags = subscription.tags.clone();
+    entry.properties.anilist_id = subscription.anilist_id;
+    entry.properties.anilist_url = subscription.anilist_url.clone();
+    // Keep the subscription URL discoverable from the sidecar.
+    entry.properties.notes = Some(format!("Quelle: {}", subscription.url));
     entry.properties.status = Some(if subscription.completed {
         MediaStatus::Completed
     } else {

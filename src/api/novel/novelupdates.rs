@@ -123,8 +123,23 @@ fn parse_series_page(page_url: &str, body: &str) -> Result<NovelInfo> {
         cover_url,
         description,
         completed_hint,
+        genres: collect_texts(&html, "#seriesgenre a"),
+        tags: collect_texts(&html, "#showtags a"),
         chapters,
     })
+}
+
+fn collect_texts(html: &Html, raw_selector: &str) -> Vec<String> {
+    let Ok(selector) = Selector::parse(raw_selector) else {
+        return Vec::new();
+    };
+    html.select(&selector)
+        .map(|element| {
+            let text = element.text().collect::<Vec<_>>().join(" ");
+            text.split_whitespace().collect::<Vec<_>>().join(" ")
+        })
+        .filter(|text| !text.is_empty())
+        .collect()
 }
 
 fn first_text(html: &Html, raw_selector: &str) -> Option<String> {

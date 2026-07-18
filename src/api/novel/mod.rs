@@ -17,6 +17,7 @@
 //! - `reqwest::blocking` – synchronous HTTP inside URI-scheme handler threads
 
 pub mod generic;
+pub mod novelfull;
 pub mod novelupdates;
 pub mod royalroad;
 pub mod wordpress;
@@ -46,6 +47,10 @@ pub struct NovelInfo {
     pub description: Option<String>,
     /// `Some(true)` when the source marks the novel as finished.
     pub completed_hint: Option<bool>,
+    /// Genre names as listed by the source (may be empty).
+    pub genres: Vec<String>,
+    /// Free-form tags as listed by the source (may be empty).
+    pub tags: Vec<String>,
     /// All chapters in reading order (oldest first).
     pub chapters: Vec<ChapterRef>,
 }
@@ -89,6 +94,8 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
         Box::new(royalroad::RoyalRoadSource)
     } else if host.ends_with("divinedaolibrary.com") {
         Box::new(wordpress::WordPressSource)
+    } else if host.ends_with("novelfull.com") || host.ends_with("novelfull.net") {
+        Box::new(novelfull::NovelFullSource)
     } else if host.ends_with("novelupdates.com") {
         Box::new(novelupdates::NovelUpdatesSource)
     } else {
@@ -102,8 +109,12 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
 
 /// Identifies the app to site operators; deliberately descriptive.
 const USER_AGENT: &str = "MediaVault/0.1 (personal library tool)";
-/// Minimum spacing between two requests to the same host.
+/// Default minimum spacing between two requests to the same host.
 const MIN_REQUEST_DELAY_MS: u64 = 1_500;
+/// Lower bound for the configurable delay — anything faster risks IP bans.
+const MIN_ALLOWED_DELAY_MS: u64 = 500;
+/// Upper bound for the configurable delay.
+const MAX_ALLOWED_DELAY_MS: u64 = 5_000;
 /// Per-request timeout.
 const REQUEST_TIMEOUT_SECS: u64 = 30;
 /// Retry attempts on transient failures (429/5xx/network).
@@ -117,7 +128,9 @@ const RETRY_BACKOFF_SECS: [u64; 3] = [2, 5, 12];
 /// are enforced in one place.  Requests are strictly sequential per client.
 pub struct PoliteClient {
     client: reqwest::blocking::Client,
-    /// Last request instant per host, for enforcing `MIN_REQUEST_DELAY_MS`.
+    /// Minimum spacing between two requests to the same host.
+    min_delay: Duration,
+    /// Last request instant per host, for enforcing `min_delay`.
     last_request: Mutex<HashMap<String, Instant>>,
 }
 
@@ -127,6 +140,17 @@ impl PoliteClient {
     /// # Errors
     /// - `VaultError::ExternalApi` if the TLS backend fails to initialize
     pub fn new() -> Result<Self> {
+        Self::with_delay_ms(MIN_REQUEST_DELAY_MS)
+    }
+
+    /// Builds the client with a custom per-host delay.
+    ///
+    /// The delay is clamped to `[500, 5000]` ms — faster would risk IP bans
+    /// on the source sites, slower is pointless.
+    ///
+    /// # Errors
+    /// - `VaultError::ExternalApi` if the TLS backend fails to initialize
+    pub fn with_delay_ms(delay_ms: u64) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
@@ -134,6 +158,9 @@ impl PoliteClient {
             .map_err(|e| VaultError::ExternalApi(format!("HTTP client init failed: {e}")))?;
         Ok(Self {
             client,
+            min_delay: Duration::from_millis(
+                delay_ms.clamp(MIN_ALLOWED_DELAY_MS, MAX_ALLOWED_DELAY_MS),
+            ),
             last_request: Mutex::new(HashMap::new()),
         })
     }
@@ -262,7 +289,7 @@ impl PoliteClient {
         let Some(host) = host_of(url) else {
             return;
         };
-        let min_delay = Duration::from_millis(MIN_REQUEST_DELAY_MS);
+        let min_delay = self.min_delay;
         let wait = {
             let Ok(mut map) = self.last_request.lock() else {
                 return; // Poisoned lock: skip the delay rather than aborting.

@@ -240,6 +240,7 @@ const mediaTypeOptions = [
   ["music-album", "Album"],
   ["book", "Buch"],
   ["ebook", "E-Book"],
+  ["webnovel", "Webnovel"],
   ["manga", "Manga"],
   ["comic", "Comic"],
   ["audiobook", "Hörbuch"],
@@ -4520,7 +4521,6 @@ function propertyEntriesFor(value) {
     ["narrator", item.narrator],
     ["publisher", item.publisher],
     ["runtime_minutes", item.runtime_minutes],
-    ["series_title", item.series_title],
     ["series_sequence", item.series_sequence],
   ].filter(([, entryValue]) => {
     if (Array.isArray(entryValue)) {
@@ -7001,13 +7001,22 @@ const webnovelJobText = document.getElementById("webnovel-job-text");
 const webnovelJobBar = document.getElementById("webnovel-job-bar");
 const webnovelList = document.getElementById("webnovel-list");
 const webnovelListEmpty = document.getElementById("webnovel-list-empty");
+const webnovelDelayInput = document.getElementById("webnovel-delay-input");
+const webnovelFilters = document.getElementById("webnovel-filters");
+const webnovelViewToggle = document.getElementById("webnovel-view-toggle");
 const webnovelCheckOnStart = document.getElementById("webnovel-check-on-start");
 const webnovelPeriodicEnabled = document.getElementById("webnovel-periodic-enabled");
 const webnovelIntervalInput = document.getElementById("webnovel-interval-input");
 const webnovelBuildComplete = document.getElementById("webnovel-build-complete");
 const webnovelBuildBatch = document.getElementById("webnovel-build-batch");
 
+const WEBNOVEL_MIN_DELAY_S = 0.5;
+const WEBNOVEL_MAX_DELAY_S = 5;
+const WEBNOVEL_DEFAULT_DELAY_S = 1.5;
+
 let webnovelCheckRunning = false;
+let webnovelActiveFilter = "all";
+let webnovelSubscriptionsCache = [];
 let webnovelIntervalTimer = null;
 let webnovelStartCheckDone = false;
 let webnovelInitialized = false;
@@ -7023,6 +7032,11 @@ function loadWebnovelSettings() {
     ),
     buildCompleteEpub: stored.buildCompleteEpub ?? true,
     buildBatchEpub: stored.buildBatchEpub ?? true,
+    delaySeconds: Math.min(
+      WEBNOVEL_MAX_DELAY_S,
+      Math.max(WEBNOVEL_MIN_DELAY_S, Number(stored.delaySeconds) || WEBNOVEL_DEFAULT_DELAY_S),
+    ),
+    listView: stored.listView ?? false,
   };
 }
 
@@ -7037,6 +7051,7 @@ function syncWebnovelSettingsForm() {
   if (webnovelIntervalInput) webnovelIntervalInput.value = String(settings.intervalMinutes);
   if (webnovelBuildComplete) webnovelBuildComplete.checked = settings.buildCompleteEpub;
   if (webnovelBuildBatch) webnovelBuildBatch.checked = settings.buildBatchEpub;
+  if (webnovelDelayInput) webnovelDelayInput.value = String(settings.delaySeconds);
 }
 
 function readWebnovelSettingsForm() {
@@ -7052,6 +7067,16 @@ function readWebnovelSettingsForm() {
   }
   if (webnovelBuildComplete) settings.buildCompleteEpub = webnovelBuildComplete.checked;
   if (webnovelBuildBatch) settings.buildBatchEpub = webnovelBuildBatch.checked;
+  if (webnovelDelayInput) {
+    settings.delaySeconds = Math.min(
+      WEBNOVEL_MAX_DELAY_S,
+      Math.max(
+        WEBNOVEL_MIN_DELAY_S,
+        Number(webnovelDelayInput.value) || WEBNOVEL_DEFAULT_DELAY_S,
+      ),
+    );
+    webnovelDelayInput.value = String(settings.delaySeconds);
+  }
   saveWebnovelSettings(settings);
   return settings;
 }
@@ -7089,7 +7114,8 @@ async function refreshWebnovelList() {
       setWebnovelFeedback(payload.error, true);
       return;
     }
-    renderWebnovelList(payload.subscriptions ?? []);
+    webnovelSubscriptionsCache = payload.subscriptions ?? [];
+    renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
   } catch (error) {
     setWebnovelFeedback(`Abos konnten nicht geladen werden: ${error.message}`, true);
   }
@@ -7107,11 +7133,60 @@ function formatWebnovelTimestamp(unixSeconds) {
   }
 }
 
+function applyWebnovelFilter(subscriptions) {
+  switch (webnovelActiveFilter) {
+    case "ongoing":
+      return subscriptions.filter((sub) => !sub.completed && sub.enabled);
+    case "completed":
+      return subscriptions.filter((sub) => sub.completed);
+    case "paused":
+      return subscriptions.filter((sub) => !sub.enabled);
+    case "error":
+      return subscriptions.filter((sub) => Boolean(sub.last_error));
+    case "new":
+      return subscriptions.filter(
+        (sub) => (sub.known_chapters ?? 0) - (sub.downloaded_chapters ?? 0) > 0,
+      );
+    default:
+      return subscriptions;
+  }
+}
+
+function setWebnovelFilter(filter) {
+  webnovelActiveFilter = filter;
+  if (webnovelFilters) {
+    webnovelFilters.querySelectorAll("[data-webnovel-filter]").forEach((chip) => {
+      chip.classList.toggle("is-active", chip.dataset.webnovelFilter === filter);
+    });
+  }
+  renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+}
+
+function applyWebnovelViewMode() {
+  const settings = loadWebnovelSettings();
+  if (webnovelList) {
+    webnovelList.classList.toggle("is-list-view", settings.listView);
+  }
+  if (webnovelViewToggle) {
+    webnovelViewToggle.textContent = settings.listView ? "Kartenansicht" : "Listenansicht";
+  }
+}
+
+function toggleWebnovelViewMode() {
+  const settings = loadWebnovelSettings();
+  settings.listView = !settings.listView;
+  saveWebnovelSettings(settings);
+  applyWebnovelViewMode();
+}
+
 function renderWebnovelList(subscriptions) {
   if (!webnovelList) return;
   clearNode(webnovelList);
   if (webnovelListEmpty) {
     webnovelListEmpty.hidden = subscriptions.length > 0;
+    webnovelListEmpty.textContent = webnovelSubscriptionsCache.length
+      ? "Keine Abos für diesen Filter."
+      : "Noch keine Abos vorhanden.";
   }
 
   subscriptions.forEach((subscription) => {
@@ -7317,6 +7392,7 @@ async function triggerWebnovelCheck(reason, id = undefined) {
         root: getVaultRoot() || undefined,
         buildComplete: settings.buildCompleteEpub,
         buildBatch: settings.buildBatchEpub,
+        delayMs: Math.round(settings.delaySeconds * 1000),
       }),
     });
     if (payload.error) {
@@ -7404,6 +7480,14 @@ function initWebnovels() {
   webnovelInitialized = true;
 
   syncWebnovelSettingsForm();
+  applyWebnovelViewMode();
+  webnovelFilters?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-webnovel-filter]");
+    if (chip) {
+      setWebnovelFilter(chip.dataset.webnovelFilter);
+    }
+  });
+  webnovelViewToggle?.addEventListener("click", toggleWebnovelViewMode);
   webnovelSubscribeBtn?.addEventListener("click", subscribeWebnovel);
   webnovelCheckAllBtn?.addEventListener("click", () => triggerWebnovelCheck("manual"));
   webnovelUrlInput?.addEventListener("keydown", (event) => {
@@ -7415,6 +7499,7 @@ function initWebnovels() {
     webnovelCheckOnStart,
     webnovelPeriodicEnabled,
     webnovelIntervalInput,
+    webnovelDelayInput,
     webnovelBuildComplete,
     webnovelBuildBatch,
   ]) {
