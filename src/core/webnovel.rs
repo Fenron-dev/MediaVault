@@ -242,36 +242,91 @@ pub fn list_subscriptions(system_dir: &Path) -> Result<Vec<Subscription>> {
 
 /// Hosts that are never fetched. Built-in entries cover domains that are
 /// parked ad-landers or otherwise known to be unusable/unsafe.
-const BUILTIN_BLOCKED_HOSTS: [&str; 1] = [
-    // Parked domain: every request lands on an advertising page.
+const BUILTIN_BLOCKED_HOSTS: [(&str, &str); 1] = [(
     "novelive.com",
-];
+    "Geparkte Domain — leitet nur auf einen Werbe-Lander um (Stand 07/2026).",
+)];
 
-/// User-curated blocklist file (a plain JSON array of host names).
+/// One blocklist entry — a host plus an optional curator note.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlocklistEntry {
+    /// Blocked host name (subdomains are blocked too).
+    pub host: String,
+    /// Optional note explaining WHY the host is blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Built-in entries ship with the app and cannot be removed.
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// File format: entries are either plain host strings (legacy) or
+/// `{host, note}` objects — both parse.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawBlocklistEntry {
+    Plain(String),
+    WithNote { host: String, note: Option<String> },
+}
+
+/// User-curated blocklist file (a JSON array of hosts or {host, note} objects).
 pub fn blocklist_file_path(system_dir: &Path) -> PathBuf {
     system_dir.join("webnovel_blocklist.json")
 }
 
-/// Returns the merged blocklist: built-in hosts plus the user's file.
+/// Returns the merged blocklist: built-in entries plus the user's file.
 ///
 /// The file is optional and errors are treated as an empty list — a broken
 /// blocklist must never disable the built-in protections.
-pub fn load_blocked_hosts(system_dir: &Path) -> Vec<String> {
-    let mut hosts: Vec<String> = BUILTIN_BLOCKED_HOSTS
+pub fn load_blocklist_entries(system_dir: &Path) -> Vec<BlocklistEntry> {
+    let mut entries: Vec<BlocklistEntry> = BUILTIN_BLOCKED_HOSTS
         .iter()
-        .map(|host| host.to_string())
+        .map(|(host, note)| BlocklistEntry {
+            host: host.to_string(),
+            note: Some(note.to_string()),
+            builtin: true,
+        })
         .collect();
     if let Ok(raw) = fs::read_to_string(blocklist_file_path(system_dir)) {
-        if let Ok(user_hosts) = serde_json::from_str::<Vec<String>>(&raw) {
-            for host in user_hosts {
+        if let Ok(user_entries) = serde_json::from_str::<Vec<RawBlocklistEntry>>(&raw) {
+            for entry in user_entries {
+                let (host, note) = match entry {
+                    RawBlocklistEntry::Plain(host) => (host, None),
+                    RawBlocklistEntry::WithNote { host, note } => (host, note),
+                };
                 let host = host.trim().to_lowercase();
-                if !host.is_empty() && !hosts.contains(&host) {
-                    hosts.push(host);
+                if !host.is_empty() && !entries.iter().any(|existing| existing.host == host) {
+                    entries.push(BlocklistEntry {
+                        host,
+                        note,
+                        builtin: false,
+                    });
                 }
             }
         }
     }
-    hosts
+    entries
+}
+
+/// Persists the user-curated part of the blocklist (built-ins are skipped).
+pub fn save_user_blocklist(system_dir: &Path, entries: &[BlocklistEntry]) -> Result<()> {
+    let user_entries: Vec<&BlocklistEntry> = entries
+        .iter()
+        .filter(|entry| !entry.builtin && !entry.host.trim().is_empty())
+        .collect();
+    let json = serde_json::to_string_pretty(&user_entries)
+        .map_err(|e| VaultError::Serialization(format!("blocklist serialize error: {e}")))?;
+    fs::create_dir_all(system_dir).map_err(VaultError::from)?;
+    fs::write(blocklist_file_path(system_dir), json).map_err(VaultError::from)?;
+    Ok(())
+}
+
+/// Flat host list, for the actual blocking check.
+pub fn load_blocked_hosts(system_dir: &Path) -> Vec<String> {
+    load_blocklist_entries(system_dir)
+        .into_iter()
+        .map(|entry| entry.host)
+        .collect()
 }
 
 /// Checks a subscription URL against the blocklist.

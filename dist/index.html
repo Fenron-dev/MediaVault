@@ -269,6 +269,7 @@
           <div class="collections-layout">
             <section class="panel collection-detail">
               <nav class="collection-breadcrumb" id="collection-breadcrumb" aria-label="Sammlungspfad"></nav>
+              <div class="collection-tag-filter" id="collection-tag-filter" hidden></div>
 
               <div class="collection-hero">
                 <div>
@@ -443,6 +444,12 @@
                 <button class="webnovel-chip" data-webnovel-filter="error">Fehler</button>
                 <button class="webnovel-chip" data-webnovel-filter="new">Neue Kapitel</button>
               </div>
+              <select class="action-button" id="webnovel-sort" title="Sortierung">
+                <option value="title">Name (A–Z)</option>
+                <option value="last_check">Zuletzt geprüft</option>
+                <option value="new_chapters">Neue Kapitel zuerst</option>
+                <option value="rating">Bewertung</option>
+              </select>
               <button class="action-button" id="webnovel-view-toggle" title="Zwischen Karten- und Listenansicht wechseln">
                 Listenansicht
               </button>
@@ -602,6 +609,21 @@
                   Zum Weiterlesen laufender Novels die Batch-EPUBs verwenden.
                 </p>
               </div>
+            </section>
+            <section class="panel">
+              <p class="panel-label">Blockliste</p>
+              <h3>Gesperrte Seiten</h3>
+              <p class="body-copy">
+                Diese Hosts werden weder abonniert noch geprüft (inkl. Subdomains).
+                Eingebaute Einträge lassen sich nicht entfernen.
+              </p>
+              <div class="stack" id="webnovel-blocklist"></div>
+              <div class="webnovel-blocklist-add">
+                <input id="webnovel-blocklist-host" type="text" placeholder="beispiel-seite.com" />
+                <input id="webnovel-blocklist-note" type="text" placeholder="Bemerkung (optional)" />
+                <button class="action-button" id="webnovel-blocklist-add-btn">Hinzufügen</button>
+              </div>
+              <p class="field-hint" id="webnovel-blocklist-feedback"></p>
             </section>
             </div>
           </div>

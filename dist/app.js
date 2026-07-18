@@ -4169,10 +4169,9 @@ function getSelectedItem() {
     return null;
   }
 
-  return (
-    currentPlan.items.find((item) => item.source_path === selectedItemKey) ??
-    currentPlan.items[0]
-  );
+  // No fallback to the first item: without an explicit selection the
+  // review detail shows its empty state instead of an arbitrary file.
+  return currentPlan.items.find((item) => item.source_path === selectedItemKey) ?? null;
 }
 
 function renderInboxRows(items) {
@@ -4542,6 +4541,8 @@ function propertyEntriesFor(value) {
     ["media_type", mediaTypeLabel(mediaSelectionValue(item))],
     ["format", item.format],
     ["title", item.title],
+    ["description", item.description],
+    ["rating_external", item.rating_external],
     ["series_title", item.series_title],
     ["season_number", item.season_number],
     ["episode_start", item.episode_start],
@@ -4630,7 +4631,19 @@ function renderInspector(value) {
         const name = document.createElement("strong");
         name.textContent = key;
         const body = document.createElement("p");
-        body.textContent = propertyDisplayValue(value);
+        if ((key === "genres" || key === "tags") && Array.isArray(value) && value.length) {
+          // Clickable chips: jump to the collections view filtered by tag.
+          value.slice(0, 12).forEach((tag) => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "tag-chip";
+            chip.textContent = tag;
+            chip.addEventListener("click", () => setCollectionTagFilter(tag));
+            body.appendChild(chip);
+          });
+        } else {
+          body.textContent = propertyDisplayValue(value);
+        }
 
         label.appendChild(icon);
         label.appendChild(name);
@@ -5098,6 +5111,22 @@ function renderCollectionMeta(node) {
   });
 }
 
+// Counts distinct titles (series/novels/albums) below a node, based on the
+// series_title of its items; falls back to the raw file count.
+function collectionTitleCount(node) {
+  const titles = new Set();
+  (node.items ?? []).forEach((item) => {
+    const key =
+      item.series_title ||
+      item.title ||
+      String(item.source_path ?? "").split("/").slice(0, -1).pop();
+    if (key) {
+      titles.add(String(key).toLowerCase());
+    }
+  });
+  return titles.size || (node.items ?? []).length;
+}
+
 function renderCollectionNavigation(root, node) {
   if (!collectionSidebarList) {
     return;
@@ -5138,7 +5167,11 @@ function renderCollectionNavigation(root, node) {
     const label = document.createElement("strong");
     label.textContent = child.label;
     const count = document.createElement("span");
-    count.textContent = `${child.items.length}`;
+    // Group nodes (Anime, Webnovels, …) show how many TITLES they hold, not
+    // how many files — "1 Anime mit 2 Folgen" reads as 1, not 2.
+    count.textContent = sortedChildren(child).length
+      ? `${collectionTitleCount(child)}`
+      : `${child.items.length}`;
 
     button.appendChild(label);
     button.appendChild(count);
@@ -5860,7 +5893,61 @@ function syncCollectionViewMode(node = null) {
   syncCollectionSortButtons();
 }
 
+// Active genre/tag filter for the collections view ("" = none).
+let activeTagFilter = "";
+
+function itemMatchesTagFilter(item, tag) {
+  const haystack = [...(item.genres ?? []), ...(item.tags ?? [])].map((entry) =>
+    String(entry).toLowerCase(),
+  );
+  return haystack.includes(tag);
+}
+
+function setCollectionTagFilter(tag) {
+  activeTagFilter = String(tag ?? "").toLowerCase();
+  closeWebnovelDetailIfOpen();
+  setActiveTab("collections", { resetCollections: true });
+  renderCollections(currentPlan?.items ?? []);
+  if (statusStrip) {
+    statusStrip.textContent = activeTagFilter
+      ? `Sammlungen gefiltert nach „${tag}“.`
+      : "Tag-Filter entfernt.";
+  }
+}
+
+function closeWebnovelDetailIfOpen() {
+  const detail = document.getElementById("webnovel-detail");
+  if (detail) {
+    detail.hidden = true;
+  }
+}
+
+function renderTagFilterBar() {
+  const bar = document.getElementById("collection-tag-filter");
+  if (!bar) {
+    return;
+  }
+  clearNode(bar);
+  bar.hidden = !activeTagFilter;
+  if (!activeTagFilter) {
+    return;
+  }
+  const label = document.createElement("span");
+  label.textContent = `Filter: ${activeTagFilter}`;
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "action-button";
+  clear.textContent = "✕ Filter entfernen";
+  clear.addEventListener("click", () => setCollectionTagFilter(""));
+  bar.appendChild(label);
+  bar.appendChild(clear);
+}
+
 function renderCollections(items) {
+  if (activeTagFilter) {
+    items = items.filter((item) => itemMatchesTagFilter(item, activeTagFilter));
+  }
+  renderTagFilterBar();
   const root = buildCollectionTree(items);
   const selected = findCollectionNode(root, selectedCollectionKey);
 
@@ -6319,7 +6406,8 @@ if (collectionMultiToggle) {
 
 if (demoButton) {
   demoButton.addEventListener("click", () => {
-    setActiveTab("review");
+    // Stay on the current view — jumping to Prüfung on every scan forced
+    // the user to navigate back each time.
     if (!document.body.classList.contains("is-vault-open")) {
       openVault(getVaultRoot());
     } else {
@@ -7107,6 +7195,9 @@ function loadWebnovelSettings() {
       Math.max(WEBNOVEL_MIN_DELAY_S, Number(stored.delaySeconds) || WEBNOVEL_DEFAULT_DELAY_S),
     ),
     listView: stored.listView ?? false,
+    sortBy: ["title", "last_check", "new_chapters", "rating"].includes(stored.sortBy)
+      ? stored.sortBy
+      : "title",
     goodreadsMode: ["off", "fill", "override"].includes(stored.goodreadsMode)
       ? stored.goodreadsMode
       : "fill",
@@ -7208,7 +7299,36 @@ function formatWebnovelTimestamp(unixSeconds) {
   }
 }
 
+function sortWebnovelSubscriptions(subscriptions) {
+  const sortBy = loadWebnovelSettings().sortBy;
+  const sorted = [...subscriptions];
+  switch (sortBy) {
+    case "last_check":
+      sorted.sort((a, b) => (b.last_check_unix ?? 0) - (a.last_check_unix ?? 0));
+      break;
+    case "new_chapters":
+      sorted.sort(
+        (a, b) =>
+          (b.known_chapters ?? 0) -
+          (b.downloaded_chapters ?? 0) -
+          ((a.known_chapters ?? 0) - (a.downloaded_chapters ?? 0)),
+      );
+      break;
+    case "rating":
+      sorted.sort((a, b) => (b.rating_external ?? 0) - (a.rating_external ?? 0));
+      break;
+    default:
+      sorted.sort((a, b) =>
+        String(a.title ?? "").localeCompare(String(b.title ?? ""), "de", {
+          sensitivity: "base",
+        }),
+      );
+  }
+  return sorted;
+}
+
 function applyWebnovelFilter(subscriptions) {
+  subscriptions = sortWebnovelSubscriptions(subscriptions);
   switch (webnovelActiveFilter) {
     case "ongoing":
       return subscriptions.filter((sub) => !sub.completed && sub.enabled);
@@ -7268,6 +7388,21 @@ function renderWebnovelList(subscriptions) {
     const card = document.createElement("article");
     card.className = "webnovel-card";
 
+    if (subscription.cover_path) {
+      const cover = document.createElement("img");
+      cover.className = "webnovel-card-cover";
+      cover.loading = "lazy";
+      cover.alt = "";
+      const root = getVaultRoot();
+      cover.src = `/api/media-file?path=${encodeURIComponent(subscription.cover_path)}${
+        root ? `&root=${encodeURIComponent(root)}` : ""
+      }`;
+      card.appendChild(cover);
+    }
+
+    const cardBody = document.createElement("div");
+    cardBody.className = "webnovel-card-body";
+
     const head = document.createElement("div");
     head.className = "webnovel-card-head";
     const title = document.createElement("span");
@@ -7309,7 +7444,7 @@ function renderWebnovelList(subscriptions) {
       badges.appendChild(errorBadge);
     }
     head.appendChild(badges);
-    card.appendChild(head);
+    cardBody.appendChild(head);
 
     const meta = document.createElement("p");
     meta.className = "webnovel-card-meta";
@@ -7317,7 +7452,8 @@ function renderWebnovelList(subscriptions) {
     meta.textContent =
       `${authorPart}${subscription.downloaded_chapters}/${subscription.known_chapters} Kapitel · ` +
       `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.last_check_unix)}`;
-    card.appendChild(meta);
+    cardBody.appendChild(meta);
+    card.appendChild(cardBody);
 
     // Cards stay slim; details and all actions live in the detail overlay.
     card.classList.add("is-clickable");
@@ -7503,6 +7639,7 @@ function applyWebnovelSchedule() {
 
 function initWebnovels() {
   refreshWebnovelList();
+  loadWebnovelBlocklist();
   applyWebnovelSchedule();
 
   const settings = loadWebnovelSettings();
@@ -7526,6 +7663,16 @@ function initWebnovels() {
     }
   });
   webnovelViewToggle?.addEventListener("click", toggleWebnovelViewMode);
+  const sortSelect = document.getElementById("webnovel-sort");
+  if (sortSelect) {
+    sortSelect.value = loadWebnovelSettings().sortBy;
+    sortSelect.addEventListener("change", () => {
+      const settings = loadWebnovelSettings();
+      settings.sortBy = sortSelect.value;
+      saveWebnovelSettings(settings);
+      renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+    });
+  }
   webnovelSubscribeBtn?.addEventListener("click", subscribeWebnovel);
   webnovelCheckAllBtn?.addEventListener("click", () => triggerWebnovelCheck("manual"));
   webnovelUrlInput?.addEventListener("keydown", (event) => {
@@ -7749,8 +7896,20 @@ function openWebnovelDetail(subscription) {
     subscription.rating_external ? `★ ${subscription.rating_external.toFixed(2)} (Goodreads)` : "",
   );
   setText("webnovel-detail-description", subscription.description);
-  const genreParts = [...(subscription.genres ?? []), ...(subscription.tags ?? [])];
-  setText("webnovel-detail-genres", genreParts.length ? genreParts.join(" · ") : "");
+  const genresNode = document.getElementById("webnovel-detail-genres");
+  if (genresNode) {
+    clearNode(genresNode);
+    const genreParts = [...(subscription.genres ?? []), ...(subscription.tags ?? [])];
+    genresNode.hidden = !genreParts.length;
+    genreParts.slice(0, 16).forEach((tag) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "tag-chip";
+      chip.textContent = tag;
+      chip.addEventListener("click", () => setCollectionTagFilter(tag));
+      genresNode.appendChild(chip);
+    });
+  }
   setText(
     "webnovel-detail-chapters",
     `${subscription.downloaded_chapters}/${subscription.known_chapters} Kapitel geladen · ` +
@@ -7826,3 +7985,98 @@ function openWebnovelDetail(subscription) {
 
   webnovelDetail.hidden = false;
 }
+
+// ---------------------------------------------------------------------------
+// Webnovel blocklist settings
+// ---------------------------------------------------------------------------
+
+const webnovelBlocklistContainer = document.getElementById("webnovel-blocklist");
+const webnovelBlocklistFeedback = document.getElementById("webnovel-blocklist-feedback");
+let webnovelBlocklistEntries = [];
+
+async function loadWebnovelBlocklist() {
+  if (!webnovelBlocklistContainer) return;
+  try {
+    const payload = await webnovelApi(`/api/webnovel/blocklist?_=${Date.now()}${webnovelRootQuery()}`);
+    webnovelBlocklistEntries = payload.entries ?? [];
+    renderWebnovelBlocklist();
+  } catch (error) {
+    if (webnovelBlocklistFeedback) {
+      webnovelBlocklistFeedback.textContent = `Blockliste nicht ladbar: ${error.message}`;
+    }
+  }
+}
+
+function renderWebnovelBlocklist() {
+  if (!webnovelBlocklistContainer) return;
+  clearNode(webnovelBlocklistContainer);
+  if (!webnovelBlocklistEntries.length) {
+    const empty = document.createElement("p");
+    empty.className = "field-hint";
+    empty.textContent = "Keine Einträge.";
+    webnovelBlocklistContainer.appendChild(empty);
+    return;
+  }
+  webnovelBlocklistEntries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "blocklist-row";
+    const host = document.createElement("strong");
+    host.textContent = entry.host;
+    row.appendChild(host);
+    if (entry.builtin) {
+      const badge = document.createElement("span");
+      badge.className = "webnovel-badge";
+      badge.textContent = "eingebaut";
+      row.appendChild(badge);
+    }
+    const note = document.createElement("span");
+    note.className = "blocklist-note";
+    note.textContent = entry.note ?? "";
+    row.appendChild(note);
+    if (!entry.builtin) {
+      const remove = document.createElement("button");
+      remove.className = "action-button icon-button danger";
+      remove.title = "Entfernen";
+      remove.textContent = "✕";
+      remove.addEventListener("click", () => saveWebnovelBlocklist(
+        webnovelBlocklistEntries.filter((candidate) => candidate.host !== entry.host),
+      ));
+      row.appendChild(remove);
+    }
+    webnovelBlocklistContainer.appendChild(row);
+  });
+}
+
+async function saveWebnovelBlocklist(entries) {
+  try {
+    const payload = await webnovelApi("/api/webnovel/blocklist/save", {
+      method: "POST",
+      body: JSON.stringify({ entries, root: getVaultRoot() || undefined }),
+    });
+    if (webnovelBlocklistFeedback) {
+      webnovelBlocklistFeedback.textContent = payload.error ?? "Blockliste gespeichert.";
+    }
+    await loadWebnovelBlocklist();
+  } catch (error) {
+    if (webnovelBlocklistFeedback) {
+      webnovelBlocklistFeedback.textContent = `Speichern fehlgeschlagen: ${error.message}`;
+    }
+  }
+}
+
+document.getElementById("webnovel-blocklist-add-btn")?.addEventListener("click", () => {
+  const hostInput = document.getElementById("webnovel-blocklist-host");
+  const noteInput = document.getElementById("webnovel-blocklist-note");
+  const host = (hostInput?.value ?? "").trim().toLowerCase();
+  if (!host) return;
+  const note = (noteInput?.value ?? "").trim();
+  const entries = [
+    ...webnovelBlocklistEntries,
+    { host, note: note || null, builtin: false },
+  ];
+  if (hostInput) hostInput.value = "";
+  if (noteInput) noteInput.value = "";
+  saveWebnovelBlocklist(entries);
+});
+
+// Loaded from initWebnovels() once the vault is open.

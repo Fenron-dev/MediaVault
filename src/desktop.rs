@@ -32,8 +32,9 @@ use crate::core::progress::{
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
 use crate::core::webnovel::{
-    blocked_reason, delete_subscription, list_subscriptions, load_subscription, normalize_url,
-    save_subscription, unix_now, KnownChapter, Subscription,
+    blocked_reason, delete_subscription, list_subscriptions, load_blocklist_entries,
+    load_subscription, normalize_url, save_subscription, save_user_blocklist, unix_now,
+    BlocklistEntry, KnownChapter, Subscription,
 };
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
@@ -272,6 +273,14 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/webnovel/check" => json_response(
             StatusCode::OK,
             &build_webnovel_check_response(request.body()),
+        ),
+        "/api/webnovel/blocklist" => json_response(
+            StatusCode::OK,
+            &build_webnovel_blocklist_response(request.uri().query()),
+        ),
+        "/api/webnovel/blocklist/save" => json_response(
+            StatusCode::OK,
+            &build_webnovel_blocklist_save_response(request.body()),
         ),
         "/api/webnovel/job" => json_response(
             StatusCode::OK,
@@ -1184,6 +1193,14 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
 
     group_audiobook_folders(&mut plan_items, Some(vault_root.as_path()));
 
+    // Attach cover art (cover.jpg/poster.png next to the file) so collection
+    // cards and the inspector can show it without extra requests.
+    for plan_item in &mut plan_items {
+        if plan_item.cover_url.is_none() {
+            plan_item.cover_url = find_cover_url(&vault, &plan_item.source_path);
+        }
+    }
+
     // Append parts list to the sidecar YAML preview for audiobook group representatives.
     for item in &mut plan_items {
         if let Some(parts) = item.audiobook_parts.as_deref() {
@@ -1485,6 +1502,10 @@ struct ParsedSidecar {
     anilist_id: Option<u32>,
     anilist_url: Option<String>,
     status: Option<MediaStatus>,
+    description: Option<String>,
+    rating_external: Option<f32>,
+    genres: Vec<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1628,6 +1649,17 @@ struct DemoPlanItem {
     airing_season: Option<String>,
     anilist_id: Option<u32>,
     anilist_url: Option<String>,
+    /// Cover image URL (vault cover file next to the media), when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rating_external: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    genres: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
     collection_path: String,
     size_bytes: u64,
     folder_segment: String,
@@ -1765,6 +1797,11 @@ impl DemoPlanItem {
             anilist_url: sidecar
                 .and_then(|value| value.anilist_url.clone())
                 .or_else(|| anilist.and_then(|metadata| metadata.anilist_url.clone())),
+            cover_url: None,
+            description: sidecar.and_then(|value| value.description.clone()),
+            rating_external: sidecar.and_then(|value| value.rating_external),
+            genres: sidecar.map(|value| value.genres.clone()).unwrap_or_default(),
+            tags: sidecar.map(|value| value.tags.clone()).unwrap_or_default(),
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
@@ -3487,18 +3524,38 @@ fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassifica
 fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
     let mut sidecar = ParsedSidecar::default();
     let mut lines = raw.lines();
+    // Tracks which list ("genres"/"tags") the following "- item" lines feed.
+    let mut active_list: Option<&str> = None;
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "---" {
+            active_list = None;
+            continue;
+        }
+
+        // List entries rendered as `  - "value"` under a "genres:"/"tags:" key.
+        if let Some(entry) = trimmed.strip_prefix("- ") {
+            let value = unquote_yaml(entry);
+            match active_list {
+                Some("genres") if !value.is_empty() => sidecar.genres.push(value),
+                Some("tags") if !value.is_empty() => sidecar.tags.push(value),
+                _ => {}
+            }
             continue;
         }
 
         let Some((key, value)) = trimmed.split_once(':') else {
+            active_list = None;
             continue;
         };
         let key = key.trim();
         let value = value.trim();
+        active_list = match (key, value.is_empty()) {
+            ("genres", true) => Some("genres"),
+            ("tags", true) => Some("tags"),
+            _ => None,
+        };
 
         match key {
             "media_type" => sidecar.media_type = parse_media_type(unquote_yaml(value)),
@@ -3517,6 +3574,8 @@ fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
             "anilist_id" => sidecar.anilist_id = value.parse::<u32>().ok(),
             "anilist_url" => sidecar.anilist_url = Some(unquote_yaml(value)),
             "status" => sidecar.status = parse_media_status(unquote_yaml(value).as_str()),
+            "description" => sidecar.description = Some(unquote_yaml(value)),
+            "rating_external" => sidecar.rating_external = value.parse::<f32>().ok(),
             _ => {}
         }
     }
@@ -6161,5 +6220,48 @@ fn build_open_url_response(query: Option<&str>) -> WebnovelSimpleResponse {
         Err(error) => {
             WebnovelSimpleResponse::error(format!("Browser-Start fehlgeschlagen: {error}"))
         }
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelBlocklistResponse {
+    entries: Vec<BlocklistEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_webnovel_blocklist_response(query: Option<&str>) -> WebnovelBlocklistResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => WebnovelBlocklistResponse {
+            entries: load_blocklist_entries(&vault.system_dir()),
+            error: None,
+        },
+        Err(message) => WebnovelBlocklistResponse {
+            entries: Vec::new(),
+            error: Some(message),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct WebnovelBlocklistSaveRequest {
+    entries: Vec<BlocklistEntry>,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+fn build_webnovel_blocklist_save_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelBlocklistSaveRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+    match save_user_blocklist(&vault.system_dir(), &req.entries) {
+        Ok(()) => WebnovelSimpleResponse::ok(),
+        Err(error) => WebnovelSimpleResponse::error(error.to_string()),
     }
 }
