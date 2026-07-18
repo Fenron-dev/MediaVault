@@ -21,8 +21,7 @@ use super::{
 use crate::error::{Result, VaultError};
 
 /// Content selectors for chapter pages, in priority order.
-const CHAPTER_CONTENT_SELECTORS: [&str; 3] =
-    ["#chapter-container", ".chapter-content", "#content"];
+const CHAPTER_CONTENT_SELECTORS: [&str; 3] = ["#chapter-container", ".chapter-content", "#content"];
 
 /// Hard cap on ToC pages so broken pagination can never loop forever.
 const MAX_TOC_PAGES: u32 = 200;
@@ -257,7 +256,10 @@ mod tests {
         assert_eq!(info.title, "MAGUS INFINITE");
         assert_eq!(info.author.as_deref(), Some("BRICKTRADER"));
         assert_eq!(info.completed_hint, Some(false));
-        assert_eq!(info.genres, vec!["Fantasy".to_string(), "Action".to_string()]);
+        assert_eq!(
+            info.genres,
+            vec!["Fantasy".to_string(), "Action".to_string()]
+        );
         assert_eq!(
             info.cover_url.as_deref(),
             Some("https://novelphoenix.com/server-1/magus.jpg")
