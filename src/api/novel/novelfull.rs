@@ -41,6 +41,20 @@ impl NovelSource for NovelFullSource {
         let html = Html::parse_document(&body);
         let mut info = parse_novel_page(&final_url, &html)?;
 
+        // readnovelfull-style clones expose the full ToC through an AJAX
+        // archive endpoint instead of paginated pages; prefer it when present.
+        if let Some(novel_id) = data_novel_id(&html) {
+            let archive_url = archive_url_for(&final_url, &novel_id);
+            if let Ok((_archive_final, archive_body)) = client.get_text(&archive_url) {
+                let archive_html = Html::parse_document(&archive_body);
+                let archive_chapters = parse_chapter_links(&final_url, &archive_html);
+                if archive_chapters.len() > info.chapters.len() {
+                    info.chapters = archive_chapters;
+                    return Ok(info);
+                }
+            }
+        }
+
         // The chapter list is paginated; walk the remaining pages.
         let last_page = last_pagination_page(&html).min(MAX_TOC_PAGES);
         for page in 2..=last_page {
@@ -141,6 +155,24 @@ fn parse_chapter_links(base_url: &str, html: &Html) -> Vec<ChapterRef> {
         });
     }
     chapters
+}
+
+/// Reads the `data-novel-id` attribute used by readnovelfull-style clones.
+fn data_novel_id(html: &Html) -> Option<String> {
+    let selector = Selector::parse("[data-novel-id]").ok()?;
+    html.select(&selector)
+        .next()?
+        .value()
+        .attr("data-novel-id")
+        .filter(|id| id.chars().all(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+}
+
+/// AJAX chapter-archive URL on the novel's host.
+fn archive_url_for(novel_url: &str, novel_id: &str) -> String {
+    let host = super::host_of(novel_url).unwrap_or_default();
+    let scheme = novel_url.split("://").next().unwrap_or("https");
+    format!("{scheme}://{host}/ajax/chapter-archive?novelId={novel_id}")
 }
 
 /// Finds the highest `?page=N` value in the pagination bar (1 if absent).

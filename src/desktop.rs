@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
+use crate::api::goodreads::GoodreadsClient;
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::api::novel::{detect_image_media_type, detect_source, ChapterRef, PoliteClient};
@@ -5423,6 +5424,9 @@ struct WebnovelCheckRequest {
     /// Per-host request delay in milliseconds (clamped to 500–5000).
     #[serde(default)]
     delay_ms: Option<u64>,
+    /// Goodreads metadata mode: `off`, `fill` (default), or `override`.
+    #[serde(default)]
+    goodreads_mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -5439,6 +5443,28 @@ struct WebnovelCheckOptions {
     build_complete: bool,
     build_batch: bool,
     delay_ms: Option<u64>,
+    goodreads_mode: GoodreadsMode,
+}
+
+/// How Goodreads results are merged into a subscription's metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GoodreadsMode {
+    /// No Goodreads lookups at all.
+    Off,
+    /// Fill only fields the source site left empty (default).
+    Fill,
+    /// Goodreads wins over source-site metadata.
+    Override,
+}
+
+impl GoodreadsMode {
+    fn parse(value: Option<&str>) -> Self {
+        match value.unwrap_or("fill") {
+            "off" => Self::Off,
+            "override" => Self::Override,
+            _ => Self::Fill,
+        }
+    }
 }
 
 fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
@@ -5487,6 +5513,7 @@ fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
         build_complete: req.build_complete,
         build_batch: req.build_batch,
         delay_ms: req.delay_ms,
+        goodreads_mode: GoodreadsMode::parse(req.goodreads_mode.as_deref()),
     };
     let thread_job_id = job_id.clone();
     std::thread::spawn(move || {
@@ -5645,8 +5672,9 @@ fn check_one_subscription(
         subscription.completed = true;
     }
 
-    // For translated light novels, AniList (format NOVEL) fills whatever the
-    // source site did not provide. One lookup, only while gaps remain.
+    // Metadata enrichment order: source site → Goodreads (per mode) →
+    // AniList NOVEL lookup for any gaps that remain.
+    enrich_from_goodreads(client, subscription, options.goodreads_mode);
     enrich_from_anilist(subscription);
 
     // Diff the ToC against known chapters by normalized URL. Known chapters
@@ -5790,6 +5818,45 @@ fn ensure_novel_cover(
         _ => "cover.jpg",
     };
     fs::write(novel_dir.join(file_name), bytes).is_ok()
+}
+
+/// Merges Goodreads metadata into the subscription according to `mode`.
+///
+/// `Fill` touches only empty fields; `Override` lets Goodreads win over the
+/// source site (and refreshes on every check so ratings stay current).
+/// Best effort — lookup failures are ignored.
+fn enrich_from_goodreads(
+    client: &PoliteClient,
+    subscription: &mut Subscription,
+    mode: GoodreadsMode,
+) {
+    if mode == GoodreadsMode::Off {
+        return;
+    }
+    // In fill mode one successful lookup is enough; override refreshes.
+    if mode == GoodreadsMode::Fill && subscription.goodreads_url.is_some() {
+        return;
+    }
+    let Ok(Some(book)) = GoodreadsClient::search_book(client, &subscription.title) else {
+        return;
+    };
+
+    subscription.goodreads_url = Some(book.url.clone());
+    subscription.rating_external = book.average_rating.or(subscription.rating_external);
+
+    let overriding = mode == GoodreadsMode::Override;
+    if book.author.is_some() && (overriding || subscription.author.is_none()) {
+        subscription.author = book.author.clone();
+    }
+    if book.description.is_some() && (overriding || subscription.description.is_none()) {
+        subscription.description = book.description.clone();
+    }
+    if !book.genres.is_empty() && (overriding || subscription.genres.is_empty()) {
+        subscription.genres = book.genres.clone();
+    }
+    if book.cover_url.is_some() && (overriding || subscription.cover_url.is_none()) {
+        subscription.cover_url = book.cover_url.clone();
+    }
 }
 
 /// Fills metadata gaps (description, genres, tags, cover, AniList link) from
@@ -5975,8 +6042,12 @@ fn write_webnovel_sidecar(
     entry.properties.tags = subscription.tags.clone();
     entry.properties.anilist_id = subscription.anilist_id;
     entry.properties.anilist_url = subscription.anilist_url.clone();
-    // Keep the subscription URL discoverable from the sidecar.
-    entry.properties.notes = Some(format!("Quelle: {}", subscription.url));
+    entry.properties.rating_external = subscription.rating_external;
+    // Keep the subscription and Goodreads URLs discoverable from the sidecar.
+    entry.properties.notes = Some(match subscription.goodreads_url.as_deref() {
+        Some(goodreads) => format!("Quelle: {} · Goodreads: {goodreads}", subscription.url),
+        None => format!("Quelle: {}", subscription.url),
+    });
     entry.properties.status = Some(if subscription.completed {
         MediaStatus::Completed
     } else {

