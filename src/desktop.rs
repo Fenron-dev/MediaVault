@@ -1800,7 +1800,9 @@ impl DemoPlanItem {
             cover_url: None,
             description: sidecar.and_then(|value| value.description.clone()),
             rating_external: sidecar.and_then(|value| value.rating_external),
-            genres: sidecar.map(|value| value.genres.clone()).unwrap_or_default(),
+            genres: sidecar
+                .map(|value| value.genres.clone())
+                .unwrap_or_default(),
             tags: sidecar.map(|value| value.tags.clone()).unwrap_or_default(),
             collection_path,
             size_bytes: file.size_bytes,
