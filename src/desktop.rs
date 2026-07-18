@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
-use crate::api::goodreads::GoodreadsClient;
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
+use crate::api::goodreads::GoodreadsClient;
 use crate::api::novel::{detect_image_media_type, detect_source, ChapterRef, PoliteClient};
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;

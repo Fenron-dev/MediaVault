@@ -236,7 +236,10 @@ mod tests {
             "avgRating":"4.56","ratingsCount":3356,
             "author":{"id":1,"name":"Guiltythree"}}]"#;
         let hits: Vec<AutoCompleteHit> = serde_json::from_str(payload).expect("should parse");
-        assert_eq!(hits[0].author.as_ref().map(|a| a.name.as_str()), Some("Guiltythree"));
+        assert_eq!(
+            hits[0].author.as_ref().map(|a| a.name.as_str()),
+            Some("Guiltythree")
+        );
         assert_eq!(hits[0].avg_rating.as_deref(), Some("4.56"));
     }
 
@@ -246,7 +249,10 @@ mod tests {
             full_size_cover("https://x.com/books/123._SY75_.jpg"),
             "https://x.com/books/123.jpg"
         );
-        assert_eq!(full_size_cover("https://x.com/books/123.jpg"), "https://x.com/books/123.jpg");
+        assert_eq!(
+            full_size_cover("https://x.com/books/123.jpg"),
+            "https://x.com/books/123.jpg"
+        );
     }
 
     #[test]
@@ -259,7 +265,10 @@ mod tests {
         }}}}</script></html>"#;
         let details = parse_book_page(page).expect("should parse");
         assert_eq!(details.description.as_deref(), Some("Bold story text."));
-        assert_eq!(details.genres, vec!["Fantasy".to_string(), "Progression".to_string()]);
+        assert_eq!(
+            details.genres,
+            vec!["Fantasy".to_string(), "Progression".to_string()]
+        );
     }
 
     #[test]
