@@ -34,6 +34,28 @@ pub struct EpubChapter {
     pub xhtml_body: String,
 }
 
+/// Cover image embedded into the EPUB.
+#[derive(Debug, Clone)]
+pub struct EpubCover {
+    /// Image MIME type (`image/jpeg`, `image/png`, `image/webp`).
+    pub media_type: String,
+    /// Raw image bytes.
+    pub bytes: Vec<u8>,
+}
+
+impl EpubCover {
+    /// File extension matching the media type.
+    fn extension(&self) -> &'static str {
+        match self.media_type.as_str() {
+            "image/png" => "png",
+            "image/webp" => "webp",
+            // JPEG is by far the most common cover format; unknown types are
+            // still written, readers sniff the actual bytes anyway.
+            _ => "jpg",
+        }
+    }
+}
+
 /// Book-level metadata written into the OPF package document.
 #[derive(Debug, Clone)]
 pub struct EpubMeta {
@@ -47,6 +69,8 @@ pub struct EpubMeta {
     pub identifier: String,
     /// Optional description shown by readers.
     pub description: Option<String>,
+    /// Optional cover image shown by readers and library views.
+    pub cover: Option<EpubCover>,
 }
 
 /// Writes a complete EPUB 3 file to `target`, replacing any existing file.
@@ -100,6 +124,13 @@ pub fn write_epub(target: &Path, meta: &EpubMeta, chapters: &[EpubChapter]) -> R
         .map_err(zip_error)?;
     zip.write_all(render_nav(meta, chapters).as_bytes())
         .map_err(VaultError::from)?;
+
+    if let Some(cover) = &meta.cover {
+        // Images are already compressed; store them without re-deflating.
+        zip.start_file(format!("OEBPS/cover.{}", cover.extension()), stored)
+            .map_err(zip_error)?;
+        zip.write_all(&cover.bytes).map_err(VaultError::from)?;
+    }
 
     for (index, chapter) in chapters.iter().enumerate() {
         zip.start_file(chapter_file_name(index), deflated)
@@ -167,6 +198,20 @@ fn render_opf(meta: &EpubMeta, chapters: &[EpubChapter]) -> String {
         spine.push_str(&format!("    <itemref idref=\"{id}\"/>\n"));
     }
 
+    if let Some(cover) = &meta.cover {
+        manifest.push_str(&format!(
+            "    <item id=\"cover-image\" href=\"cover.{ext}\" media-type=\"{media_type}\" properties=\"cover-image\"/>\n",
+            ext = cover.extension(),
+            media_type = escape_xml(&cover.media_type),
+        ));
+    }
+    // Legacy EPUB 2 cover hint so older readers find the image too.
+    let cover_meta = if meta.cover.is_some() {
+        "    <meta name=\"cover\" content=\"cover-image\"/>\n"
+    } else {
+        ""
+    };
+
     let author = meta
         .author
         .as_deref()
@@ -190,7 +235,7 @@ fn render_opf(meta: &EpubMeta, chapters: &[EpubChapter]) -> String {
     <dc:identifier id="pub-id">{identifier}</dc:identifier>
     <dc:title>{title}</dc:title>
     <dc:language>{language}</dc:language>
-{author}{description}    <meta property="dcterms:modified">2000-01-01T00:00:00Z</meta>
+{author}{description}{cover_meta}    <meta property="dcterms:modified">2000-01-01T00:00:00Z</meta>
   </metadata>
   <manifest>
     <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
@@ -271,6 +316,7 @@ mod tests {
             language: "en".to_string(),
             identifier: "https://example.com/novel?id=1&x=2".to_string(),
             description: Some("A \"test\" novel".to_string()),
+            cover: None,
         }
     }
 
@@ -340,6 +386,31 @@ mod tests {
         let second = nav.find("chapter_0002.xhtml").expect("chapter 2 in nav");
         assert!(first < second);
         assert!(nav.contains("Chapter 2 &amp; More"));
+    }
+
+    #[test]
+    fn embeds_cover_image() {
+        let mut meta = sample_meta();
+        meta.cover = Some(EpubCover {
+            media_type: "image/jpeg".to_string(),
+            bytes: vec![0xFF, 0xD8, 0xFF, 0xE0],
+        });
+
+        let dir = std::env::temp_dir().join(format!("epub-cover-{}", std::process::id()));
+        let target = dir.join("cover.epub");
+        write_epub(&target, &meta, &sample_chapters()).expect("epub should write");
+
+        let file = File::open(&target).expect("epub should open");
+        let mut archive = zip::ZipArchive::new(file).expect("epub should be a zip");
+        archive
+            .by_name("OEBPS/cover.jpg")
+            .expect("cover entry should exist");
+
+        let opf = render_opf(&meta, &sample_chapters());
+        assert!(opf.contains("properties=\"cover-image\""));
+        assert!(opf.contains("<meta name=\"cover\" content=\"cover-image\"/>"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

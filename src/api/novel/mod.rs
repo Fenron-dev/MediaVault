@@ -165,6 +165,55 @@ impl PoliteClient {
         }
     }
 
+    /// Fetches a URL and returns the raw body bytes (for cover images).
+    ///
+    /// Applies the same per-host delay and retry rules as [`Self::get_text`].
+    ///
+    /// # Errors
+    /// - `VaultError::ExternalApi` on HTTP errors after retries are exhausted
+    pub fn get_bytes(&self, url: &str) -> Result<Vec<u8>> {
+        let mut attempt = 0;
+        loop {
+            self.respect_delay(url);
+            match self.try_get_bytes(url) {
+                Ok(bytes) => return Ok(bytes),
+                Err(RequestFailure::Fatal(error)) => return Err(error),
+                Err(RequestFailure::Transient(error)) => {
+                    if attempt as usize >= RETRY_BACKOFF_SECS.len() || attempt >= MAX_RETRIES {
+                        return Err(error);
+                    }
+                    std::thread::sleep(Duration::from_secs(RETRY_BACKOFF_SECS[attempt as usize]));
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    fn try_get_bytes(&self, url: &str) -> std::result::Result<Vec<u8>, RequestFailure> {
+        let response = self.client.get(url).send().map_err(|e| {
+            RequestFailure::Transient(VaultError::ExternalApi(format!(
+                "request to {url} failed: {e}"
+            )))
+        })?;
+        let status = response.status();
+        if status.as_u16() == 429 || status.is_server_error() {
+            return Err(RequestFailure::Transient(VaultError::ExternalApi(format!(
+                "{url} answered with status {status}"
+            ))));
+        }
+        if !status.is_success() {
+            return Err(RequestFailure::Fatal(VaultError::ExternalApi(format!(
+                "{url} answered with status {status}"
+            ))));
+        }
+        let bytes = response.bytes().map_err(|e| {
+            RequestFailure::Transient(VaultError::ExternalApi(format!(
+                "reading body of {url} failed: {e}"
+            )))
+        })?;
+        Ok(bytes.to_vec())
+    }
+
     fn try_get(&self, url: &str) -> std::result::Result<(String, String), RequestFailure> {
         let response = self.client.get(url).send().map_err(|e| {
             if e.is_timeout() || e.is_connect() {
@@ -293,6 +342,38 @@ pub fn absolutize(base_url: &str, href: &str) -> String {
         _ => base_url,
     };
     format!("{}/{}", base_dir.trim_end_matches('/'), href)
+}
+
+/// Extracts the page's `og:image` URL — the most reliable cover source on
+/// modern sites (RoyalRoad, WordPress/Fictioneer themes all provide it).
+pub fn og_image(html: &Html) -> Option<String> {
+    let selector = Selector::parse("meta[property='og:image']").ok()?;
+    html.select(&selector)
+        .next()?
+        .value()
+        .attr("content")
+        .map(str::to_string)
+        .filter(|url| !url.is_empty())
+}
+
+/// Detects an image's MIME type from its magic bytes.
+///
+/// Returns `None` for anything that is not JPEG/PNG/WebP — e.g. an HTML error
+/// page served instead of an image — so callers can discard bad downloads.
+pub fn detect_image_media_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() < 12 {
+        return None;
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return Some("image/png");
+    }
+    if &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
 }
 
 /// Returns the inner HTML of the first element matching any of `selectors`

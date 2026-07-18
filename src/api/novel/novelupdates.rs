@@ -33,8 +33,8 @@ impl NovelSource for NovelUpdatesSource {
     }
 
     fn fetch_novel_info(&self, client: &PoliteClient, url: &str) -> Result<NovelInfo> {
-        let (final_url, body) = client.get_text(url)?;
-        parse_series_page(&final_url, &body)
+        let (final_url, body) = client.get_text(url).map_err(with_translator_hint)?;
+        parse_series_page(&final_url, &body).map_err(with_translator_hint)
     }
 
     fn fetch_chapter(&self, client: &PoliteClient, chapter: &ChapterRef) -> Result<ChapterContent> {
@@ -51,6 +51,16 @@ impl NovelSource for NovelUpdatesSource {
             xhtml: content,
         })
     }
+}
+
+/// Appends a German hint to NU failures: subscribing at the translator's own
+/// site works via the generic parser and is the reliable path.
+fn with_translator_hint(error: VaultError) -> VaultError {
+    VaultError::ExternalApi(format!(
+        "{error} — Tipp: Abonniere stattdessen direkt die Seite der \
+         Übersetzer-Gruppe (Link in der NovelUpdates-Release-Liste); \
+         diese funktioniert meist über den generischen Parser."
+    ))
 }
 
 /// Parses a NovelUpdates series page: title, description, release table.

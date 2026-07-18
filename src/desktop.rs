@@ -11,10 +11,10 @@ use std::sync::{LazyLock, Mutex};
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
-use crate::api::novel::{detect_source, ChapterRef, PoliteClient};
+use crate::api::novel::{detect_image_media_type, detect_source, ChapterRef, PoliteClient};
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
-use crate::core::epub::{write_epub, EpubChapter, EpubMeta};
+use crate::core::epub::{write_epub, EpubChapter, EpubCover, EpubMeta};
 use crate::core::import::{
     ClassificationSource, DuplicatePolicy, FileClassification, ImportConfig, ImportPlan,
     ImportPlanItem, ImportPlanner, IncomingFile, PlannedImportStep, ResolvedMetadata, UserPrompt,
@@ -5622,6 +5622,9 @@ fn check_one_subscription(
     if subscription.description.is_none() {
         subscription.description = info.description.clone();
     }
+    if subscription.cover_url.is_none() {
+        subscription.cover_url = info.cover_url.clone();
+    }
     if info.completed_hint == Some(true) {
         subscription.completed = true;
     }
@@ -5655,6 +5658,9 @@ fn check_one_subscription(
     let novel_dir = webnovel_folder(vault, &subscription.title);
     let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
     fs::create_dir_all(&cache_dir).map_err(VaultError::from)?;
+
+    // Fetch the cover once; failures are non-fatal (text matters more).
+    ensure_novel_cover(client, subscription, &novel_dir);
 
     let pending: Vec<usize> = subscription
         .known_chapters
@@ -5729,6 +5735,54 @@ fn check_one_subscription(
     Ok(downloaded_indices.len())
 }
 
+/// Cover file names probed inside a novel folder, in preference order.
+const WEBNOVEL_COVER_NAMES: [&str; 3] = ["cover.jpg", "cover.png", "cover.webp"];
+
+/// Downloads the subscription's cover into the novel folder if not present.
+///
+/// Non-fatal by design: a missing cover must never block chapter downloads,
+/// so all failures are swallowed after basic validation.
+fn ensure_novel_cover(client: &PoliteClient, subscription: &Subscription, novel_dir: &Path) {
+    let Some(cover_url) = subscription.cover_url.as_deref() else {
+        return;
+    };
+    if load_novel_cover_path(novel_dir).is_some() {
+        return;
+    }
+    let Ok(bytes) = client.get_bytes(cover_url) else {
+        return;
+    };
+    // Reject anything that is not actually an image (e.g. an error page).
+    let Some(media_type) = detect_image_media_type(&bytes) else {
+        return;
+    };
+    let file_name = match media_type {
+        "image/png" => "cover.png",
+        "image/webp" => "cover.webp",
+        _ => "cover.jpg",
+    };
+    fs::write(novel_dir.join(file_name), bytes).ok();
+}
+
+/// Returns the existing cover file path inside a novel folder, if any.
+fn load_novel_cover_path(novel_dir: &Path) -> Option<PathBuf> {
+    WEBNOVEL_COVER_NAMES
+        .iter()
+        .map(|name| novel_dir.join(name))
+        .find(|path| path.exists())
+}
+
+/// Loads the novel's cover for EPUB embedding, if one is cached.
+fn load_novel_cover(novel_dir: &Path) -> Option<EpubCover> {
+    let path = load_novel_cover_path(novel_dir)?;
+    let bytes = fs::read(&path).ok()?;
+    let media_type = detect_image_media_type(&bytes)?;
+    Some(EpubCover {
+        media_type: media_type.to_string(),
+        bytes,
+    })
+}
+
 /// The novel's folder inside the vault: `Webnovels/<safe title>/`.
 fn webnovel_folder(vault: &Vault, title: &str) -> PathBuf {
     vault
@@ -5789,6 +5843,7 @@ fn build_batch_epub(vault: &Vault, subscription: &Subscription, indices: &[u32])
         language: "en".to_string(),
         identifier: format!("{}#batch-{min}-{max}", subscription.url),
         description: subscription.description.clone(),
+        cover: load_novel_cover(&novel_dir),
     };
     write_epub(&novel_dir.join(&file_name), &meta, &chapters)?;
 
@@ -5820,6 +5875,7 @@ fn build_complete_epub(vault: &Vault, subscription: &Subscription) -> Result<()>
         language: "en".to_string(),
         identifier: subscription.url.clone(),
         description: subscription.description.clone(),
+        cover: load_novel_cover(&novel_dir),
     };
     write_epub(&novel_dir.join(&file_name), &meta, &chapters)?;
 
@@ -5866,6 +5922,19 @@ fn write_webnovel_sidecar(
     if let Some((start, end)) = chapter_range {
         entry.properties.episode_start = Some(start.min(u32::from(u16::MAX)) as u16);
         entry.properties.episode_end = Some(end.min(u32::from(u16::MAX)) as u16);
+    }
+
+    // Point the sidecar at the cached cover so library views can show it.
+    let novel_dir = webnovel_folder(vault, &subscription.title);
+    if let Some(cover_path) = load_novel_cover_path(&novel_dir) {
+        if let Some(cover_name) = cover_path.file_name().and_then(|name| name.to_str()) {
+            entry.properties.cover_path = RelativePath::new(
+                PathBuf::from(MediaType::Webnovel.folder_segment())
+                    .join(&safe_title)
+                    .join(cover_name),
+            )
+            .ok();
+        }
     }
 
     let yaml = render_sidecar_yaml(&entry)?;

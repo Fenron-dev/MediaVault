@@ -2,11 +2,16 @@
 //!
 //! Adapter for WordPress-based translation sites (e.g. `divinedaolibrary.com`).
 //!
-//! ## Page structure
-//! - Novel page: chapter links live inside the post body (`div.entry-content`),
-//!   pointing at same-host chapter posts.
-//! - Chapter page: content is the post body itself; WordPress widgets
-//!   (sharing, related posts, navigation) are stripped before sanitizing.
+//! ## Supported themes
+//! - **Fictioneer** (used by DivineDaoLibrary since their redesign): story
+//!   pages under `/story/<slug>/`, chapters listed as
+//!   `a.chapter-group__list-item-link`, content in `#chapter-content`.
+//! - **Classic WordPress**: chapter links inside the post body
+//!   (`div.entry-content`), content is the post body itself.
+//!
+//! When the pasted URL is a *chapter* page (no chapter list on it), the
+//! adapter climbs one path segment up and retries — so pasting any chapter
+//! link of a Fictioneer story finds the story overview automatically.
 //!
 //! ## Dependencies:
 //! - `api::novel` – shared HTTP client and HTML utilities
@@ -20,8 +25,14 @@ use super::{
 use crate::error::{Result, VaultError};
 
 /// Content selectors for chapter pages, in priority order.
-const CHAPTER_CONTENT_SELECTORS: [&str; 3] =
-    ["div.entry-content", "article .post-content", "article"];
+/// Fictioneer (`#chapter-content`) first, then classic WordPress bodies.
+const CHAPTER_CONTENT_SELECTORS: [&str; 5] = [
+    "#chapter-content",
+    ".chapter__content",
+    "div.entry-content",
+    "article .post-content",
+    "article",
+];
 
 /// WordPress widget/cruft selectors removed from chapter content.
 const CRUFT_SELECTORS: [&str; 4] = [
@@ -41,7 +52,18 @@ impl NovelSource for WordPressSource {
 
     fn fetch_novel_info(&self, client: &PoliteClient, url: &str) -> Result<NovelInfo> {
         let (final_url, body) = client.get_text(url)?;
-        parse_novel_info(&final_url, &body)
+        match parse_novel_info(&final_url, &body) {
+            Ok(info) => Ok(info),
+            Err(first_error) => {
+                // The pasted URL may be a chapter page; climb one path segment
+                // up (chapter → story overview) and retry once.
+                let Some(parent) = parent_url(&final_url) else {
+                    return Err(first_error);
+                };
+                let (parent_final, parent_body) = client.get_text(&parent)?;
+                parse_novel_info(&parent_final, &parent_body).map_err(|_| first_error)
+            }
+        }
     }
 
     fn fetch_chapter(&self, client: &PoliteClient, chapter: &ChapterRef) -> Result<ChapterContent> {
@@ -116,13 +138,74 @@ fn serialize_without(
     }
 }
 
-/// Parses a WordPress novel overview page into metadata plus ToC.
+/// Strips the last path segment ("…/story/x/chapter-1/" → "…/story/x/").
+fn parent_url(url: &str) -> Option<String> {
+    let without_query = url.split(['?', '#']).next().unwrap_or(url);
+    let trimmed = without_query.trim_end_matches('/');
+    let scheme_end = trimmed.find("://").map(|i| i + 3)?;
+    let last_slash = trimmed.rfind('/')?;
+    // Refuse to climb above the host root.
+    if last_slash <= scheme_end {
+        return None;
+    }
+    Some(format!("{}/", &trimmed[..last_slash]))
+}
+
+/// Parses a novel overview page: Fictioneer structure first, then classic
+/// WordPress post bodies.
 fn parse_novel_info(page_url: &str, body: &str) -> Result<NovelInfo> {
     let html = Html::parse_document(body);
+    if let Some(info) = parse_fictioneer_story(page_url, &html) {
+        return Ok(info);
+    }
+    parse_classic_wordpress(page_url, &html)
+}
+
+/// Parses a Fictioneer-theme story page (DivineDaoLibrary and friends).
+fn parse_fictioneer_story(page_url: &str, html: &Html) -> Option<NovelInfo> {
+    let chapter_selector = Selector::parse("a.chapter-group__list-item-link").ok()?;
+    let mut chapters = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for link in html.select(&chapter_selector) {
+        let Some(href) = link.value().attr("href") else {
+            continue;
+        };
+        let text = link.text().collect::<Vec<_>>().join(" ");
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            continue;
+        }
+        let url = absolutize(page_url, href);
+        if seen.insert(url.clone()) {
+            chapters.push(ChapterRef { title: text, url });
+        }
+    }
+    if chapters.is_empty() {
+        return None;
+    }
+
+    let title = first_text(html, "h1.story__identity-title")?;
+    let cover_url = super::og_image(html)
+        .or_else(|| first_attr(html, "img.story__thumbnail-image", "src"))
+        .map(|src| absolutize(page_url, &src));
+    let description = first_text(html, ".story__summary");
+
+    Some(NovelInfo {
+        title,
+        author: first_text(html, ".story__author a").or_else(|| first_text(html, ".story__author")),
+        cover_url,
+        description,
+        completed_hint: None,
+        chapters,
+    })
+}
+
+/// Parses a classic WordPress novel page (chapter links in the post body).
+fn parse_classic_wordpress(page_url: &str, html: &Html) -> Result<NovelInfo> {
     let page_host = host_of(page_url).unwrap_or_default();
 
-    let title = first_text(&html, "h1.entry-title")
-        .or_else(|| first_text(&html, "h1"))
+    let title = first_text(html, "h1.entry-title")
+        .or_else(|| first_text(html, "h1"))
         .ok_or_else(|| {
             VaultError::ExternalApi(format!("Novel-Titel nicht gefunden: {page_url}"))
         })?;
@@ -160,11 +243,21 @@ fn parse_novel_info(page_url: &str, body: &str) -> Result<NovelInfo> {
     Ok(NovelInfo {
         title,
         author: None,
-        cover_url: None,
+        cover_url: super::og_image(html).map(|src| absolutize(page_url, &src)),
         description: None,
         completed_hint: None,
         chapters,
     })
+}
+
+/// First matching element's attribute value.
+fn first_attr(html: &Html, raw_selector: &str, attr: &str) -> Option<String> {
+    let selector = Selector::parse(raw_selector).ok()?;
+    html.select(&selector)
+        .next()?
+        .value()
+        .attr(attr)
+        .map(str::to_string)
 }
 
 fn first_text(html: &Html, raw_selector: &str) -> Option<String> {
@@ -212,6 +305,73 @@ mod tests {
             info.chapters[1].url,
             "https://www.example-wp.com/mtg-chapter-2/"
         );
+    }
+
+    const FICTIONEER_PAGE: &str = r#"
+    <html><head>
+      <meta property="og:image" content="https://www.example-ddl.com/wp-content/uploads/cover-200x300.jpg"/>
+    </head><body>
+      <h1 class="story__identity-title">Rebuild World</h1>
+      <section class="story__summary"><p>Akira starts from the bottom.</p></section>
+      <ol class="chapter-group__list">
+        <li class="chapter-group__list-item">
+          <a href='https://www.example-ddl.com/story/rebuild-world/chapter-1/'
+             class="chapter-group__list-item-link truncate _1-1 ">Chapter 1, Akira and Alpha</a>
+        </li>
+        <li class="chapter-group__list-item">
+          <a href='https://www.example-ddl.com/story/rebuild-world/chapter-2/'
+             class="chapter-group__list-item-link truncate _1-1 ">Chapter 2, Getting Paid</a>
+        </li>
+      </ol>
+    </body></html>"#;
+
+    #[test]
+    fn parses_fictioneer_story_page() {
+        let info = parse_novel_info(
+            "https://www.example-ddl.com/story/rebuild-world/",
+            FICTIONEER_PAGE,
+        )
+        .expect("fictioneer page should parse");
+        assert_eq!(info.title, "Rebuild World");
+        assert_eq!(info.chapters.len(), 2);
+        assert_eq!(info.chapters[0].title, "Chapter 1, Akira and Alpha");
+        assert_eq!(
+            info.chapters[1].url,
+            "https://www.example-ddl.com/story/rebuild-world/chapter-2/"
+        );
+        assert_eq!(
+            info.cover_url.as_deref(),
+            Some("https://www.example-ddl.com/wp-content/uploads/cover-200x300.jpg")
+        );
+        assert!(info
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .contains("Akira starts"));
+    }
+
+    #[test]
+    fn parent_url_climbs_one_segment() {
+        assert_eq!(
+            parent_url("https://www.example-ddl.com/story/rebuild-world/chapter-1/").as_deref(),
+            Some("https://www.example-ddl.com/story/rebuild-world/")
+        );
+        assert_eq!(
+            parent_url("https://www.example-ddl.com/story/").as_deref(),
+            Some("https://www.example-ddl.com/")
+        );
+        assert_eq!(parent_url("https://www.example-ddl.com/"), None);
+        assert_eq!(parent_url("https://www.example-ddl.com"), None);
+    }
+
+    #[test]
+    fn fictioneer_chapter_content_extracts() {
+        let page = r#"<html><body><article class="chapter__article">
+            <section id="chapter-content" class="chapter__content content-section">
+              <p>Chapter text here.</p>
+            </section></article></body></html>"#;
+        let content = extract_chapter_content(page).expect("content should extract");
+        assert!(content.contains("Chapter text here."));
     }
 
     #[test]

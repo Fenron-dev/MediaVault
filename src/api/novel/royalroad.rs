@@ -61,7 +61,10 @@ fn parse_novel_info(page_url: &str, body: &str) -> Result<NovelInfo> {
             VaultError::ExternalApi(format!("RoyalRoad-Titel nicht gefunden: {page_url}"))
         })?;
     let author = select_text(&html, "div.fic-header h4 a").or_else(|| select_text(&html, "h4 a"));
-    let cover_url = select_attr(&html, "div.fic-header img", "src")
+    // og:image is the most stable cover source; the header <img> is a
+    // fallback for pages without OpenGraph tags.
+    let cover_url = super::og_image(&html)
+        .or_else(|| select_attr(&html, "div.fic-header img", "src"))
         .or_else(|| select_attr(&html, "img.thumbnail", "src"))
         .map(|src| absolutize(page_url, &src));
     let description = extract_content(&html, &[".description"])
