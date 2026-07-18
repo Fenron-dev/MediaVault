@@ -42,6 +42,7 @@ use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
 use serde::{Deserialize, Serialize};
 use tauri::http::{header::CONTENT_TYPE, Request, Response, StatusCode};
+use tauri::Manager;
 
 const PROTOCOL_SCHEME: &str = "mediavault";
 const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
