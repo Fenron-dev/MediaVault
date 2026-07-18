@@ -5747,8 +5747,7 @@ fn check_one_subscription(
     // cover arrived after the last build (covers embed into the EPUB itself).
     let safe_title = sanitize_path_segment(&subscription.title);
     let complete_missing = !novel_dir.join(format!("{safe_title}.epub")).exists();
-    if options.build_complete
-        && (!downloaded_indices.is_empty() || cover_added || complete_missing)
+    if options.build_complete && (!downloaded_indices.is_empty() || cover_added || complete_missing)
     {
         build_complete_epub(vault, subscription)?;
     }

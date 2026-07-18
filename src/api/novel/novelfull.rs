@@ -56,7 +56,8 @@ impl NovelSource for NovelFullSource {
 
         // Pagination pages can overlap at the edges; dedupe by URL, keep order.
         let mut seen = std::collections::HashSet::new();
-        info.chapters.retain(|chapter| seen.insert(chapter.url.clone()));
+        info.chapters
+            .retain(|chapter| seen.insert(chapter.url.clone()));
 
         Ok(info)
     }
