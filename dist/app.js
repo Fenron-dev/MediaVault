@@ -324,15 +324,22 @@ function setActiveTab(tab, options = {}) {
   }
   document.body.classList.toggle("is-collections", tab === "collections");
 
-  // Hide the right-hand inspector on tabs that don't use it so they get
-  // the full workspace width.  Restore it when switching to collections.
-  const noInspector = tab === "inbox" || tab === "review";
-  document.body.classList.toggle("inspector-hidden", noInspector);
-
-  // Clear the inspector when leaving the collections tab so stale
-  // property values don't bleed through to other tabs.
-  if (noInspector) {
+  // The right-hand inspector only makes sense in the collections view,
+  // where a file/folder selection feeds it. Everywhere else it either
+  // showed stale data from the last selection or wasted a third of the
+  // screen — hide it and clear its contents when leaving collections.
+  const showInspector = tab === "collections";
+  document.body.classList.toggle("inspector-hidden", !showInspector);
+  if (!showInspector) {
     renderInspector(null);
+  }
+
+  // Vault actions (scan / import / Finder) only apply to file-centric
+  // views; settings, playlists, and webnovels get a clean header.
+  const vaultActionTabs = ["overview", "inbox", "review", "collections"];
+  const topbarVaultActions = document.getElementById("topbar-vault-actions");
+  if (topbarVaultActions) {
+    topbarVaultActions.hidden = !vaultActionTabs.includes(tab);
   }
 
   if (statusStrip) {
@@ -340,9 +347,14 @@ function setActiveTab(tab, options = {}) {
   }
 }
 
-function setMetrics(summary) {
+function setMetrics(summary, items = []) {
   if (metricInbox) {
-    metricInbox.textContent = `${summary.total_files} Dateien`;
+    // Only files physically waiting in Inbox/ — summary.total_files counts
+    // the whole vault, which made the tile read "13" with an empty inbox.
+    const inboxCount = items.filter((item) =>
+      String(item.source_path ?? "").startsWith("Inbox/"),
+    ).length;
+    metricInbox.textContent = `${inboxCount} Dateien`;
   }
   if (metricReview) {
     metricReview.textContent = `${summary.items_needing_review} unklar`;
@@ -543,6 +555,11 @@ async function bootstrapVault() {
 
 function rememberCollection(node) {
   if (!node?.path) {
+    return;
+  }
+  // Top-level groups (Anime, Webnovels, …) are one click away anyway —
+  // only remember actual titles inside them (depth >= 2).
+  if (!String(node.path).includes("/")) {
     return;
   }
 
@@ -2226,15 +2243,30 @@ async function loadDashboard() {
     if (data.items && data.items.length > 0) {
       if (dashboardRecentSection) dashboardRecentSection.hidden = false;
       if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
+      // One row per media type ("Webnovels", "Hörbücher", …) instead of a
+      // single mixed strip — easier to scan when many types arrive at once.
+      const groups = new Map();
       data.items.forEach((item) => {
-        const card = createDashboardCard(item, (it) => {
-          const ext = playerFileExt(it.vault_path);
-          if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
-            openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
-          }
-        });
-        dashboardRecentCards?.appendChild(card);
+        const key = mediaTypeLabel(item.media_type ?? "unclassified");
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
       });
+      const playHandler = (it) => {
+        const ext = playerFileExt(it.vault_path);
+        if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
+          openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
+        }
+      };
+      for (const [label, groupItems] of groups) {
+        const heading = document.createElement("p");
+        heading.className = "dashboard-group-label";
+        heading.textContent = label;
+        dashboardRecentCards?.appendChild(heading);
+        const row = document.createElement("div");
+        row.className = "dashboard-scroll";
+        groupItems.forEach((item) => row.appendChild(createDashboardCard(item, playHandler)));
+        dashboardRecentCards?.appendChild(row);
+      }
     } else {
       if (dashboardRecentSection) dashboardRecentSection.hidden = true;
       if (dashboardEmptyHint) dashboardEmptyHint.hidden = false;
@@ -3144,7 +3176,23 @@ function renderPlaylistDetail(pl) {
       openPlayer({ source_path: vaultPath, target_path: vaultPath });
     });
 
-    row.append(nameSpan, typeSpan, playBtn);
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "action-button icon-button danger";
+    removeBtn.title = "Aus der Liste entfernen";
+    removeBtn.textContent = "✕";
+    const removeIndex = i;
+    removeBtn.addEventListener("click", async () => {
+      pl.items.splice(removeIndex, 1);
+      try {
+        await savePlaylistObject(pl);
+      } catch (error) {
+        if (statusStrip) statusStrip.textContent = `Entfernen fehlgeschlagen: ${error.message}`;
+      }
+      renderPlaylistDetail(pl);
+      await loadPlaylists();
+    });
+
+    row.append(nameSpan, typeSpan, playBtn, removeBtn);
     playlistItemsRows.appendChild(row);
   }
 }
@@ -4621,6 +4669,13 @@ function renderInspector(value) {
       PLAYER_EPUB_EXTS.has(ext);
     inspectorPlay.hidden = !item || !playable;
   }
+  {
+    const addButton = document.getElementById("inspector-add-playlist");
+    if (addButton) {
+      const srcPath = item?.source_path || item?.target_path || "";
+      addButton.hidden = !item || !srcPath;
+    }
+  }
   if (inspectorFetchMetadata) {
     inspectorFetchMetadata.disabled = !metadataAllowed;
     inspectorFetchMetadata.textContent =
@@ -4663,10 +4718,21 @@ function renderPlan(plan) {
     return;
   }
 
-  setMetrics(plan.summary);
+  setMetrics(plan.summary, plan.items);
   renderInboxRows(plan.items);
   renderReviewRows(plan.items);
   renderCollections(plan.items);
+
+  // A rescan can remove the file the inspector was showing — drop the
+  // selection instead of displaying properties of a vanished item.
+  if (inspectorSelection?.item?.source_path) {
+    const stillPresent = plan.items.some(
+      (item) => item.source_path === inspectorSelection.item.source_path,
+    );
+    if (!stillPresent) {
+      renderInspector(null);
+    }
+  }
 
   const selected = getSelectedItem();
   renderDetail(selected);
@@ -5082,6 +5148,9 @@ function renderCollectionNavigation(root, node) {
   if (!node.path) {
     const recent = validRecentCollections(root);
     if (recent.length) {
+      const divider = document.createElement("div");
+      divider.className = "collection-recent-divider";
+      collectionSidebarList.appendChild(divider);
       const heading = document.createElement("p");
       heading.className = "panel-label collection-recent-label";
       heading.textContent = "Zuletzt angesehen";
@@ -7250,47 +7319,9 @@ function renderWebnovelList(subscriptions) {
       `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.last_check_unix)}`;
     card.appendChild(meta);
 
-    if (subscription.last_error) {
-      const errorLine = document.createElement("p");
-      errorLine.className = "webnovel-card-meta is-error";
-      errorLine.textContent = subscription.last_error;
-      card.appendChild(errorLine);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "webnovel-card-actions";
-
-    const checkBtn = document.createElement("button");
-    checkBtn.className = "action-button";
-    checkBtn.textContent = "Jetzt prüfen";
-    checkBtn.addEventListener("click", () => triggerWebnovelCheck("manual", subscription.id));
-    actions.appendChild(checkBtn);
-
-    const completedBtn = document.createElement("button");
-    completedBtn.className = "action-button";
-    completedBtn.textContent = subscription.completed
-      ? "Als laufend markieren"
-      : "Als abgeschlossen markieren";
-    completedBtn.addEventListener("click", () =>
-      updateWebnovelSubscription(subscription.id, { completed: !subscription.completed }),
-    );
-    actions.appendChild(completedBtn);
-
-    const pauseBtn = document.createElement("button");
-    pauseBtn.className = "action-button";
-    pauseBtn.textContent = subscription.enabled ? "Pausieren" : "Fortsetzen";
-    pauseBtn.addEventListener("click", () =>
-      updateWebnovelSubscription(subscription.id, { enabled: !subscription.enabled }),
-    );
-    actions.appendChild(pauseBtn);
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.className = "action-button danger";
-    deleteBtn.textContent = "Löschen";
-    deleteBtn.addEventListener("click", () => unsubscribeWebnovel(subscription));
-    actions.appendChild(deleteBtn);
-
-    card.appendChild(actions);
+    // Cards stay slim; details and all actions live in the detail overlay.
+    card.classList.add("is-clickable");
+    card.addEventListener("click", () => openWebnovelDetail(subscription));
     webnovelList.appendChild(card);
   });
 }
@@ -7516,4 +7547,282 @@ function initWebnovels() {
       applyWebnovelSchedule();
     });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Settings sub-tabs
+// ---------------------------------------------------------------------------
+
+const settingsTabsKey = "mediavault.settingsTab";
+const settingsTabsBar = document.getElementById("settings-tabs");
+
+function setActiveSettingsTab(name) {
+  const panes = document.querySelectorAll("[data-settings-pane]");
+  let found = false;
+  panes.forEach((pane) => {
+    const isActive = pane.dataset.settingsPane === name;
+    pane.classList.toggle("is-active", isActive);
+    found = found || isActive;
+  });
+  if (!found && panes.length) {
+    panes[0].classList.add("is-active");
+    name = panes[0].dataset.settingsPane;
+  }
+  settingsTabsBar?.querySelectorAll("[data-settings-tab]").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.settingsTab === name);
+  });
+  localStorage.setItem(settingsTabsKey, name);
+}
+
+settingsTabsBar?.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-settings-tab]");
+  if (tab) {
+    setActiveSettingsTab(tab.dataset.settingsTab);
+  }
+});
+
+setActiveSettingsTab(localStorage.getItem(settingsTabsKey) || "general");
+
+// ---------------------------------------------------------------------------
+// Add to playlist (from the collections inspector)
+// ---------------------------------------------------------------------------
+
+const playlistPickDialog = document.getElementById("playlist-pick-dialog");
+const playlistPickList = document.getElementById("playlist-pick-list");
+const playlistPickFile = document.getElementById("playlist-pick-file");
+const playlistPickNewName = document.getElementById("playlist-pick-new-name");
+const playlistPickCreate = document.getElementById("playlist-pick-create");
+const playlistPickCancel = document.getElementById("playlist-pick-cancel");
+const inspectorAddPlaylist = document.getElementById("inspector-add-playlist");
+
+let playlistPickPath = "";
+
+async function savePlaylistObject(playlist) {
+  const root = getVaultRoot();
+  playlist.updated_at = Math.floor(Date.now() / 1000);
+  await fetch("mediavault://localhost/api/playlist/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vault_root: root, playlist }),
+  });
+}
+
+async function addPathToPlaylist(playlist, vaultPath) {
+  if (playlist.items.includes(vaultPath)) {
+    if (statusStrip) {
+      statusStrip.textContent = `Bereits in „${playlist.name}“ enthalten.`;
+    }
+    hideModalCards();
+    return;
+  }
+  playlist.items.push(vaultPath);
+  try {
+    await savePlaylistObject(playlist);
+    if (statusStrip) {
+      statusStrip.textContent = `Zu „${playlist.name}“ hinzugefügt (${playlist.items.length} Einträge).`;
+    }
+  } catch (error) {
+    if (statusStrip) {
+      statusStrip.textContent = `Hinzufügen fehlgeschlagen: ${error.message}`;
+    }
+  }
+  hideModalCards();
+  await loadPlaylists();
+}
+
+async function openPlaylistPicker(vaultPath) {
+  if (!playlistPickDialog || !vaultPath) {
+    return;
+  }
+  playlistPickPath = vaultPath;
+  if (playlistPickFile) {
+    const stem = vaultPath.split("/").pop() || vaultPath;
+    playlistPickFile.textContent = stem;
+    playlistPickFile.title = vaultPath;
+  }
+  await loadPlaylists();
+  if (playlistPickList) {
+    clearNode(playlistPickList);
+    const manual = activePlaylists.filter((pl) => (pl.kind ?? "manual") === "manual");
+    if (!manual.length) {
+      const hint = document.createElement("p");
+      hint.className = "field-hint";
+      hint.textContent = "Noch keine Wiedergabeliste vorhanden — unten eine neue erstellen.";
+      playlistPickList.appendChild(hint);
+    }
+    manual.forEach((pl) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "action-button playlist-pick-row";
+      row.textContent = `${pl.name} (${pl.items?.length ?? 0})`;
+      row.addEventListener("click", () => addPathToPlaylist(pl, playlistPickPath));
+      playlistPickList.appendChild(row);
+    });
+  }
+  if (playlistPickNewName) {
+    playlistPickNewName.value = "";
+  }
+  showModalCard(playlistPickDialog);
+}
+
+inspectorAddPlaylist?.addEventListener("click", () => {
+  const item = inspectorSelection?.item;
+  const vaultPath = item?.target_path || item?.source_path || "";
+  if (vaultPath) {
+    openPlaylistPicker(vaultPath);
+  }
+});
+
+playlistPickCancel?.addEventListener("click", hideModalCards);
+
+playlistPickCreate?.addEventListener("click", async () => {
+  const name = (playlistPickNewName?.value ?? "").trim();
+  if (!name || !playlistPickPath) {
+    return;
+  }
+  const playlist = {
+    id: `pl_${Date.now()}`,
+    name,
+    kind: "manual",
+    items: [],
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+  await addPathToPlaylist(playlist, playlistPickPath);
+});
+
+// ---------------------------------------------------------------------------
+// Webnovel detail overlay
+// ---------------------------------------------------------------------------
+
+const webnovelDetail = document.getElementById("webnovel-detail");
+const webnovelDetailClose = document.getElementById("webnovel-detail-close");
+
+function closeWebnovelDetail() {
+  if (webnovelDetail) {
+    webnovelDetail.hidden = true;
+  }
+}
+
+webnovelDetailClose?.addEventListener("click", closeWebnovelDetail);
+webnovelDetail?.addEventListener("click", (event) => {
+  if (event.target === webnovelDetail) {
+    closeWebnovelDetail();
+  }
+});
+
+function webnovelDetailBadge(text, extraClass = "") {
+  const badge = document.createElement("span");
+  badge.className = `webnovel-badge ${extraClass}`.trim();
+  badge.textContent = text;
+  return badge;
+}
+
+function openWebnovelDetail(subscription) {
+  if (!webnovelDetail) return;
+
+  const cover = document.getElementById("webnovel-detail-cover");
+  if (cover) {
+    if (subscription.cover_path) {
+      const root = getVaultRoot();
+      cover.src = `/api/media-file?path=${encodeURIComponent(subscription.cover_path)}${
+        root ? `&root=${encodeURIComponent(root)}` : ""
+      }`;
+      cover.hidden = false;
+    } else {
+      cover.hidden = true;
+      cover.removeAttribute("src");
+    }
+  }
+
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) {
+      node.textContent = value ?? "";
+      node.hidden = !value;
+    }
+  };
+  setText("webnovel-detail-title", subscription.title || subscription.url);
+  setText("webnovel-detail-author", subscription.author);
+  setText(
+    "webnovel-detail-rating",
+    subscription.rating_external ? `★ ${subscription.rating_external.toFixed(2)} (Goodreads)` : "",
+  );
+  setText("webnovel-detail-description", subscription.description);
+  const genreParts = [...(subscription.genres ?? []), ...(subscription.tags ?? [])];
+  setText("webnovel-detail-genres", genreParts.length ? genreParts.join(" · ") : "");
+  setText(
+    "webnovel-detail-chapters",
+    `${subscription.downloaded_chapters}/${subscription.known_chapters} Kapitel geladen · ` +
+      `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.last_check_unix)}`,
+  );
+  setText("webnovel-detail-error", subscription.last_error);
+
+  const badges = document.getElementById("webnovel-detail-badges");
+  if (badges) {
+    clearNode(badges);
+    badges.appendChild(webnovelDetailBadge(subscription.source));
+    const pending =
+      (subscription.known_chapters ?? 0) - (subscription.downloaded_chapters ?? 0);
+    if (pending > 0) badges.appendChild(webnovelDetailBadge(`${pending} neu`, "is-new"));
+    if (subscription.completed) {
+      badges.appendChild(webnovelDetailBadge("abgeschlossen", "is-completed"));
+    }
+    if (!subscription.enabled) badges.appendChild(webnovelDetailBadge("pausiert", "is-paused"));
+    if (subscription.last_error) badges.appendChild(webnovelDetailBadge("Fehler", "is-error"));
+  }
+
+  const links = document.getElementById("webnovel-detail-links");
+  if (links) {
+    clearNode(links);
+    const linkButton = (label, url) => {
+      if (!url) return;
+      const button = document.createElement("button");
+      button.className = "action-button";
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        fetch(`/api/open-url?url=${encodeURIComponent(url)}`).catch(() => {});
+      });
+      links.appendChild(button);
+    };
+    linkButton("Quelle öffnen", subscription.url);
+    linkButton("Goodreads", subscription.goodreads_url);
+    linkButton("AniList", subscription.anilist_url);
+  }
+
+  const actions = document.getElementById("webnovel-detail-actions");
+  if (actions) {
+    clearNode(actions);
+    const actionButton = (label, extraClass, handler) => {
+      const button = document.createElement("button");
+      button.className = `action-button ${extraClass}`.trim();
+      button.textContent = label;
+      button.addEventListener("click", handler);
+      actions.appendChild(button);
+    };
+    actionButton("Jetzt prüfen", "primary", () => {
+      closeWebnovelDetail();
+      triggerWebnovelCheck("manual", subscription.id);
+    });
+    actionButton(
+      subscription.completed ? "Als laufend markieren" : "Als abgeschlossen markieren",
+      "",
+      async () => {
+        closeWebnovelDetail();
+        await updateWebnovelSubscription(subscription.id, {
+          completed: !subscription.completed,
+        });
+      },
+    );
+    actionButton(subscription.enabled ? "Pausieren" : "Fortsetzen", "", async () => {
+      closeWebnovelDetail();
+      await updateWebnovelSubscription(subscription.id, { enabled: !subscription.enabled });
+    });
+    actionButton("Löschen", "danger", async () => {
+      closeWebnovelDetail();
+      await unsubscribeWebnovel(subscription);
+    });
+  }
+
+  webnovelDetail.hidden = false;
 }

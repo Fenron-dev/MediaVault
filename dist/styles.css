@@ -344,6 +344,8 @@ body:not(.is-vault-open) .app-shell {
 .workspace {
   min-width: 0;
   padding: 24px;
+  /* Anchor for .workspace-modal overlays (novel detail etc.). */
+  position: relative;
 }
 
 .eyebrow {
@@ -2398,4 +2400,141 @@ h3 {
 
 .webnovel-list.is-list-view .webnovel-card-actions {
   flex-wrap: nowrap;
+}
+
+/* --- Settings sub-tabs --- */
+
+.settings-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1.25rem;
+}
+
+.settings-tab {
+  font-size: 0.85rem;
+  padding: 0.35rem 0.9rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.settings-tab.is-active {
+  border-color: rgba(94, 234, 155, 0.7);
+  color: #5eea9b;
+}
+
+.settings-pane {
+  display: none;
+}
+
+.settings-pane.is-active {
+  display: block;
+}
+
+/* Airier single-column settings panels. */
+.settings-pane .panel-grid.single {
+  max-width: 720px;
+}
+
+/* --- Dashboard: recent items grouped by media type --- */
+
+.dashboard-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.dashboard-group-label {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+  margin: 0.5rem 0 0.25rem;
+}
+
+/* --- Collections: visible break before "Zuletzt angesehen" --- */
+
+.collection-recent-divider {
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  margin: 1.1rem 0 0.75rem;
+}
+
+.collection-recent-label {
+  margin-bottom: 0.4rem;
+}
+
+/* --- Webnovels: single-column layout + detail overlay --- */
+
+.webnovel-subscribe-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.webnovel-subscribe-row input {
+  flex: 1;
+  min-width: 260px;
+}
+
+.webnovel-library {
+  margin-top: 1rem;
+}
+
+.workspace-modal {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 12, 14, 0.82);
+  backdrop-filter: blur(4px);
+  z-index: 40;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 2rem;
+  overflow-y: auto;
+}
+
+.workspace-modal[hidden] {
+  display: none;
+}
+
+.workspace-modal-card {
+  position: relative;
+  width: min(920px, 100%);
+  background: var(--panel, #14171a);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  padding: 1.5rem;
+}
+
+.workspace-modal-close {
+  position: absolute;
+  top: 0.9rem;
+  right: 0.9rem;
+}
+
+.webnovel-detail-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 1.5rem;
+}
+
+.webnovel-detail-side img {
+  width: 100%;
+  border-radius: 10px;
+  margin-bottom: 0.75rem;
+}
+
+.webnovel-detail-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+@media (max-width: 800px) {
+  .webnovel-detail-grid {
+    grid-template-columns: 1fr;
+  }
 }

@@ -249,6 +249,10 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
             StatusCode::OK,
             &build_list_subtitles_response(request.uri().query()),
         ),
+        "/api/open-url" => json_response(
+            StatusCode::OK,
+            &build_open_url_response(request.uri().query()),
+        ),
         "/api/webnovel/list" => json_response(
             StatusCode::OK,
             &build_webnovel_list_response(request.uri().query()),
@@ -5137,6 +5141,21 @@ struct WebnovelSubscriptionSummary {
     title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    genres: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goodreads_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anilist_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rating_external: Option<f32>,
+    /// Vault-relative path of the cached cover image, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_path: Option<String>,
     completed: bool,
     enabled: bool,
     known_chapters: usize,
@@ -5148,13 +5167,29 @@ struct WebnovelSubscriptionSummary {
 }
 
 impl WebnovelSubscriptionSummary {
-    fn from_subscription(subscription: &Subscription) -> Self {
+    fn from_subscription(subscription: &Subscription, vault: &Vault) -> Self {
+        // Detail views want the cover; resolve the cached file (if any) to a
+        // vault-relative path the frontend can feed into /api/media-file.
+        let cover_path = load_novel_cover_path(&webnovel_folder(vault, &subscription.title))
+            .and_then(|absolute| {
+                vault
+                    .relative_from_absolute(&absolute)
+                    .ok()
+                    .map(|relative| relative.to_string())
+            });
         Self {
             id: subscription.id.clone(),
             url: subscription.url.clone(),
             source: subscription.source.clone(),
             title: subscription.title.clone(),
             author: subscription.author.clone(),
+            description: subscription.description.clone(),
+            genres: subscription.genres.clone(),
+            tags: subscription.tags.clone(),
+            goodreads_url: subscription.goodreads_url.clone(),
+            anilist_url: subscription.anilist_url.clone(),
+            rating_external: subscription.rating_external,
+            cover_path,
             completed: subscription.completed,
             enabled: subscription.enabled,
             known_chapters: subscription.known_chapters.len(),
@@ -5188,7 +5223,9 @@ fn build_webnovel_list_response(query: Option<&str>) -> WebnovelListResponse {
         Ok(subscriptions) => WebnovelListResponse {
             subscriptions: subscriptions
                 .iter()
-                .map(WebnovelSubscriptionSummary::from_subscription)
+                .map(|subscription| {
+                    WebnovelSubscriptionSummary::from_subscription(subscription, &vault)
+                })
                 .collect(),
             error: None,
         },
@@ -5260,7 +5297,9 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
     match load_subscription(&vault.system_dir(), &id) {
         Ok(Some(existing)) => {
             return WebnovelSubscribeResponse {
-                subscription: Some(WebnovelSubscriptionSummary::from_subscription(&existing)),
+                subscription: Some(WebnovelSubscriptionSummary::from_subscription(
+                    &existing, &vault,
+                )),
                 already_subscribed: true,
                 error: None,
             }
@@ -5302,6 +5341,7 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
         Ok(()) => WebnovelSubscribeResponse {
             subscription: Some(WebnovelSubscriptionSummary::from_subscription(
                 &subscription,
+                &vault,
             )),
             already_subscribed: false,
             error: None,
@@ -6091,4 +6131,35 @@ fn write_webnovel_sidecar(
     let sidecar_relative = sidecar_path_for(&relative)?;
     fs::write(vault.root().join(sidecar_relative.as_path()), yaml).map_err(VaultError::from)?;
     Ok(())
+}
+
+/// Opens an external web link in the system browser.
+///
+/// Only `http`/`https` URLs are accepted — anything else (file paths, custom
+/// schemes) is rejected so this endpoint cannot be abused to launch local
+/// programs or leak files.
+fn build_open_url_response(query: Option<&str>) -> WebnovelSimpleResponse {
+    let url = match query.and_then(|q| extract_query_value(q, "url")) {
+        Some(url) => url,
+        None => return WebnovelSimpleResponse::error("missing url"),
+    };
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return WebnovelSimpleResponse::error("Nur http/https-Links erlaubt.");
+    }
+
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+    match result {
+        Ok(_) => WebnovelSimpleResponse::ok(),
+        Err(error) => {
+            WebnovelSimpleResponse::error(format!("Browser-Start fehlgeschlagen: {error}"))
+        }
+    }
 }
