@@ -2252,3 +2252,150 @@ h3 {
     grid-template-columns: 1fr;
   }
 }
+
+/* --- Webnovel subscriptions --- */
+
+.check-field {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.webnovel-list {
+  gap: 0.75rem;
+}
+
+.webnovel-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  padding: 0.75rem 0.9rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.webnovel-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.webnovel-card-title {
+  font-weight: 600;
+}
+
+.webnovel-card-meta {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.webnovel-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  opacity: 0.85;
+}
+
+.webnovel-badge.is-new {
+  border-color: rgba(94, 234, 155, 0.6);
+  color: #5eea9b;
+}
+
+.webnovel-badge.is-error {
+  border-color: rgba(255, 120, 120, 0.6);
+  color: #ff8b8b;
+}
+
+.webnovel-badge.is-paused,
+.webnovel-badge.is-completed {
+  opacity: 0.6;
+}
+
+.webnovel-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.webnovel-card-actions .action-button {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.6rem;
+}
+
+.webnovel-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.webnovel-progress-bar {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f8cff, #5eea9b);
+  transition: width 0.4s ease;
+}
+
+.webnovel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+}
+
+.webnovel-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.webnovel-chip {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.webnovel-chip.is-active {
+  border-color: rgba(94, 234, 155, 0.7);
+  color: #5eea9b;
+}
+
+/* Compact list view: cards collapse to single rows. */
+.webnovel-list.is-list-view .webnovel-card {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.4rem 0.75rem;
+}
+
+.webnovel-list.is-list-view .webnovel-card-head {
+  flex: 1;
+  min-width: 0;
+}
+
+.webnovel-list.is-list-view .webnovel-card-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.webnovel-list.is-list-view .webnovel-card-meta {
+  margin: 0;
+  white-space: nowrap;
+}
+
+.webnovel-list.is-list-view .webnovel-card-actions {
+  flex-wrap: nowrap;
+}

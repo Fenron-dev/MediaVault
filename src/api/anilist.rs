@@ -156,6 +156,34 @@ query ($search: String!, $isAdult: Boolean) {
 }
 "#;
 
+/// Compact query for light-novel lookups (type MANGA, format NOVEL).
+const ANILIST_NOVEL_QUERY: &str = r#"
+query ($search: String!) {
+  Page(page: 1, perPage: 1) {
+    media(search: $search, type: MANGA, format_in: [NOVEL], sort: SEARCH_MATCH) {
+      id
+      siteUrl
+      title {
+        romaji
+        english
+        native
+      }
+      description(asHtml: false)
+      status
+      genres
+      averageScore
+      tags {
+        name
+      }
+      coverImage {
+        extraLarge
+        large
+      }
+    }
+  }
+}
+"#;
+
 const ANILIST_MEDIA_SEARCH_QUERY: &str = r#"
 query ($search: String!, $isAdult: Boolean, $page: Int, $perPage: Int) {
   Page(page: $page, perPage: $perPage) {
@@ -368,6 +396,74 @@ impl AniListClient {
             }
         })
         .to_string()
+    }
+
+    /// Searches AniList for a light novel and returns the best match.
+    ///
+    /// Uses `type: MANGA, format_in: [NOVEL]` — AniList files light novels
+    /// under the manga type with a dedicated NOVEL format.
+    pub fn search_novel(&self, search: &str) -> Result<Option<AniListNovelMetadata>> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(12))
+            .build()
+            .map_err(|error| VaultError::ExternalApi(error.to_string()))?;
+
+        let mut request = client
+            .post(&self.endpoint)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(access_token) = self.access_token.as_ref() {
+            request = request.header(AUTHORIZATION, format!("Bearer {access_token}"));
+        }
+
+        let body = serde_json::json!({
+            "query": ANILIST_NOVEL_QUERY,
+            "variables": { "search": search }
+        })
+        .to_string();
+
+        let response = request
+            .body(body)
+            .send()
+            .map_err(|error| VaultError::ExternalApi(error.to_string()))?;
+        if !response.status().is_success() {
+            return Err(VaultError::ExternalApi(format!(
+                "http {} from AniList",
+                response.status()
+            )));
+        }
+
+        let payload: AniListNovelResponse = response
+            .json()
+            .map_err(|error| VaultError::ExternalApi(error.to_string()))?;
+        let media = payload
+            .data
+            .and_then(|data| data.page)
+            .map(|page| page.media)
+            .unwrap_or_default()
+            .into_iter()
+            .next();
+
+        Ok(media.map(|raw| AniListNovelMetadata {
+            anilist_id: raw.id,
+            anilist_url: raw.site_url,
+            title: raw
+                .title
+                .as_ref()
+                .and_then(|title| title.english.clone().or_else(|| title.romaji.clone())),
+            description: raw.description,
+            status: raw.status,
+            genres: raw.genres.unwrap_or_default(),
+            tags: raw
+                .tags
+                .unwrap_or_default()
+                .into_iter()
+                .map(|tag| tag.name)
+                .collect(),
+            average_score: raw.average_score,
+            cover_url: raw
+                .cover_image
+                .and_then(|cover| cover.extra_large.or(cover.large)),
+        }))
     }
 
     /// Searches AniList for an anime title and returns the best match.
@@ -1139,6 +1235,86 @@ impl AniListTitles {
             .or(self.romaji.as_deref())
             .or(self.native.as_deref())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Novel lookup types
+// ---------------------------------------------------------------------------
+
+/// Light-novel metadata from AniList (compact projection for webnovels).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AniListNovelMetadata {
+    /// AniList media ID.
+    pub anilist_id: u32,
+    /// AniList detail URL.
+    pub anilist_url: Option<String>,
+    /// Preferred display title (english, then romaji).
+    pub title: Option<String>,
+    /// Description text.
+    pub description: Option<String>,
+    /// AniList status string (RELEASING, FINISHED, …).
+    pub status: Option<String>,
+    /// Genre names.
+    pub genres: Vec<String>,
+    /// Tag names.
+    pub tags: Vec<String>,
+    /// Average community score (0-100).
+    pub average_score: Option<f32>,
+    /// Best available cover image URL.
+    pub cover_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelResponse {
+    data: Option<AniListNovelData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelData {
+    #[serde(rename = "Page")]
+    page: Option<AniListNovelPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelPage {
+    #[serde(default)]
+    media: Vec<AniListNovelRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelRaw {
+    id: u32,
+    #[serde(rename = "siteUrl")]
+    site_url: Option<String>,
+    title: Option<AniListNovelTitle>,
+    description: Option<String>,
+    status: Option<String>,
+    genres: Option<Vec<String>>,
+    #[serde(rename = "averageScore")]
+    average_score: Option<f32>,
+    tags: Option<Vec<AniListNovelTag>>,
+    #[serde(rename = "coverImage")]
+    cover_image: Option<AniListNovelCover>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelTitle {
+    romaji: Option<String>,
+    english: Option<String>,
+    #[allow(dead_code)]
+    native: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelTag {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AniListNovelCover {
+    #[serde(rename = "extraLarge")]
+    extra_large: Option<String>,
+    large: Option<String>,
 }
 
 #[cfg(test)]

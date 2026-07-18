@@ -223,6 +223,7 @@ const labels = {
   review: "Prüfung",
   collections: "Sammlungen",
   playlists: "Wiedergabelisten",
+  webnovels: "Webnovels",
   settings: "Einstellungen",
 };
 
@@ -239,6 +240,7 @@ const mediaTypeOptions = [
   ["music-album", "Album"],
   ["book", "Buch"],
   ["ebook", "E-Book"],
+  ["webnovel", "Webnovel"],
   ["manga", "Manga"],
   ["comic", "Comic"],
   ["audiobook", "Hörbuch"],
@@ -512,6 +514,7 @@ async function openVault(path, name = "") {
   document.body.classList.add("is-vault-open");
   syncVaultHint();
   loadPlan();
+  initWebnovels();
 }
 
 async function bootstrapVault() {
@@ -4518,7 +4521,6 @@ function propertyEntriesFor(value) {
     ["narrator", item.narrator],
     ["publisher", item.publisher],
     ["runtime_minutes", item.runtime_minutes],
-    ["series_title", item.series_title],
     ["series_sequence", item.series_sequence],
   ].filter(([, entryValue]) => {
     if (Array.isArray(entryValue)) {
@@ -6979,3 +6981,539 @@ bootstrapVault().catch(() => {
   renderRecentVaults();
   syncVaultHint();
 });
+
+// ---------------------------------------------------------------------------
+// Webnovel subscriptions
+// ---------------------------------------------------------------------------
+
+const webnovelSettingsKey = "mediavault.webnovelSettings";
+const WEBNOVEL_MIN_INTERVAL_MINUTES = 15;
+const WEBNOVEL_DEFAULT_INTERVAL_MINUTES = 360;
+const WEBNOVEL_START_CHECK_DELAY_MS = 5000;
+const WEBNOVEL_JOB_POLL_MS = 1000;
+
+const webnovelUrlInput = document.getElementById("webnovel-url-input");
+const webnovelSubscribeBtn = document.getElementById("webnovel-subscribe-btn");
+const webnovelCheckAllBtn = document.getElementById("webnovel-check-all-btn");
+const webnovelFeedback = document.getElementById("webnovel-feedback");
+const webnovelJobProgress = document.getElementById("webnovel-job-progress");
+const webnovelJobText = document.getElementById("webnovel-job-text");
+const webnovelJobBar = document.getElementById("webnovel-job-bar");
+const webnovelList = document.getElementById("webnovel-list");
+const webnovelListEmpty = document.getElementById("webnovel-list-empty");
+const webnovelDelayInput = document.getElementById("webnovel-delay-input");
+const webnovelGoodreadsMode = document.getElementById("webnovel-goodreads-mode");
+const webnovelFilters = document.getElementById("webnovel-filters");
+const webnovelViewToggle = document.getElementById("webnovel-view-toggle");
+const webnovelCheckOnStart = document.getElementById("webnovel-check-on-start");
+const webnovelPeriodicEnabled = document.getElementById("webnovel-periodic-enabled");
+const webnovelIntervalInput = document.getElementById("webnovel-interval-input");
+const webnovelBuildComplete = document.getElementById("webnovel-build-complete");
+const webnovelBuildBatch = document.getElementById("webnovel-build-batch");
+
+const WEBNOVEL_MIN_DELAY_S = 0.5;
+const WEBNOVEL_MAX_DELAY_S = 5;
+const WEBNOVEL_DEFAULT_DELAY_S = 1.5;
+
+let webnovelCheckRunning = false;
+let webnovelActiveFilter = "all";
+let webnovelSubscriptionsCache = [];
+let webnovelIntervalTimer = null;
+let webnovelStartCheckDone = false;
+let webnovelInitialized = false;
+
+function loadWebnovelSettings() {
+  const stored = loadStoredJson(webnovelSettingsKey, {});
+  return {
+    checkOnStart: stored.checkOnStart ?? true,
+    periodicEnabled: stored.periodicEnabled ?? true,
+    intervalMinutes: Math.max(
+      WEBNOVEL_MIN_INTERVAL_MINUTES,
+      Number(stored.intervalMinutes) || WEBNOVEL_DEFAULT_INTERVAL_MINUTES,
+    ),
+    buildCompleteEpub: stored.buildCompleteEpub ?? true,
+    buildBatchEpub: stored.buildBatchEpub ?? true,
+    delaySeconds: Math.min(
+      WEBNOVEL_MAX_DELAY_S,
+      Math.max(WEBNOVEL_MIN_DELAY_S, Number(stored.delaySeconds) || WEBNOVEL_DEFAULT_DELAY_S),
+    ),
+    listView: stored.listView ?? false,
+    goodreadsMode: ["off", "fill", "override"].includes(stored.goodreadsMode)
+      ? stored.goodreadsMode
+      : "fill",
+  };
+}
+
+function saveWebnovelSettings(settings) {
+  saveStoredJson(webnovelSettingsKey, settings);
+}
+
+function syncWebnovelSettingsForm() {
+  const settings = loadWebnovelSettings();
+  if (webnovelCheckOnStart) webnovelCheckOnStart.checked = settings.checkOnStart;
+  if (webnovelPeriodicEnabled) webnovelPeriodicEnabled.checked = settings.periodicEnabled;
+  if (webnovelIntervalInput) webnovelIntervalInput.value = String(settings.intervalMinutes);
+  if (webnovelBuildComplete) webnovelBuildComplete.checked = settings.buildCompleteEpub;
+  if (webnovelBuildBatch) webnovelBuildBatch.checked = settings.buildBatchEpub;
+  if (webnovelDelayInput) webnovelDelayInput.value = String(settings.delaySeconds);
+  if (webnovelGoodreadsMode) webnovelGoodreadsMode.value = settings.goodreadsMode;
+}
+
+function readWebnovelSettingsForm() {
+  const settings = loadWebnovelSettings();
+  if (webnovelCheckOnStart) settings.checkOnStart = webnovelCheckOnStart.checked;
+  if (webnovelPeriodicEnabled) settings.periodicEnabled = webnovelPeriodicEnabled.checked;
+  if (webnovelIntervalInput) {
+    settings.intervalMinutes = Math.max(
+      WEBNOVEL_MIN_INTERVAL_MINUTES,
+      Number(webnovelIntervalInput.value) || WEBNOVEL_DEFAULT_INTERVAL_MINUTES,
+    );
+    webnovelIntervalInput.value = String(settings.intervalMinutes);
+  }
+  if (webnovelBuildComplete) settings.buildCompleteEpub = webnovelBuildComplete.checked;
+  if (webnovelBuildBatch) settings.buildBatchEpub = webnovelBuildBatch.checked;
+  if (webnovelDelayInput) {
+    settings.delaySeconds = Math.min(
+      WEBNOVEL_MAX_DELAY_S,
+      Math.max(
+        WEBNOVEL_MIN_DELAY_S,
+        Number(webnovelDelayInput.value) || WEBNOVEL_DEFAULT_DELAY_S,
+      ),
+    );
+    webnovelDelayInput.value = String(settings.delaySeconds);
+  }
+  if (webnovelGoodreadsMode) settings.goodreadsMode = webnovelGoodreadsMode.value;
+  saveWebnovelSettings(settings);
+  return settings;
+}
+
+function setWebnovelFeedback(message, isError = false) {
+  if (!webnovelFeedback) return;
+  webnovelFeedback.textContent = message ?? "";
+  webnovelFeedback.classList.toggle("is-error", Boolean(isError));
+}
+
+async function webnovelApi(path, options = {}) {
+  const response = await fetch(path, options);
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error || `HTTP ${response.status}`);
+  }
+  return payload ?? {};
+}
+
+function webnovelRootQuery() {
+  const root = getVaultRoot();
+  return root ? `&root=${encodeURIComponent(root)}` : "";
+}
+
+async function refreshWebnovelList() {
+  if (!webnovelList) return;
+  try {
+    const payload = await webnovelApi(`/api/webnovel/list?_=${Date.now()}${webnovelRootQuery()}`);
+    if (payload.error) {
+      setWebnovelFeedback(payload.error, true);
+      return;
+    }
+    webnovelSubscriptionsCache = payload.subscriptions ?? [];
+    renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+  } catch (error) {
+    setWebnovelFeedback(`Abos konnten nicht geladen werden: ${error.message}`, true);
+  }
+}
+
+function formatWebnovelTimestamp(unixSeconds) {
+  if (!unixSeconds) return "noch nie";
+  try {
+    return new Date(unixSeconds * 1000).toLocaleString("de-DE", {
+      dateStyle: "short",
+      timeStyle: "short",
+    });
+  } catch {
+    return "unbekannt";
+  }
+}
+
+function applyWebnovelFilter(subscriptions) {
+  switch (webnovelActiveFilter) {
+    case "ongoing":
+      return subscriptions.filter((sub) => !sub.completed && sub.enabled);
+    case "completed":
+      return subscriptions.filter((sub) => sub.completed);
+    case "paused":
+      return subscriptions.filter((sub) => !sub.enabled);
+    case "error":
+      return subscriptions.filter((sub) => Boolean(sub.last_error));
+    case "new":
+      return subscriptions.filter(
+        (sub) => (sub.known_chapters ?? 0) - (sub.downloaded_chapters ?? 0) > 0,
+      );
+    default:
+      return subscriptions;
+  }
+}
+
+function setWebnovelFilter(filter) {
+  webnovelActiveFilter = filter;
+  if (webnovelFilters) {
+    webnovelFilters.querySelectorAll("[data-webnovel-filter]").forEach((chip) => {
+      chip.classList.toggle("is-active", chip.dataset.webnovelFilter === filter);
+    });
+  }
+  renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+}
+
+function applyWebnovelViewMode() {
+  const settings = loadWebnovelSettings();
+  if (webnovelList) {
+    webnovelList.classList.toggle("is-list-view", settings.listView);
+  }
+  if (webnovelViewToggle) {
+    webnovelViewToggle.textContent = settings.listView ? "Kartenansicht" : "Listenansicht";
+  }
+}
+
+function toggleWebnovelViewMode() {
+  const settings = loadWebnovelSettings();
+  settings.listView = !settings.listView;
+  saveWebnovelSettings(settings);
+  applyWebnovelViewMode();
+}
+
+function renderWebnovelList(subscriptions) {
+  if (!webnovelList) return;
+  clearNode(webnovelList);
+  if (webnovelListEmpty) {
+    webnovelListEmpty.hidden = subscriptions.length > 0;
+    webnovelListEmpty.textContent = webnovelSubscriptionsCache.length
+      ? "Keine Abos für diesen Filter."
+      : "Noch keine Abos vorhanden.";
+  }
+
+  subscriptions.forEach((subscription) => {
+    const card = document.createElement("article");
+    card.className = "webnovel-card";
+
+    const head = document.createElement("div");
+    head.className = "webnovel-card-head";
+    const title = document.createElement("span");
+    title.className = "webnovel-card-title";
+    title.textContent = subscription.title || subscription.url;
+    head.appendChild(title);
+
+    const badges = document.createElement("span");
+    const sourceBadge = document.createElement("span");
+    sourceBadge.className = "webnovel-badge";
+    sourceBadge.textContent = subscription.source;
+    badges.appendChild(sourceBadge);
+
+    const pendingChapters =
+      (subscription.known_chapters ?? 0) - (subscription.downloaded_chapters ?? 0);
+    if (pendingChapters > 0) {
+      const newBadge = document.createElement("span");
+      newBadge.className = "webnovel-badge is-new";
+      newBadge.textContent = `${pendingChapters} neu`;
+      badges.appendChild(newBadge);
+    }
+    if (subscription.completed) {
+      const doneBadge = document.createElement("span");
+      doneBadge.className = "webnovel-badge is-completed";
+      doneBadge.textContent = "abgeschlossen";
+      badges.appendChild(doneBadge);
+    }
+    if (!subscription.enabled) {
+      const pausedBadge = document.createElement("span");
+      pausedBadge.className = "webnovel-badge is-paused";
+      pausedBadge.textContent = "pausiert";
+      badges.appendChild(pausedBadge);
+    }
+    if (subscription.last_error) {
+      const errorBadge = document.createElement("span");
+      errorBadge.className = "webnovel-badge is-error";
+      errorBadge.textContent = "Fehler";
+      errorBadge.title = subscription.last_error;
+      badges.appendChild(errorBadge);
+    }
+    head.appendChild(badges);
+    card.appendChild(head);
+
+    const meta = document.createElement("p");
+    meta.className = "webnovel-card-meta";
+    const authorPart = subscription.author ? `${subscription.author} · ` : "";
+    meta.textContent =
+      `${authorPart}${subscription.downloaded_chapters}/${subscription.known_chapters} Kapitel · ` +
+      `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.last_check_unix)}`;
+    card.appendChild(meta);
+
+    if (subscription.last_error) {
+      const errorLine = document.createElement("p");
+      errorLine.className = "webnovel-card-meta is-error";
+      errorLine.textContent = subscription.last_error;
+      card.appendChild(errorLine);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "webnovel-card-actions";
+
+    const checkBtn = document.createElement("button");
+    checkBtn.className = "action-button";
+    checkBtn.textContent = "Jetzt prüfen";
+    checkBtn.addEventListener("click", () => triggerWebnovelCheck("manual", subscription.id));
+    actions.appendChild(checkBtn);
+
+    const completedBtn = document.createElement("button");
+    completedBtn.className = "action-button";
+    completedBtn.textContent = subscription.completed
+      ? "Als laufend markieren"
+      : "Als abgeschlossen markieren";
+    completedBtn.addEventListener("click", () =>
+      updateWebnovelSubscription(subscription.id, { completed: !subscription.completed }),
+    );
+    actions.appendChild(completedBtn);
+
+    const pauseBtn = document.createElement("button");
+    pauseBtn.className = "action-button";
+    pauseBtn.textContent = subscription.enabled ? "Pausieren" : "Fortsetzen";
+    pauseBtn.addEventListener("click", () =>
+      updateWebnovelSubscription(subscription.id, { enabled: !subscription.enabled }),
+    );
+    actions.appendChild(pauseBtn);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "action-button danger";
+    deleteBtn.textContent = "Löschen";
+    deleteBtn.addEventListener("click", () => unsubscribeWebnovel(subscription));
+    actions.appendChild(deleteBtn);
+
+    card.appendChild(actions);
+    webnovelList.appendChild(card);
+  });
+}
+
+async function subscribeWebnovel() {
+  const url = (webnovelUrlInput?.value ?? "").trim();
+  if (!url) {
+    setWebnovelFeedback("Bitte eine Novel-URL eingeben.", true);
+    return;
+  }
+  setWebnovelFeedback("Novel wird abgerufen …");
+  if (webnovelSubscribeBtn) webnovelSubscribeBtn.disabled = true;
+  try {
+    const payload = await webnovelApi("/api/webnovel/subscribe", {
+      method: "POST",
+      body: JSON.stringify({ url, root: getVaultRoot() || undefined }),
+    });
+    if (payload.error) {
+      setWebnovelFeedback(payload.error, true);
+      return;
+    }
+    const title = payload.subscription?.title ?? "Novel";
+    if (payload.already_subscribed) {
+      setWebnovelFeedback(`„${title}“ ist bereits abonniert.`);
+    } else {
+      setWebnovelFeedback(
+        `„${title}“ abonniert (${payload.subscription?.known_chapters ?? 0} Kapitel gefunden). ` +
+          "Download startet …",
+      );
+      if (webnovelUrlInput) webnovelUrlInput.value = "";
+      triggerWebnovelCheck("subscribe", payload.subscription?.id);
+    }
+    await refreshWebnovelList();
+  } catch (error) {
+    setWebnovelFeedback(`Abonnieren fehlgeschlagen: ${error.message}`, true);
+  } finally {
+    if (webnovelSubscribeBtn) webnovelSubscribeBtn.disabled = false;
+  }
+}
+
+async function updateWebnovelSubscription(id, patch) {
+  try {
+    const payload = await webnovelApi("/api/webnovel/update", {
+      method: "POST",
+      body: JSON.stringify({ id, root: getVaultRoot() || undefined, ...patch }),
+    });
+    if (payload.error) {
+      setWebnovelFeedback(payload.error, true);
+    }
+    await refreshWebnovelList();
+  } catch (error) {
+    setWebnovelFeedback(`Aktualisierung fehlgeschlagen: ${error.message}`, true);
+  }
+}
+
+async function unsubscribeWebnovel(subscription) {
+  const removeFiles = window.confirm(
+    `„${subscription.title}“ abbestellen.\n\nOK = Abo UND heruntergeladene Dateien löschen.\n` +
+      "Abbrechen wählen und erneut versuchen, falls unsicher.\n\n" +
+      "Zum Behalten der Dateien unten „Abbrechen“ wählen und stattdessen pausieren.",
+  );
+  if (!removeFiles) {
+    return;
+  }
+  try {
+    const payload = await webnovelApi("/api/webnovel/unsubscribe", {
+      method: "POST",
+      body: JSON.stringify({
+        id: subscription.id,
+        keep_files: false,
+        root: getVaultRoot() || undefined,
+      }),
+    });
+    if (payload.error) {
+      setWebnovelFeedback(payload.error, true);
+    } else {
+      setWebnovelFeedback(`„${subscription.title}“ wurde entfernt.`);
+    }
+    await refreshWebnovelList();
+  } catch (error) {
+    setWebnovelFeedback(`Löschen fehlgeschlagen: ${error.message}`, true);
+  }
+}
+
+function showWebnovelJobProgress(visible) {
+  if (webnovelJobProgress) {
+    webnovelJobProgress.hidden = !visible;
+  }
+}
+
+async function triggerWebnovelCheck(reason, id = undefined) {
+  if (webnovelCheckRunning) {
+    if (reason === "manual") {
+      setWebnovelFeedback("Eine Prüfung läuft bereits.");
+    }
+    return;
+  }
+  webnovelCheckRunning = true;
+  const settings = loadWebnovelSettings();
+  try {
+    const payload = await webnovelApi("/api/webnovel/check", {
+      method: "POST",
+      body: JSON.stringify({
+        id,
+        root: getVaultRoot() || undefined,
+        buildComplete: settings.buildCompleteEpub,
+        buildBatch: settings.buildBatchEpub,
+        delayMs: Math.round(settings.delaySeconds * 1000),
+        goodreadsMode: settings.goodreadsMode,
+      }),
+    });
+    if (payload.error) {
+      if (reason === "manual" || reason === "subscribe") {
+        setWebnovelFeedback(payload.error, true);
+      }
+      return;
+    }
+    await pollWebnovelJob(payload.job_id);
+  } catch (error) {
+    if (reason === "manual" || reason === "subscribe") {
+      setWebnovelFeedback(`Prüfung fehlgeschlagen: ${error.message}`, true);
+    }
+  } finally {
+    webnovelCheckRunning = false;
+    showWebnovelJobProgress(false);
+    await refreshWebnovelList();
+  }
+}
+
+async function pollWebnovelJob(jobId) {
+  if (!jobId) return;
+  showWebnovelJobProgress(true);
+  for (;;) {
+    let payload;
+    try {
+      payload = await webnovelApi(`/api/webnovel/job?job_id=${encodeURIComponent(jobId)}`);
+    } catch {
+      break;
+    }
+    const status = payload.status;
+    if (!status) {
+      break;
+    }
+    if (webnovelJobText) {
+      const chapterPart =
+        status.total_chapters > 0
+          ? ` — Kapitel ${status.current_chapter}/${status.total_chapters}`
+          : "";
+      webnovelJobText.textContent = status.novel_title
+        ? `Prüfe „${status.novel_title}“${chapterPart} (${status.downloaded} geladen)`
+        : "Prüfe Abonnements …";
+    }
+    if (webnovelJobBar) {
+      const fraction =
+        status.total_chapters > 0 ? status.current_chapter / status.total_chapters : 0;
+      webnovelJobBar.style.width = `${Math.round(fraction * 100)}%`;
+    }
+    if (status.state !== "running") {
+      setWebnovelFeedback(status.message ?? "Prüfung abgeschlossen.", status.state === "failed");
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, WEBNOVEL_JOB_POLL_MS));
+  }
+}
+
+function applyWebnovelSchedule() {
+  const settings = loadWebnovelSettings();
+  if (webnovelIntervalTimer) {
+    clearInterval(webnovelIntervalTimer);
+    webnovelIntervalTimer = null;
+  }
+  if (settings.periodicEnabled) {
+    webnovelIntervalTimer = setInterval(
+      () => triggerWebnovelCheck("interval"),
+      settings.intervalMinutes * 60 * 1000,
+    );
+  }
+}
+
+function initWebnovels() {
+  refreshWebnovelList();
+  applyWebnovelSchedule();
+
+  const settings = loadWebnovelSettings();
+  if (settings.checkOnStart && !webnovelStartCheckDone) {
+    webnovelStartCheckDone = true;
+    // Give the startup UI a head start before hitting the network.
+    setTimeout(() => triggerWebnovelCheck("startup"), WEBNOVEL_START_CHECK_DELAY_MS);
+  }
+
+  if (webnovelInitialized) {
+    return;
+  }
+  webnovelInitialized = true;
+
+  syncWebnovelSettingsForm();
+  applyWebnovelViewMode();
+  webnovelFilters?.addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-webnovel-filter]");
+    if (chip) {
+      setWebnovelFilter(chip.dataset.webnovelFilter);
+    }
+  });
+  webnovelViewToggle?.addEventListener("click", toggleWebnovelViewMode);
+  webnovelSubscribeBtn?.addEventListener("click", subscribeWebnovel);
+  webnovelCheckAllBtn?.addEventListener("click", () => triggerWebnovelCheck("manual"));
+  webnovelUrlInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      subscribeWebnovel();
+    }
+  });
+  for (const element of [
+    webnovelCheckOnStart,
+    webnovelPeriodicEnabled,
+    webnovelIntervalInput,
+    webnovelDelayInput,
+    webnovelGoodreadsMode,
+    webnovelBuildComplete,
+    webnovelBuildBatch,
+  ]) {
+    element?.addEventListener("change", () => {
+      readWebnovelSettingsForm();
+      applyWebnovelSchedule();
+    });
+  }
+}
