@@ -6480,8 +6480,8 @@ const SOLVE_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) 
     AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
 /// How long the user gets to solve the challenge.
 const SOLVE_TIMEOUT_SECS: u64 = 240;
-/// Poll interval while waiting for the clearance cookie.
-const SOLVE_POLL_SECS: u64 = 2;
+/// Poll interval while waiting (each cycle includes one probe request).
+const SOLVE_POLL_SECS: u64 = 4;
 
 fn set_solve_state(host: &str, state: impl Into<String>) {
     if let Ok(mut states) = SOLVE_STATES.lock() {
@@ -6565,40 +6565,61 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
         .build();
     });
 
-    // Poll for the clearance cookie on a worker thread.
+    // Poll on a worker thread: adopt whatever cookies the window has and
+    // verify with a real probe request. Cloudflare sometimes waves the
+    // WebView through WITHOUT a visible challenge (no cf_clearance cookie at
+    // all) — only the probe tells us whether plain requests now pass.
     let poll_host = host.clone();
+    let probe_url = req.url.clone();
     std::thread::spawn(move || {
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(SOLVE_POLL_SECS));
-            let Some(window) = handle.get_webview_window(SOLVE_WINDOW_LABEL) else {
-                set_solve_state(&poll_host, "failed:Fenster wurde geschlossen.");
-                return;
-            };
-            if let Ok(cookies) = window.cookies_for_url(target_url.clone()) {
-                let has_clearance = cookies.iter().any(|cookie| cookie.name() == "cf_clearance");
-                if has_clearance {
-                    let header = cookies
-                        .iter()
-                        .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    set_browser_session(
-                        &poll_host,
-                        BrowserSession {
-                            cookie_header: header,
-                            user_agent: SOLVE_USER_AGENT.to_string(),
-                        },
-                    );
-                    set_solve_state(&poll_host, "done");
-                    let _ = window.close();
-                    return;
+
+            let window = handle.get_webview_window(SOLVE_WINDOW_LABEL);
+            // Adopt current cookies (any of them) + the matching user agent.
+            if let Some(active) = window.as_ref() {
+                if let Ok(cookies) = active.cookies_for_url(target_url.clone()) {
+                    if !cookies.is_empty() {
+                        let header = cookies
+                            .iter()
+                            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        set_browser_session(
+                            &poll_host,
+                            BrowserSession {
+                                cookie_header: header,
+                                user_agent: SOLVE_USER_AGENT.to_string(),
+                            },
+                        );
+                    }
                 }
+            }
+
+            // Probe: does a plain request pass now? (Runs through the polite
+            // client, so the per-host delay is respected.)
+            if solve_probe_passes(&probe_url) {
+                set_solve_state(&poll_host, "done");
+                if let Some(active) = window {
+                    let _ = active.close();
+                }
+                return;
+            }
+
+            if window.is_none() {
+                set_solve_state(
+                    &poll_host,
+                    "failed:Fenster geschlossen, Zugriff weiterhin blockiert.",
+                );
+                return;
             }
             if std::time::Instant::now() >= deadline {
                 set_solve_state(&poll_host, "failed:Zeitüberschreitung.");
-                let _ = window.close();
+                if let Some(active) = handle.get_webview_window(SOLVE_WINDOW_LABEL) {
+                    let _ = active.close();
+                }
                 return;
             }
         }
@@ -6607,6 +6628,15 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
     WebnovelSolveResponse {
         host: Some(host),
         error: None,
+    }
+}
+
+/// One plain request against the blocked URL — success means the stored
+/// session (or the now-trusted client) passes without a challenge.
+fn solve_probe_passes(url: &str) -> bool {
+    match PoliteClient::new() {
+        Ok(client) => client.get_text(url).is_ok(),
+        Err(_) => false,
     }
 }
 

@@ -19,6 +19,7 @@
 pub mod generic;
 pub mod novelfull;
 pub mod novelight;
+pub mod novelphoenix;
 pub mod novelupdates;
 pub mod royalroad;
 pub mod wordpress;
@@ -105,6 +106,8 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
         Box::new(novelfull::NovelFullSource)
     } else if host.ends_with("novelight.net") {
         Box::new(novelight::NovelightSource)
+    } else if host.ends_with("novelphoenix.com") {
+        Box::new(novelphoenix::NovelPhoenixSource)
     } else if host.ends_with("novelupdates.com") {
         Box::new(novelupdates::NovelUpdatesSource)
     } else if host.ends_with("novelarrow.com") {
@@ -115,8 +118,9 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
                      ohne eingebetteten Browser nicht abonniert werden.",
         })
     } else {
-        // empirenovel.com, readnovelmtl.com and unknown hosts run through the
-        // heuristic parser — works on most standard novel-site layouts.
+        // empirenovel.com, readnovelmtl.com, freewebnovel.com and unknown
+        // hosts run through the heuristic parser (best effort; Cloudflare
+        // sites additionally need the interactive solve window).
         Box::new(generic::GenericSource)
     }
 }

@@ -8720,3 +8720,111 @@ document.getElementById("webnovel-solve-btn")?.addEventListener("click", async (
     }
   }
 });
+
+// ---------------------------------------------------------------------------
+// Supported sources list + user bookmarks
+// ---------------------------------------------------------------------------
+
+const WEBNOVEL_SOURCES = [
+  ["RoyalRoad", "https://www.royalroad.com", "voll unterstützt"],
+  ["NovelFull", "https://novelfull.com", "voll unterstützt"],
+  ["novelfull.net", "https://novelfull.net", "voll unterstützt"],
+  ["ReadNovelFull", "https://readnovelfull.com", "voll unterstützt"],
+  ["Novgo", "https://novgo.net", "voll unterstützt"],
+  ["NovelPhoenix", "https://novelphoenix.com", "voll unterstützt"],
+  ["DivineDaoLibrary", "https://www.divinedaolibrary.com", "voll unterstützt"],
+  ["NovelUpdates", "https://www.novelupdates.com", "Sicherheitsprüfung nötig"],
+  ["FreeWebNovel", "https://freewebnovel.com", "Best-Effort + Sicherheitsprüfung"],
+  ["EmpireNovel", "https://empirenovel.com", "Best-Effort"],
+  ["ReadNovelMTL", "https://readnovelmtl.com", "Best-Effort"],
+  ["Novelight", "https://novelight.net", "nur neueste ~50 Kapitel"],
+  ["NovelArrow", "https://novelarrow.com", "nicht unterstützt (nur JavaScript)"],
+];
+
+const webnovelBookmarksKey = "mediavault.sourceBookmarks";
+
+function openExternalLink(url) {
+  fetch(`/api/open-url?url=${encodeURIComponent(url)}`).catch(() => {});
+}
+
+function renderWebnovelSources() {
+  const container = document.getElementById("webnovel-sources");
+  if (!container) return;
+  clearNode(container);
+  WEBNOVEL_SOURCES.forEach(([label, url, support]) => {
+    const row = document.createElement("div");
+    row.className = "blocklist-row";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "action-button compact";
+    link.textContent = label;
+    link.title = url;
+    link.addEventListener("click", () => openExternalLink(url));
+    const note = document.createElement("span");
+    note.className = "blocklist-note";
+    note.textContent = support;
+    row.append(link, note);
+    container.appendChild(row);
+  });
+}
+
+function loadWebnovelBookmarks() {
+  return loadStoredJson(webnovelBookmarksKey, []);
+}
+
+function renderWebnovelBookmarks() {
+  const container = document.getElementById("webnovel-bookmarks");
+  if (!container) return;
+  clearNode(container);
+  const bookmarks = loadWebnovelBookmarks();
+  if (!bookmarks.length) {
+    const hint = document.createElement("p");
+    hint.className = "field-hint";
+    hint.textContent = "Noch keine Lesezeichen.";
+    container.appendChild(hint);
+    return;
+  }
+  bookmarks.forEach((bookmark, index) => {
+    const row = document.createElement("div");
+    row.className = "blocklist-row";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "action-button compact";
+    link.textContent = bookmark.label || bookmark.url;
+    link.title = bookmark.url;
+    link.addEventListener("click", () => openExternalLink(bookmark.url));
+    const note = document.createElement("span");
+    note.className = "blocklist-note";
+    note.textContent = bookmark.url;
+    const remove = document.createElement("button");
+    remove.className = "action-button icon-button danger";
+    remove.textContent = "✕";
+    remove.title = "Lesezeichen entfernen";
+    remove.addEventListener("click", () => {
+      const updated = loadWebnovelBookmarks();
+      updated.splice(index, 1);
+      saveStoredJson(webnovelBookmarksKey, updated);
+      renderWebnovelBookmarks();
+    });
+    row.append(link, note, remove);
+    container.appendChild(row);
+  });
+}
+
+document.getElementById("webnovel-bookmark-add")?.addEventListener("click", () => {
+  const labelInput = document.getElementById("webnovel-bookmark-label");
+  const urlInput = document.getElementById("webnovel-bookmark-url");
+  const url = (urlInput?.value ?? "").trim();
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    return;
+  }
+  const bookmarks = loadWebnovelBookmarks();
+  bookmarks.push({ label: (labelInput?.value ?? "").trim(), url });
+  saveStoredJson(webnovelBookmarksKey, bookmarks);
+  if (labelInput) labelInput.value = "";
+  if (urlInput) urlInput.value = "";
+  renderWebnovelBookmarks();
+});
+
+renderWebnovelSources();
+renderWebnovelBookmarks();
