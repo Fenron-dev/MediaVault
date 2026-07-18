@@ -6567,8 +6567,8 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
     // Poll for the clearance cookie on a worker thread.
     let poll_host = host.clone();
     std::thread::spawn(move || {
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
         loop {
             std::thread::sleep(std::time::Duration::from_secs(SOLVE_POLL_SECS));
             let Some(window) = handle.get_webview_window(SOLVE_WINDOW_LABEL) else {
@@ -6576,9 +6576,7 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
                 return;
             };
             if let Ok(cookies) = window.cookies_for_url(target_url.clone()) {
-                let has_clearance = cookies
-                    .iter()
-                    .any(|cookie| cookie.name() == "cf_clearance");
+                let has_clearance = cookies.iter().any(|cookie| cookie.name() == "cf_clearance");
                 if has_clearance {
                     let header = cookies
                         .iter()
