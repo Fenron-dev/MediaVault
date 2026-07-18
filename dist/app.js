@@ -4690,11 +4690,17 @@ function renderInspector(value) {
     }
   }
   if (inspectorFetchMetadata) {
-    inspectorFetchMetadata.disabled = !metadataAllowed;
+    const fetchType = canonicalMediaType(item ? mediaSelectionValue(item) : "");
+    // Provider follows the media type: Audible for audiobooks, Goodreads
+    // (via the subscription check) for webnovels, AniList otherwise.
+    const isWebnovelFetch = fetchType === "webnovel";
+    inspectorFetchMetadata.disabled = !metadataAllowed && !isWebnovelFetch;
     inspectorFetchMetadata.textContent =
-      canonicalMediaType(item ? mediaSelectionValue(item) : "") === "audiobook"
+      fetchType === "audiobook"
         ? "Audible abrufen"
-        : "AniList abrufen";
+        : isWebnovelFetch
+          ? "Goodreads/AniList aktualisieren"
+          : "AniList abrufen";
   }
   if (inspectorNotDuplicate) {
     const duplicateRelevant = selectionHasDuplicateFlag(selection) || selectionHasDuplicateOverride(selection);
@@ -5364,9 +5370,19 @@ function renderCollectionProfile(node) {
   if (primary.status) {
     const statusChip = document.createElement("button");
     statusChip.type = "button";
-    const isCompleted = primary.status === "completed";
-    statusChip.className = `tag-chip status-chip ${isCompleted ? "is-completed" : "is-ongoing"}`;
-    statusChip.textContent = isCompleted ? "abgeschlossen" : "laufend";
+    const statusClass =
+      primary.status === "completed"
+        ? "is-completed"
+        : primary.status === "on-hold"
+          ? "is-hiatus"
+          : "is-ongoing";
+    statusChip.className = `tag-chip status-chip ${statusClass}`;
+    statusChip.textContent =
+      primary.status === "completed"
+        ? "abgeschlossen"
+        : primary.status === "on-hold"
+          ? "Hiatus"
+          : "laufend";
     statusChip.addEventListener("click", () =>
       setCollectionTagFilter(`status:${primary.status}`),
     );
@@ -5541,10 +5557,17 @@ function buildWebnovelFileTable(node) {
     removeBtn.className = "action-button icon-button danger";
     removeBtn.title = "In den Papierkorb verschieben";
     removeBtn.textContent = "🗑";
+    removeBtn.addEventListener("dblclick", (event) => event.stopPropagation());
     removeBtn.addEventListener("click", async (event) => {
       event.stopPropagation();
       const fileName = String(item.source_path ?? "").split("/").pop();
-      if (!window.confirm(`„${fileName}“ in den Papierkorb verschieben?`)) {
+      const confirmed = await showConfirmDialog({
+        title: "In den Papierkorb?",
+        body: `„${fileName}“ wird in den Vault-Papierkorb verschoben (widerrufbar).`,
+        confirmLabel: "In den Papierkorb",
+        danger: true,
+      });
+      if (!confirmed) {
         return;
       }
       try {
@@ -5810,6 +5833,22 @@ function selectedBulkItems() {
 
 function renderBulkInspector() {
   renderInspector({ type: "bulk", items: selectedBulkItems() });
+  updateCollectionBulkbar();
+}
+
+// Bulk actions live in the main area too — the sidebar alone was too easy
+// to miss when a multi selection is active.
+function updateCollectionBulkbar() {
+  const bar = document.getElementById("collection-bulkbar");
+  if (!bar) {
+    return;
+  }
+  const count = multiSelectedKeys.size;
+  bar.hidden = !isMultiEdit || count === 0;
+  const label = document.getElementById("collection-bulk-count");
+  if (label) {
+    label.textContent = `${count} ausgewählt`;
+  }
 }
 
 function toggleBulkItem(item) {
@@ -6207,6 +6246,7 @@ function renderCollections(items) {
     items = items.filter((item) => itemMatchesTagFilter(item, activeTagFilter));
   }
   renderTagFilterBar();
+  updateCollectionBulkbar();
   const root = buildCollectionTree(items);
   const selected = findCollectionNode(root, selectedCollectionKey);
 
@@ -7104,13 +7144,23 @@ if (inspectorPlay) {
 
 if (inspectorFetchMetadata) {
   inspectorFetchMetadata.addEventListener("click", async () => {
-    if (!selectionSupportsMetadata(inspectorSelection) || !inspectorSelection.item) {
+    if (!inspectorSelection?.item) {
       return;
     }
 
     const mediaType = canonicalMediaType(
       inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item)
     );
+    if (mediaType === "webnovel") {
+      // Metadata for novels comes from the subscription pipeline
+      // (source site → Goodreads → AniList); a check refreshes everything
+      // including the sidecar the collections view reads.
+      await fetchWebnovelMetadataForItem(inspectorSelection.item);
+      return;
+    }
+    if (!selectionSupportsMetadata(inspectorSelection)) {
+      return;
+    }
     const isAudiobook = mediaType === "audiobook";
 
     try {
@@ -7509,10 +7559,22 @@ function readWebnovelSettingsForm() {
   return settings;
 }
 
+let webnovelCloudflareUrl = "";
+
 function setWebnovelFeedback(message, isError = false) {
   if (!webnovelFeedback) return;
   webnovelFeedback.textContent = message ?? "";
   webnovelFeedback.classList.toggle("is-error", Boolean(isError));
+  // Cloudflare blocks can be solved interactively — surface the button.
+  const solveBtn = document.getElementById("webnovel-solve-btn");
+  if (solveBtn) {
+    const isCloudflare = Boolean(message && /cloudflare/i.test(message));
+    if (!isCloudflare && !isError) {
+      solveBtn.hidden = true;
+    } else if (isCloudflare) {
+      solveBtn.hidden = false;
+    }
+  }
 }
 
 async function webnovelApi(path, options = {}) {
@@ -7594,7 +7656,13 @@ async function renderWebnovelTrash() {
     purgeBtn.className = "action-button danger";
     purgeBtn.textContent = "Endgültig löschen";
     purgeBtn.addEventListener("click", async () => {
-      if (!window.confirm(`„${entry.title}“ ENDGÜLTIG löschen? Das kann nicht widerrufen werden.`)) {
+      const confirmed = await showConfirmDialog({
+        title: "Endgültig löschen?",
+        body: `„${entry.title}“ wird ENDGÜLTIG gelöscht — das kann nicht widerrufen werden.`,
+        confirmLabel: "Endgültig löschen",
+        danger: true,
+      });
+      if (!confirmed) {
         return;
       }
       await webnovelTrashAction("/api/webnovel/purge", entry, "endgültig gelöscht");
@@ -7769,6 +7837,12 @@ function renderWebnovelList(subscriptions) {
       doneBadge.textContent = "abgeschlossen";
       badges.appendChild(doneBadge);
     }
+    if (subscription.hiatus) {
+      const hiatusBadge = document.createElement("span");
+      hiatusBadge.className = "webnovel-badge is-hiatus";
+      hiatusBadge.textContent = "Hiatus";
+      badges.appendChild(hiatusBadge);
+    }
     if (!subscription.enabled) {
       const pausedBadge = document.createElement("span");
       pausedBadge.className = "webnovel-badge is-paused";
@@ -7828,6 +7902,7 @@ async function subscribeWebnovel() {
       body: JSON.stringify({ url, root: getVaultRoot() || undefined }),
     });
     if (payload.error) {
+      webnovelCloudflareUrl = url;
       setWebnovelFeedback(payload.error, true);
       return;
     }
@@ -7844,6 +7919,7 @@ async function subscribeWebnovel() {
     }
     await refreshWebnovelList();
   } catch (error) {
+    webnovelCloudflareUrl = url;
     setWebnovelFeedback(`Abonnieren fehlgeschlagen: ${error.message}`, true);
   } finally {
     if (webnovelSubscribeBtn) webnovelSubscribeBtn.disabled = false;
@@ -7866,14 +7942,21 @@ async function updateWebnovelSubscription(id, patch) {
 }
 
 async function unsubscribeWebnovel(subscription) {
-  if (!window.confirm(`„${subscription.title}“ in den Papierkorb verschieben? (widerrufbar)`)) {
+  const confirmed = await showConfirmDialog({
+    title: "In den Papierkorb?",
+    body: `„${subscription.title}“ wird in den Papierkorb verschoben (widerrufbar über den Filter „Papierkorb“).`,
+    confirmLabel: "In den Papierkorb",
+    danger: true,
+  });
+  if (!confirmed) {
     return;
   }
-  const removeFiles = window.confirm(
-    "Auch die heruntergeladenen Dateien in den Papierkorb verschieben?\n\n" +
-      "OK = Abo UND Dateien in den Papierkorb\n" +
-      "Abbrechen = nur das Abo, Dateien bleiben im Vault",
-  );
+  const removeFiles = await showConfirmDialog({
+    title: "Auch die Dateien?",
+    body: "Sollen auch die heruntergeladenen Dateien in den Papierkorb? „Abbrechen“ = nur das Abo, die Dateien bleiben im Vault.",
+    confirmLabel: "Dateien mit verschieben",
+    danger: true,
+  });
   try {
     const payload = await webnovelApi("/api/webnovel/unsubscribe", {
       method: "POST",
@@ -8281,6 +8364,9 @@ function openWebnovelDetail(subscription) {
     if (subscription.completed) {
       badges.appendChild(webnovelDetailBadge("abgeschlossen", "is-completed"));
     }
+    if (subscription.hiatus) {
+      badges.appendChild(webnovelDetailBadge("Hiatus", "is-hiatus"));
+    }
     if (!subscription.enabled) badges.appendChild(webnovelDetailBadge("pausiert", "is-paused"));
     if (subscription.last_error) badges.appendChild(webnovelDetailBadge("Fehler", "is-error"));
   }
@@ -8325,6 +8411,14 @@ function openWebnovelDetail(subscription) {
         await updateWebnovelSubscription(subscription.id, {
           completed: !subscription.completed,
         });
+      },
+    );
+    actionButton(
+      subscription.hiatus ? "Hiatus aufheben" : "Als Hiatus markieren",
+      "",
+      async () => {
+        closeWebnovelDetail();
+        await updateWebnovelSubscription(subscription.id, { hiatus: !subscription.hiatus });
       },
     );
     actionButton(subscription.enabled ? "Pausieren" : "Fortsetzen", "", async () => {
@@ -8483,13 +8577,21 @@ document.getElementById("webnovel-bulk-resume")?.addEventListener("click", () =>
 document.getElementById("webnovel-bulk-delete")?.addEventListener("click", async () => {
   const ids = [...webnovelSelectedIds];
   if (!ids.length) return;
-  if (!window.confirm(`${ids.length} Abos in den Papierkorb verschieben? (widerrufbar)`)) {
+  const confirmed = await showConfirmDialog({
+    title: "In den Papierkorb?",
+    body: `${ids.length} Abos werden in den Papierkorb verschoben (widerrufbar).`,
+    confirmLabel: "In den Papierkorb",
+    danger: true,
+  });
+  if (!confirmed) {
     return;
   }
-  const removeFiles = window.confirm(
-    "Auch die heruntergeladenen Dateien in den Papierkorb verschieben?\n\n" +
-      "OK = Abos UND Dateien\nAbbrechen = nur die Abos",
-  );
+  const removeFiles = await showConfirmDialog({
+    title: "Auch die Dateien?",
+    body: "Sollen auch die heruntergeladenen Dateien in den Papierkorb? „Abbrechen“ = nur die Abos.",
+    confirmLabel: "Dateien mit verschieben",
+    danger: true,
+  });
   for (const id of ids) {
     try {
       await webnovelApi("/api/webnovel/unsubscribe", {
@@ -8509,4 +8611,112 @@ document.getElementById("webnovel-bulk-delete")?.addEventListener("click", async
   updateWebnovelBulkbar();
   setWebnovelFeedback(`${ids.length} Abos in den Papierkorb verschoben.`);
   await refreshWebnovelList();
+});
+
+// Finds the subscription behind a collection item and runs a check for it —
+// refreshing Goodreads/AniList metadata and the sidecar in one go.
+async function fetchWebnovelMetadataForItem(item) {
+  const wanted = String(item.series_title || item.title || "").toLowerCase();
+  if (!wanted) {
+    if (statusStrip) statusStrip.textContent = "Kein Titel zum Abgleichen gefunden.";
+    return;
+  }
+  try {
+    const payload = await webnovelApi(`/api/webnovel/list?_=${Date.now()}${webnovelRootQuery()}`);
+    const match = (payload.subscriptions ?? []).find(
+      (subscription) => String(subscription.title ?? "").toLowerCase() === wanted,
+    );
+    if (!match) {
+      if (statusStrip) {
+        statusStrip.textContent = `Kein Webnovel-Abo zu „${item.series_title || item.title}“ gefunden.`;
+      }
+      return;
+    }
+    if (statusStrip) {
+      statusStrip.textContent = `Metadaten für „${match.title}“ werden aktualisiert …`;
+    }
+    await triggerWebnovelCheck("manual", match.id);
+    await loadPlan();
+    if (statusStrip) {
+      statusStrip.textContent = `Metadaten für „${match.title}“ aktualisiert.`;
+    }
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Abruf fehlgeschlagen: ${error.message}`;
+  }
+}
+
+
+document.getElementById("collection-bulk-trash")?.addEventListener("click", () => {
+  const items = selectedBulkItems();
+  if (items.length) {
+    openTrashDialog({ type: "bulk", items, item: items[0], node: null });
+  }
+});
+
+document.getElementById("collection-bulk-clear")?.addEventListener("click", () => {
+  multiSelectedKeys.clear();
+  isMultiEdit = false;
+  updateCollectionBulkbar();
+  renderCollections(currentPlan?.items ?? []);
+  renderInspector(null);
+});
+
+// ---------------------------------------------------------------------------
+// Interactive Cloudflare solve flow
+// ---------------------------------------------------------------------------
+
+document.getElementById("webnovel-solve-btn")?.addEventListener("click", async () => {
+  const url = webnovelCloudflareUrl || (webnovelUrlInput?.value ?? "").trim();
+  if (!url) {
+    setWebnovelFeedback("Keine blockierte URL bekannt — bitte URL eingeben.", true);
+    return;
+  }
+  let host = "";
+  try {
+    const payload = await webnovelApi("/api/webnovel/solve", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    });
+    if (payload.error) {
+      setWebnovelFeedback(payload.error, true);
+      return;
+    }
+    host = payload.host ?? "";
+  } catch (error) {
+    setWebnovelFeedback(`Fenster konnte nicht geöffnet werden: ${error.message}`, true);
+    return;
+  }
+  setWebnovelFeedback("Bitte die Prüfung im geöffneten Fenster bestätigen …");
+  // Poll until solved, failed, or timed out backend-side.
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    let status;
+    try {
+      status = await webnovelApi(
+        `/api/webnovel/solve-status?host=${encodeURIComponent(host)}`,
+      );
+    } catch {
+      break;
+    }
+    if (status.state === "done") {
+      setWebnovelFeedback("Prüfung bestanden — Zugriff freigeschaltet. Starte erneut …");
+      const solveBtn = document.getElementById("webnovel-solve-btn");
+      if (solveBtn) solveBtn.hidden = true;
+      // Retry what the user was doing: pending subscribe input wins,
+      // otherwise refresh the list state.
+      if ((webnovelUrlInput?.value ?? "").trim()) {
+        await subscribeWebnovel();
+      } else {
+        await refreshWebnovelList();
+      }
+      return;
+    }
+    if (status.state === "failed") {
+      setWebnovelFeedback(`Prüfung nicht abgeschlossen: ${status.message ?? "abgebrochen"}`, true);
+      return;
+    }
+    if (status.state === "unknown") {
+      return;
+    }
+  }
 });

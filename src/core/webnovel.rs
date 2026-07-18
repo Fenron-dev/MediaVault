@@ -72,6 +72,9 @@ pub struct Subscription {
     /// Marked as finished — suppresses batch EPUBs and periodic checks.
     #[serde(default)]
     pub completed: bool,
+    /// Abandoned upstream (never finished) — periodic checks are skipped.
+    #[serde(default)]
+    pub hiatus: bool,
     /// Paused subscriptions are skipped by checks but keep their data.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -129,6 +132,7 @@ impl Subscription {
             anilist_id: None,
             anilist_url: None,
             completed: false,
+            hiatus: false,
             enabled: true,
             known_chapters: Vec::new(),
             last_check_unix: None,

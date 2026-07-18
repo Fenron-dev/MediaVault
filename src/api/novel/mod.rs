@@ -24,7 +24,7 @@ pub mod royalroad;
 pub mod wordpress;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use scraper::{Html, Selector};
@@ -111,7 +111,8 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
         // Chapter text is rendered client-side only (Next.js) — plain HTTP
         // never sees it. Refuse with a clear message instead of failing oddly.
         Box::new(UnsupportedSource {
-            reason: "novelarrow.com lädt Kapiteltexte nur per JavaScript und kann                      ohne eingebetteten Browser nicht abonniert werden.",
+            reason: "novelarrow.com lädt Kapiteltexte nur per JavaScript und kann \
+                     ohne eingebetteten Browser nicht abonniert werden.",
         })
     } else {
         // empirenovel.com, readnovelmtl.com and unknown hosts run through the
@@ -161,6 +162,33 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RETRIES: u32 = 3;
 /// Backoff before each retry attempt, in seconds.
 const RETRY_BACKOFF_SECS: [u64; 3] = [2, 5, 12];
+
+/// Browser session (cookies + matching user agent) captured from the
+/// interactive Cloudflare-solve window, keyed by host.
+#[derive(Debug, Clone)]
+pub struct BrowserSession {
+    /// Full `Cookie` header value ("name=value; name2=value2").
+    pub cookie_header: String,
+    /// User agent the cookies were issued for — must match on reuse.
+    pub user_agent: String,
+}
+
+/// RAM-only session store — clearance cookies are short-lived anyway.
+static BROWSER_SESSIONS: LazyLock<Mutex<HashMap<String, BrowserSession>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Registers a solved-challenge session for a host.
+pub fn set_browser_session(host: &str, session: BrowserSession) {
+    if let Ok(mut sessions) = BROWSER_SESSIONS.lock() {
+        sessions.insert(host.to_lowercase(), session);
+    }
+}
+
+/// Returns the stored session for a URL's host, if one exists.
+pub fn browser_session_for(url: &str) -> Option<BrowserSession> {
+    let host = host_of(url)?;
+    BROWSER_SESSIONS.lock().ok()?.get(&host).cloned()
+}
 
 /// Blocking HTTP client with per-host rate limiting and bounded retries.
 ///
@@ -257,7 +285,13 @@ impl PoliteClient {
     }
 
     fn try_get_bytes(&self, url: &str) -> std::result::Result<Vec<u8>, RequestFailure> {
-        let response = self.client.get(url).send().map_err(|e| {
+        let mut request = self.client.get(url);
+        if let Some(session) = browser_session_for(url) {
+            request = request
+                .header("Cookie", session.cookie_header)
+                .header("User-Agent", session.user_agent);
+        }
+        let response = request.send().map_err(|e| {
             RequestFailure::Transient(VaultError::ExternalApi(format!(
                 "request to {url} failed: {e}"
             )))
@@ -282,7 +316,15 @@ impl PoliteClient {
     }
 
     fn try_get(&self, url: &str) -> std::result::Result<(String, String), RequestFailure> {
-        let response = self.client.get(url).send().map_err(|e| {
+        let mut request = self.client.get(url);
+        // A manually solved Cloudflare challenge leaves cookies + UA here;
+        // sending them lets subsequent plain requests pass the check.
+        if let Some(session) = browser_session_for(url) {
+            request = request
+                .header("Cookie", session.cookie_header)
+                .header("User-Agent", session.user_agent);
+        }
+        let response = request.send().map_err(|e| {
             if e.is_timeout() || e.is_connect() {
                 RequestFailure::Transient(VaultError::ExternalApi(format!(
                     "request to {url} failed: {e}"

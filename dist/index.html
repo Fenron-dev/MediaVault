@@ -285,6 +285,11 @@
 
               <div class="collection-profile" id="collection-profile"></div>
 
+              <div class="webnovel-bulkbar" id="collection-bulkbar" hidden>
+                <span id="collection-bulk-count">0 ausgewählt</span>
+                <button class="action-button danger" id="collection-bulk-trash">In den Papierkorb</button>
+                <button class="action-button" id="collection-bulk-clear">Auswahl aufheben</button>
+              </div>
               <div class="collection-viewbar" id="collection-viewbar">
                 <p class="panel-label">Inhalt</p>
                 <div class="collection-view-actions">
@@ -426,6 +431,9 @@
               <button class="action-button" id="webnovel-check-all-btn">Jetzt alle prüfen</button>
             </div>
             <p class="field-hint" id="webnovel-feedback"></p>
+            <button class="action-button" id="webnovel-solve-btn" hidden>
+              🛡 Sicherheitsprüfung im Fenster bestätigen
+            </button>
             <div class="webnovel-progress" id="webnovel-job-progress" hidden>
               <p class="field-hint" id="webnovel-job-text"></p>
               <div class="webnovel-progress-track">

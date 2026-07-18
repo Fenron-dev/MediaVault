@@ -6,14 +6,15 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::api::goodreads::GoodreadsClient;
 use crate::api::novel::{
-    detect_image_media_type, detect_source, sanitize_to_xhtml, ChapterRef, PoliteClient,
+    detect_image_media_type, detect_source, host_of, sanitize_to_xhtml, set_browser_session,
+    BrowserSession, ChapterRef, PoliteClient,
 };
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
@@ -110,7 +111,10 @@ pub(crate) fn run() -> Result<()> {
         // the synchronous webview thread and can no longer freeze the UI. (#7)
         .register_asynchronous_uri_scheme_protocol(
             PROTOCOL_SCHEME,
-            |_context, request, responder| {
+            |context, request, responder| {
+                // The Cloudflare-solve window needs an AppHandle from worker
+                // threads; capture it once from the protocol context.
+                let _ = APP_HANDLE.set(context.app_handle().clone());
                 std::thread::spawn(move || {
                     responder.respond(handle_request(&request));
                 });
@@ -274,6 +278,14 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/webnovel/check" => json_response(
             StatusCode::OK,
             &build_webnovel_check_response(request.body()),
+        ),
+        "/api/webnovel/solve" => json_response(
+            StatusCode::OK,
+            &build_webnovel_solve_response(request.body()),
+        ),
+        "/api/webnovel/solve-status" => json_response(
+            StatusCode::OK,
+            &build_webnovel_solve_status_response(request.uri().query()),
         ),
         "/api/webnovel/trash" => json_response(
             StatusCode::OK,
@@ -5248,6 +5260,7 @@ struct WebnovelSubscriptionSummary {
     #[serde(skip_serializing_if = "Option::is_none")]
     cover_path: Option<String>,
     completed: bool,
+    hiatus: bool,
     enabled: bool,
     known_chapters: usize,
     downloaded_chapters: usize,
@@ -5282,6 +5295,7 @@ impl WebnovelSubscriptionSummary {
             rating_external: subscription.rating_external,
             cover_path,
             completed: subscription.completed,
+            hiatus: subscription.hiatus,
             enabled: subscription.enabled,
             known_chapters: subscription.known_chapters.len(),
             downloaded_chapters: subscription.downloaded_count(),
@@ -5648,6 +5662,8 @@ struct WebnovelUpdateRequest {
     #[serde(default)]
     completed: Option<bool>,
     #[serde(default)]
+    hiatus: Option<bool>,
+    #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
     root: Option<String>,
@@ -5671,6 +5687,9 @@ fn build_webnovel_update_response(body: &[u8]) -> WebnovelSimpleResponse {
 
     if let Some(completed) = req.completed {
         subscription.completed = completed;
+    }
+    if let Some(hiatus) = req.hiatus {
+        subscription.hiatus = hiatus;
     }
     if let Some(enabled) = req.enabled {
         subscription.enabled = enabled;
@@ -5871,7 +5890,9 @@ fn run_webnovel_check(
             .collect(),
         None => all
             .into_iter()
-            .filter(|subscription| subscription.enabled && !subscription.completed)
+            .filter(|subscription| {
+                subscription.enabled && !subscription.completed && !subscription.hiatus
+            })
             .collect(),
     };
 
@@ -6050,10 +6071,15 @@ fn check_one_subscription(
     // The complete EPUB is also rebuilt when it is missing entirely or when a
     // cover arrived after the last build (covers embed into the EPUB itself).
     let safe_title = sanitize_path_segment(&subscription.title);
-    let complete_missing = !novel_dir.join(format!("{safe_title}.epub")).exists();
+    let complete_file = format!("{safe_title}.epub");
+    let complete_missing = !novel_dir.join(&complete_file).exists();
     if options.build_complete && (!downloaded_indices.is_empty() || cover_added || complete_missing)
     {
         build_complete_epub(vault, subscription)?;
+    } else if !complete_missing {
+        // No rebuild needed, but Goodreads/AniList enrichment may have added
+        // metadata — keep the sidecar (and thus the collections view) in sync.
+        write_webnovel_sidecar(vault, subscription, &complete_file, &subscription.id, None)?;
     }
 
     if let Some(error) = fetch_error {
@@ -6330,6 +6356,9 @@ fn write_webnovel_sidecar(
     });
     entry.properties.status = Some(if subscription.completed {
         MediaStatus::Completed
+    } else if subscription.hiatus {
+        // OnHold doubles as "hiatus": abandoned upstream, never finished.
+        MediaStatus::OnHold
     } else {
         MediaStatus::InLibrary
     });
@@ -6428,5 +6457,184 @@ fn build_webnovel_blocklist_save_response(body: &[u8]) -> WebnovelSimpleResponse
     match save_user_blocklist(&vault.system_dir(), &req.entries) {
         Ok(()) => WebnovelSimpleResponse::ok(),
         Err(error) => WebnovelSimpleResponse::error(error.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive Cloudflare solve window
+// ---------------------------------------------------------------------------
+
+/// App handle captured from the URI-scheme context (set on first request).
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Per-host state of the solve flow: `pending`, `done`, `failed:<msg>`.
+static SOLVE_STATES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Window label of the solve window (one at a time).
+const SOLVE_WINDOW_LABEL: &str = "cf-solve";
+/// Fixed browser user agent for the solve window AND the follow-up requests —
+/// Cloudflare binds its clearance cookie to the user agent.
+const SOLVE_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+    AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+/// How long the user gets to solve the challenge.
+const SOLVE_TIMEOUT_SECS: u64 = 240;
+/// Poll interval while waiting for the clearance cookie.
+const SOLVE_POLL_SECS: u64 = 2;
+
+fn set_solve_state(host: &str, state: impl Into<String>) {
+    if let Ok(mut states) = SOLVE_STATES.lock() {
+        states.insert(host.to_string(), state.into());
+    }
+}
+
+#[derive(Deserialize)]
+struct WebnovelSolveRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct WebnovelSolveResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Opens a visible, isolated browser window on the target URL so the user can
+/// solve the Cloudflare/captcha challenge manually. A background thread polls
+/// the window's cookies; once `cf_clearance` appears the cookies (plus the
+/// matching user agent) are stored for this host and the window closes.
+///
+/// Security: the window has no IPC capabilities and no access to app
+/// internals — it is equivalent to opening the site in a normal browser.
+fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
+    let req: WebnovelSolveRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => {
+            return WebnovelSolveResponse {
+                host: None,
+                error: Some(format!("Invalid request: {error}")),
+            }
+        }
+    };
+    if !req.url.starts_with("http://") && !req.url.starts_with("https://") {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("Nur http/https-Links erlaubt.".to_string()),
+        };
+    }
+    let Some(host) = host_of(&req.url) else {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("URL ohne gültigen Host.".to_string()),
+        };
+    };
+    let Some(handle) = APP_HANDLE.get().cloned() else {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("App-Fenster noch nicht bereit — bitte erneut versuchen.".to_string()),
+        };
+    };
+    let Ok(target_url) = req.url.parse::<tauri::Url>() else {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("URL konnte nicht geparst werden.".to_string()),
+        };
+    };
+
+    set_solve_state(&host, "pending");
+
+    // Window creation must happen on the main thread on macOS.
+    let build_handle = handle.clone();
+    let build_url = target_url.clone();
+    let _ = handle.run_on_main_thread(move || {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        if let Some(existing) = build_handle.get_webview_window(SOLVE_WINDOW_LABEL) {
+            let _ = existing.close();
+        }
+        let _ = WebviewWindowBuilder::new(
+            &build_handle,
+            SOLVE_WINDOW_LABEL,
+            WebviewUrl::External(build_url),
+        )
+        .title("Sicherheitsprüfung bestätigen — Fenster schließt sich automatisch")
+        .inner_size(1024.0, 820.0)
+        .user_agent(SOLVE_USER_AGENT)
+        .build();
+    });
+
+    // Poll for the clearance cookie on a worker thread.
+    let poll_host = host.clone();
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(SOLVE_POLL_SECS));
+            let Some(window) = handle.get_webview_window(SOLVE_WINDOW_LABEL) else {
+                set_solve_state(&poll_host, "failed:Fenster wurde geschlossen.");
+                return;
+            };
+            if let Ok(cookies) = window.cookies_for_url(target_url.clone()) {
+                let has_clearance = cookies
+                    .iter()
+                    .any(|cookie| cookie.name() == "cf_clearance");
+                if has_clearance {
+                    let header = cookies
+                        .iter()
+                        .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    set_browser_session(
+                        &poll_host,
+                        BrowserSession {
+                            cookie_header: header,
+                            user_agent: SOLVE_USER_AGENT.to_string(),
+                        },
+                    );
+                    set_solve_state(&poll_host, "done");
+                    let _ = window.close();
+                    return;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                set_solve_state(&poll_host, "failed:Zeitüberschreitung.");
+                let _ = window.close();
+                return;
+            }
+        }
+    });
+
+    WebnovelSolveResponse {
+        host: Some(host),
+        error: None,
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelSolveStatusResponse {
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+fn build_webnovel_solve_status_response(query: Option<&str>) -> WebnovelSolveStatusResponse {
+    let host = query
+        .and_then(|q| extract_query_value(q, "host"))
+        .unwrap_or_default();
+    let raw = SOLVE_STATES
+        .lock()
+        .ok()
+        .and_then(|states| states.get(&host).cloned())
+        .unwrap_or_else(|| "unknown".to_string());
+    match raw.strip_prefix("failed:") {
+        Some(message) => WebnovelSolveStatusResponse {
+            state: "failed".to_string(),
+            message: Some(message.to_string()),
+        },
+        None => WebnovelSolveStatusResponse {
+            state: raw,
+            message: None,
+        },
     }
 }
