@@ -6480,8 +6480,15 @@ const SOLVE_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) 
     AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
 /// How long the user gets to solve the challenge.
 const SOLVE_TIMEOUT_SECS: u64 = 240;
-/// Poll interval while waiting (each cycle includes one probe request).
-const SOLVE_POLL_SECS: u64 = 4;
+/// Poll interval for the (local, cheap) cookie check.
+const SOLVE_POLL_SECS: u64 = 3;
+/// Grace period before probing sites that never issue an interactive
+/// challenge (auto-pass) — probing too early burns a running challenge.
+const SOLVE_GRACE_SECS: u64 = 15;
+/// Probe attempts after a clearance cookie appeared. Each failed probe can
+/// invalidate the clearance again (TLS binding), so we stop early with a
+/// clear message instead of looping the user's challenge forever.
+const SOLVE_MAX_PROBES: u32 = 3;
 
 fn set_solve_state(host: &str, state: impl Into<String>) {
     if let Ok(mut states) = SOLVE_STATES.lock() {
@@ -6572,15 +6579,23 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
     let poll_host = host.clone();
     let probe_url = req.url.clone();
     std::thread::spawn(move || {
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
+        let grace = std::time::Duration::from_secs(SOLVE_GRACE_SECS);
+        let mut cycle: u64 = 0;
+        let mut probes_after_clearance: u32 = 0;
+
         loop {
             std::thread::sleep(std::time::Duration::from_secs(SOLVE_POLL_SECS));
+            cycle += 1;
 
             let window = handle.get_webview_window(SOLVE_WINDOW_LABEL);
-            // Adopt current cookies (any of them) + the matching user agent.
+
+            // Adopt current cookies (whatever they are) + matching UA.
+            let mut has_clearance = false;
             if let Some(active) = window.as_ref() {
                 if let Ok(cookies) = active.cookies_for_url(target_url.clone()) {
+                    has_clearance = cookies.iter().any(|cookie| cookie.name() == "cf_clearance");
                     if !cookies.is_empty() {
                         let header = cookies
                             .iter()
@@ -6598,21 +6613,51 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
                 }
             }
 
-            // Probe: does a plain request pass now? (Runs through the polite
-            // client, so the per-host delay is respected.)
-            if solve_probe_passes(&probe_url) {
-                set_solve_state(&poll_host, "done");
-                if let Some(active) = window {
-                    let _ = active.close();
+            // NEVER probe while an interactive challenge is still running:
+            // a probe with freshly issued cookies but a different TLS
+            // fingerprint makes Cloudflare revoke the clearance — the user
+            // then sees the checkbox loop forever. Probe only once the
+            // clearance cookie exists, or (auto-pass sites without any
+            // interactive challenge) after a grace period, spaced out.
+            let should_probe = if has_clearance {
+                probes_after_clearance < SOLVE_MAX_PROBES
+            } else {
+                started.elapsed() >= grace && cycle % 4 == 0
+            };
+
+            if should_probe {
+                if solve_probe_passes(&probe_url) {
+                    set_solve_state(&poll_host, "done");
+                    if let Some(active) = window {
+                        let _ = active.close();
+                    }
+                    return;
                 }
-                return;
+                if has_clearance {
+                    probes_after_clearance += 1;
+                    if probes_after_clearance >= SOLVE_MAX_PROBES {
+                        set_solve_state(
+                            &poll_host,
+                            "failed:Die Freigabe ist strikt an das Browserfenster gebunden —                              App-Downloads bleiben für diese Seite blockiert.",
+                        );
+                        if let Some(active) = window {
+                            let _ = active.close();
+                        }
+                        return;
+                    }
+                }
             }
 
             if window.is_none() {
-                set_solve_state(
-                    &poll_host,
-                    "failed:Fenster geschlossen, Zugriff weiterhin blockiert.",
-                );
+                // Window closed by the user: one final probe decides.
+                if solve_probe_passes(&probe_url) {
+                    set_solve_state(&poll_host, "done");
+                } else {
+                    set_solve_state(
+                        &poll_host,
+                        "failed:Fenster geschlossen, Zugriff weiterhin blockiert.",
+                    );
+                }
                 return;
             }
             if std::time::Instant::now() >= deadline {
