@@ -760,6 +760,19 @@
               <span>Status</span>
               <select id="inspector-status"></select>
             </label>
+            <div class="property-edit-row property-edit-tags">
+              <span>Tags</span>
+              <div class="tag-editor">
+                <div class="tag-editor-chips" id="inspector-tags-chips"></div>
+                <input
+                  id="inspector-tags-input"
+                  type="text"
+                  list="inspector-tags-datalist"
+                  placeholder="Tag hinzufügen (Enter)"
+                />
+                <datalist id="inspector-tags-datalist"></datalist>
+              </div>
+            </div>
             <button class="action-button primary" id="inspector-apply">Änderungen übernehmen</button>
           </div>
           <div class="api-feedback" id="inspector-api-feedback"></div>

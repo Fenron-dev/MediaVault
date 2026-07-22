@@ -6323,6 +6323,28 @@ fn build_complete_epub(vault: &Vault, subscription: &Subscription) -> Result<()>
 }
 
 /// Writes the `.mediavault.yaml` sidecar next to a generated EPUB.
+/// Unions the tags already present in a novel's sidecar with the incoming
+/// ones (subscription-derived), preserving user-added tags across re-checks.
+/// Case-insensitive de-duplication; incoming tags win the casing.
+fn merge_webnovel_tags(vault: &Vault, relative: &RelativePath, incoming: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = incoming.to_vec();
+    let mut seen: HashSet<String> = result.iter().map(|tag| tag.to_lowercase()).collect();
+
+    if let Ok(sidecar_relative) = sidecar_path_for(relative) {
+        let sidecar_path = vault.root().join(sidecar_relative.as_path());
+        if let Ok(raw) = fs::read_to_string(&sidecar_path) {
+            if let Ok(existing) = parse_sidecar_metadata(&raw) {
+                for tag in existing.tags {
+                    if seen.insert(tag.to_lowercase()) {
+                        result.push(tag);
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 fn write_webnovel_sidecar(
     vault: &Vault,
     subscription: &Subscription,
@@ -6346,7 +6368,9 @@ fn write_webnovel_sidecar(
     entry.properties.description = subscription.description.clone();
     entry.properties.series_title = Some(subscription.title.clone());
     entry.properties.genres = subscription.genres.clone();
-    entry.properties.tags = subscription.tags.clone();
+    // Preserve tags a user added by hand in the inspector: union the existing
+    // sidecar tags with the subscription's, so a re-check never wipes them.
+    entry.properties.tags = merge_webnovel_tags(vault, &relative, &subscription.tags);
     entry.properties.anilist_id = subscription.anilist_id;
     entry.properties.anilist_url = subscription.anilist_url.clone();
     entry.properties.rating_external = subscription.rating_external;

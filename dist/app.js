@@ -98,6 +98,9 @@ const inspectorName = document.getElementById("inspector-name");
 const inspectorMediaType = document.getElementById("inspector-media-type");
 const inspectorYear = document.getElementById("inspector-year");
 const inspectorStatus = document.getElementById("inspector-status");
+const inspectorTagsChips = document.getElementById("inspector-tags-chips");
+const inspectorTagsInput = document.getElementById("inspector-tags-input");
+const inspectorTagsDatalist = document.getElementById("inspector-tags-datalist");
 const inspectorApply = document.getElementById("inspector-apply");
 const inspectorApiFeedback = document.getElementById("inspector-api-feedback");
 const inspectorPropertyAddToggle = document.getElementById("inspector-property-add-toggle");
@@ -1158,6 +1161,9 @@ function projectItem(item) {
   }
   if (typeof correction.notes === "string") {
     effective.notes = correction.notes;
+  }
+  if (Array.isArray(correction.tags)) {
+    effective.tags = correction.tags;
   }
 
   effective.has_correction = Boolean(correction.updated_at);
@@ -4607,6 +4613,9 @@ function renderInspector(value) {
   if (inspectorStatus) {
     inspectorStatus.value = item?.status ?? (item && needsReviewInUi(item) ? "needs-review" : "inbox");
   }
+  // Seed the tag editor from the current item's tags; genres stay read-only.
+  inspectorEditTags = Array.isArray(item?.tags) ? [...item.tags] : [];
+  renderInspectorTagEditor();
 
   if (inspectorProperties) {
     clearNode(inspectorProperties);
@@ -4957,7 +4966,7 @@ function selectionEditable(selection) {
     return true;
   }
   const kind = collectionNodeKind(selection.node);
-  return ["series", "season", "movie", "audiobook"].includes(kind);
+  return ["series", "season", "movie", "audiobook", "webnovel"].includes(kind);
 }
 
 function selectionSupportsMetadata(selection) {
@@ -6542,7 +6551,7 @@ function applySelectionCorrection(selection, overrides = {}) {
 
     if (selection.type === "node") {
       const kind = collectionNodeKind(selection.node);
-      if (["series", "season"].includes(kind)) {
+      if (["series", "season", "webnovel"].includes(kind)) {
         next.series_title = titleValue;
       } else if (kind === "movie") {
         next.title = titleValue;
@@ -6567,10 +6576,94 @@ function applySelectionCorrection(selection, overrides = {}) {
     if (!next.status) {
       delete next.status;
     }
+    // Tags edited in the inspector apply to the whole selection.
+    if (Array.isArray(inspectorEditTags)) {
+      next.tags = [...inspectorEditTags];
+    }
     corrections[item.source_path] = next;
   });
 
   saveStoredJson(correctionsKey, corrections);
+}
+
+// ---------------------------------------------------------------------------
+// Inspector tag editor (chips + datalist autocomplete)
+// ---------------------------------------------------------------------------
+
+let inspectorEditTags = [];
+
+// All distinct tags/genres across the current plan, for autocomplete.
+function allKnownTags() {
+  const set = new Set();
+  (currentPlan?.items ?? []).forEach((item) => {
+    [...(item.tags ?? []), ...(item.genres ?? [])].forEach((tag) => {
+      const trimmed = String(tag).trim();
+      if (trimmed) {
+        set.add(trimmed);
+      }
+    });
+  });
+  return [...set].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+}
+
+function renderInspectorTagEditor() {
+  if (inspectorTagsDatalist) {
+    clearNode(inspectorTagsDatalist);
+    allKnownTags().forEach((tag) => {
+      const option = document.createElement("option");
+      option.value = tag;
+      inspectorTagsDatalist.appendChild(option);
+    });
+  }
+  if (!inspectorTagsChips) {
+    return;
+  }
+  clearNode(inspectorTagsChips);
+  inspectorEditTags.forEach((tag, index) => {
+    const chip = document.createElement("span");
+    chip.className = "tag-chip is-editable";
+    chip.textContent = tag;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "tag-chip-remove";
+    remove.textContent = "✕";
+    remove.title = "Tag entfernen";
+    remove.addEventListener("click", () => {
+      inspectorEditTags.splice(index, 1);
+      renderInspectorTagEditor();
+    });
+    chip.appendChild(remove);
+    inspectorTagsChips.appendChild(chip);
+  });
+}
+
+function addInspectorTag(raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) {
+    return;
+  }
+  const exists = inspectorEditTags.some((tag) => tag.toLowerCase() === value.toLowerCase());
+  if (!exists) {
+    inspectorEditTags.push(value);
+    renderInspectorTagEditor();
+  }
+}
+
+if (inspectorTagsInput) {
+  inspectorTagsInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === ",") {
+      event.preventDefault();
+      addInspectorTag(inspectorTagsInput.value);
+      inspectorTagsInput.value = "";
+    }
+  });
+  // Selecting from the datalist fires an input event with the full value.
+  inspectorTagsInput.addEventListener("change", () => {
+    if (inspectorTagsInput.value.trim()) {
+      addInspectorTag(inspectorTagsInput.value);
+      inspectorTagsInput.value = "";
+    }
+  });
 }
 
 function openTrashDialog(selection) {
@@ -8635,8 +8728,16 @@ async function fetchWebnovelMetadataForItem(item) {
     if (statusStrip) {
       statusStrip.textContent = `Metadaten für „${match.title}“ werden aktualisiert …`;
     }
+    const keepPath = item.source_path;
     await triggerWebnovelCheck("manual", match.id);
     await loadPlan();
+    // Re-select the same file in the freshly rebuilt plan so the inspector
+    // shows the updated metadata instead of a stale (→ "unclassified",
+    // non-editable) object reference.
+    const refreshed = (currentPlan?.items ?? []).find(
+      (candidate) => candidate.source_path === keepPath,
+    );
+    renderInspector(refreshed ?? null);
     if (statusStrip) {
       statusStrip.textContent = `Metadaten für „${match.title}“ aktualisiert.`;
     }
