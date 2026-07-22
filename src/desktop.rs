@@ -7333,9 +7333,8 @@ fn render_page_via_window(url: &str) -> Result<String> {
                 })?;
                 text
             } else {
-                String::from_utf8(bytes).map_err(|e| {
-                    VaultError::ExternalApi(format!("Ungültiges UTF-8: {e}"))
-                })?
+                String::from_utf8(bytes)
+                    .map_err(|e| VaultError::ExternalApi(format!("Ungültiges UTF-8: {e}")))?
             };
             return Ok(html);
         }
