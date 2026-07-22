@@ -228,6 +228,7 @@ const labels = {
   playlists: "Wiedergabelisten",
   webnovels: "Webnovels",
   settings: "Einstellungen",
+  trash: "Papierkorb",
 };
 
 const mediaTypeOptions = [
@@ -343,6 +344,10 @@ function setActiveTab(tab, options = {}) {
   const topbarVaultActions = document.getElementById("topbar-vault-actions");
   if (topbarVaultActions) {
     topbarVaultActions.hidden = !vaultActionTabs.includes(tab);
+  }
+
+  if (tab === "trash") {
+    loadVaultTrash();
   }
 
   if (statusStrip) {
@@ -6684,35 +6689,48 @@ function openTrashDialog(selection) {
   showModalCard(trashDialog);
 }
 
-function commitTrashSelection(selection) {
+async function commitTrashSelection(selection) {
   if (!selectionEditable(selection)) {
     return;
   }
 
-  const count = selection.items.length;
-  const at = new Date().toISOString();
-  selection.items.forEach((item) => {
-    trashedEntries[item.source_path] = {
-      source_path: item.source_path,
-      title: item.title || item.series_title || fileStem(item.source_path),
-      at,
-    };
-    delete corrections[item.source_path];
-    delete apiMetadata[item.source_path];
+  const paths = selection.items.map((item) => item.source_path).filter(Boolean);
+  const count = paths.length;
+  closeActionModal();
+
+  // Actually move the files into the vault <.trash> (reversible via the
+  // Papierkorb tab) — not just hide them locally.
+  try {
+    const response = await fetch("mediavault://localhost/api/delete-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: getVaultRoot(), paths, permanent: false }),
+    });
+    const payload = await response.json();
+    if (payload.error) {
+      if (statusStrip) statusStrip.textContent = payload.error;
+      return;
+    }
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+    return;
+  }
+
+  paths.forEach((path) => {
+    delete corrections[path];
+    delete apiMetadata[path];
   });
-  saveStoredJson(trashKey, trashedEntries);
   saveStoredJson(correctionsKey, corrections);
   saveStoredJson(metadataKey, apiMetadata);
   multiSelectedKeys.clear();
   selectedCollectionItemKey = "";
   selectedItemKey = "";
-  currentPlan = projectPlan(sourcePlan);
-  renderPlan(currentPlan);
-  updateAuditTrail(`${count} Eintrag(e) in den App-Papierkorb verschoben.`);
+  await loadPlan();
+  renderInspector(null);
+  updateAuditTrail(`${count} Datei(en) in den Papierkorb verschoben.`);
   if (statusStrip) {
-    statusStrip.textContent = `${count} Eintrag(e) in den MediaVault-Papierkorb verschoben.`;
+    statusStrip.textContent = `${count} Datei(en) in den Papierkorb verschoben (Tab „Papierkorb“).`;
   }
-  closeActionModal();
 }
 
 function trashSelection(selection) {
@@ -8929,3 +8947,123 @@ document.getElementById("webnovel-bookmark-add")?.addEventListener("click", () =
 
 renderWebnovelSources();
 renderWebnovelBookmarks();
+
+// ---------------------------------------------------------------------------
+// Vault trash view
+// ---------------------------------------------------------------------------
+
+async function loadVaultTrash() {
+  const list = document.getElementById("trash-list");
+  const emptyHint = document.getElementById("trash-empty-hint");
+  if (!list) return;
+  const root = getVaultRoot();
+  let entries = [];
+  try {
+    const response = await fetch(
+      `mediavault://localhost/api/trash/list?_=${Date.now()}${
+        root ? `&root=${encodeURIComponent(root)}` : ""
+      }`,
+    );
+    const payload = await response.json();
+    if (payload.error) {
+      if (statusStrip) statusStrip.textContent = payload.error;
+      return;
+    }
+    entries = payload.entries ?? [];
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Papierkorb nicht ladbar: ${error.message}`;
+    return;
+  }
+
+  clearNode(list);
+  if (emptyHint) emptyHint.hidden = entries.length > 0;
+
+  entries.forEach((entry) => {
+    const card = document.createElement("article");
+    card.className = "webnovel-card";
+    const body = document.createElement("div");
+    body.className = "webnovel-card-body";
+
+    const title = document.createElement("span");
+    title.className = "webnovel-card-title";
+    title.textContent = entry.name;
+    body.appendChild(title);
+
+    const meta = document.createElement("p");
+    meta.className = "webnovel-card-meta";
+    const dir = entry.relative_path.split("/").slice(0, -1).join("/") || "(Vault-Wurzel)";
+    meta.textContent = `${dir} · ${formatBytes(entry.size_bytes)} · gelöscht: ${formatWebnovelTimestamp(
+      entry.trashed_at,
+    )}`;
+    body.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "webnovel-card-actions";
+
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "action-button primary";
+    restoreBtn.textContent = "Wiederherstellen";
+    restoreBtn.addEventListener("click", () => vaultTrashAction("restore", [entry.relative_path]));
+    actions.appendChild(restoreBtn);
+
+    const purgeBtn = document.createElement("button");
+    purgeBtn.className = "action-button danger";
+    purgeBtn.textContent = "Endgültig löschen";
+    purgeBtn.addEventListener("click", async () => {
+      const ok = await showConfirmDialog({
+        title: "Endgültig löschen?",
+        body: `„${entry.name}“ wird unwiderruflich gelöscht.`,
+        confirmLabel: "Endgültig löschen",
+        danger: true,
+      });
+      if (ok) {
+        vaultTrashAction("purge", [entry.relative_path]);
+      }
+    });
+    actions.appendChild(purgeBtn);
+
+    body.appendChild(actions);
+    card.appendChild(body);
+    list.appendChild(card);
+  });
+}
+
+async function vaultTrashAction(kind, paths, all = false) {
+  try {
+    const response = await fetch(`mediavault://localhost/api/trash/${kind}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: getVaultRoot(), paths, all }),
+    });
+    const payload = await response.json();
+    if (payload.error) {
+      if (statusStrip) statusStrip.textContent = payload.error;
+    } else if (statusStrip) {
+      const verb = kind === "restore" ? "wiederhergestellt" : "gelöscht";
+      const skipped = (payload.skipped ?? []).length;
+      statusStrip.textContent = `${(payload.processed ?? []).length} Eintrag(e) ${verb}${
+        skipped ? `, ${skipped} übersprungen` : ""
+      }.`;
+    }
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Aktion fehlgeschlagen: ${error.message}`;
+  }
+  await loadVaultTrash();
+  // Restored files re-appear in the collections plan.
+  if (kind === "restore") {
+    loadPlan();
+  }
+}
+
+document.getElementById("trash-refresh")?.addEventListener("click", loadVaultTrash);
+document.getElementById("trash-empty")?.addEventListener("click", async () => {
+  const ok = await showConfirmDialog({
+    title: "Papierkorb leeren?",
+    body: "Alle Dateien im Papierkorb werden unwiderruflich gelöscht.",
+    confirmLabel: "Papierkorb leeren",
+    danger: true,
+  });
+  if (ok) {
+    vaultTrashAction("purge", [], true);
+  }
+});

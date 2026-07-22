@@ -58,6 +58,7 @@
           <button class="nav-item" data-tab="playlists">Wiedergabelisten</button>
           <button class="nav-item" data-tab="webnovels">Webnovels</button>
           <button class="nav-item" data-tab="settings">Einstellungen</button>
+          <button class="nav-item" data-tab="trash">Papierkorb</button>
         </nav>
 
         <button class="action-button vault-switch-btn" id="vault-switch" title="Anderen Vault öffnen oder neuen erstellen">
@@ -720,6 +721,28 @@
             </section>
             </div>
           </div>
+        </section>
+
+        <section class="view" data-view="trash">
+          <section class="panel">
+            <div class="webnovel-toolbar">
+              <div>
+                <p class="panel-label">Papierkorb</p>
+                <h3>Gelöschte Dateien</h3>
+              </div>
+              <div class="webnovel-card-actions">
+                <button class="action-button" id="trash-refresh">Aktualisieren</button>
+                <button class="action-button danger" id="trash-empty">Papierkorb leeren</button>
+              </div>
+            </div>
+            <p class="body-copy">
+              Gelöschte Dateien liegen mit ihrer ursprünglichen Struktur unter
+              <code>.trash/</code> im Vault. Wiederherstellen bringt Datei und Sidecar zurück.
+              Für gelöschte Webnovel-Abos siehe den Filter „Papierkorb“ im Webnovels-Tab.
+            </p>
+            <div class="stack" id="trash-list"></div>
+            <p class="body-copy" id="trash-empty-hint">Der Papierkorb ist leer.</p>
+          </section>
         </section>
       </main>
 

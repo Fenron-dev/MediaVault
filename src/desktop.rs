@@ -46,6 +46,9 @@ use tauri::Manager;
 
 const PROTOCOL_SCHEME: &str = "mediavault";
 const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
+/// In-vault trash folder; deleted files move here (reversible) preserving
+/// their original relative path.
+const TRASH_DIR: &str = ".trash";
 const LEGACY_SIDECAR_SUFFIX: &str = ".mediashelf.yaml";
 const ANILIST_CACHE_FILE: &str = "anilist_cache.json";
 
@@ -259,6 +262,18 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/open-url" => json_response(
             StatusCode::OK,
             &build_open_url_response(request.uri().query()),
+        ),
+        "/api/trash/list" => json_response(
+            StatusCode::OK,
+            &build_trash_list_response(request.uri().query()),
+        ),
+        "/api/trash/restore" => json_response(
+            StatusCode::OK,
+            &build_trash_restore_response(request.body()),
+        ),
+        "/api/trash/purge" => json_response(
+            StatusCode::OK,
+            &build_trash_purge_response(request.body()),
         ),
         "/api/webnovel/list" => json_response(
             StatusCode::OK,
@@ -863,26 +878,276 @@ fn delete_vault_file(vault: &Vault, path: &str, permanent: bool) -> Result<()> {
         )));
     }
 
+    let sidecar_relative = sidecar_path_for(&relative).ok();
+    let sidecar_absolute = sidecar_relative
+        .as_ref()
+        .and_then(|rel| vault.resolve(rel.as_path()).ok());
+
     if permanent {
         fs::remove_file(&absolute).map_err(VaultError::from)?;
+        // Remove the sidecar too (best effort — never fail the delete).
+        if let Some(sidecar) = &sidecar_absolute {
+            let _ = fs::remove_file(sidecar);
+        }
     } else {
         // Move to .trash/<original relative path> so structure is preserved and
         // name collisions across folders are avoided.
-        let trash_target = vault.root().join(".trash").join(relative.as_path());
+        let trash_target = vault.root().join(TRASH_DIR).join(relative.as_path());
         if let Some(parent) = trash_target.parent() {
             fs::create_dir_all(parent).map_err(VaultError::from)?;
         }
         move_file_with_fallback(&absolute, &trash_target)?;
-    }
-
-    // Remove the sidecar if it exists (best effort — never fail the delete).
-    if let Ok(sidecar_relative) = sidecar_path_for(&relative) {
-        if let Ok(sidecar_absolute) = vault.resolve(sidecar_relative.as_path()) {
-            let _ = fs::remove_file(sidecar_absolute);
+        // Move the sidecar ALONGSIDE the file (not delete it) so a restore
+        // brings the metadata back.
+        if let (Some(sidecar_rel), Some(sidecar_abs)) = (&sidecar_relative, &sidecar_absolute) {
+            if sidecar_abs.exists() {
+                let sidecar_trash = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+                if let Some(parent) = sidecar_trash.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = move_file_with_fallback(sidecar_abs, &sidecar_trash);
+            }
         }
     }
 
     prune_empty_inbox_dirs(vault, absolute.parent());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Vault trash browser (list / restore / purge)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct TrashEntry {
+    /// Path relative to the vault root (== original location).
+    relative_path: String,
+    /// File name for display.
+    name: String,
+    size_bytes: u64,
+    /// Modification time in the trash (UNIX seconds) — proxy for deletion time.
+    trashed_at: u64,
+}
+
+#[derive(Serialize)]
+struct TrashListResponse {
+    entries: Vec<TrashEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Returns whether a file name is a sidecar (skipped in the trash listing —
+/// sidecars ride along with their media file).
+fn is_sidecar_name(name: &str) -> bool {
+    name.ends_with(".mediavault.yaml") || name.ends_with(LEGACY_SIDECAR_SUFFIX)
+}
+
+/// Recursively collects trashed media files (skips sidecars).
+fn collect_trash_entries(base: &Path, dir: &Path, entries: &mut Vec<TrashEntry>) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_trash_entries(base, &path, entries);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if is_sidecar_name(name) {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(base) else {
+            continue;
+        };
+        let metadata = path.metadata().ok();
+        let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let trashed_at = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        entries.push(TrashEntry {
+            relative_path: relative.to_string_lossy().replace('\\', "/"),
+            name: name.to_string(),
+            size_bytes,
+            trashed_at,
+        });
+    }
+}
+
+fn build_trash_list_response(query: Option<&str>) -> TrashListResponse {
+    let root_override = query.and_then(|query| extract_query_value(query, "root"));
+    let vault = match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => {
+            return TrashListResponse {
+                entries: Vec::new(),
+                error: Some(message),
+            }
+        }
+    };
+    let trash_root = vault.root().join(TRASH_DIR);
+    let mut entries = Vec::new();
+    if trash_root.exists() {
+        collect_trash_entries(&trash_root, &trash_root, &mut entries);
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.trashed_at));
+    TrashListResponse {
+        entries,
+        error: None,
+    }
+}
+
+#[derive(Deserialize)]
+struct TrashActionRequest {
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    all: bool,
+    vault_root: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TrashActionResponse {
+    processed: Vec<String>,
+    skipped: Vec<ApplyImportSkipped>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl TrashActionResponse {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            processed: Vec::new(),
+            skipped: Vec::new(),
+            error: Some(message.into()),
+        }
+    }
+}
+
+fn build_trash_restore_response(body: &[u8]) -> TrashActionResponse {
+    let req: TrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return TrashActionResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.vault_root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return TrashActionResponse::error(message),
+    };
+
+    let mut processed = Vec::new();
+    let mut skipped = Vec::new();
+    for rel in &req.paths {
+        match restore_trashed_file(&vault, rel) {
+            Ok(()) => processed.push(rel.clone()),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: rel.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+    TrashActionResponse {
+        processed,
+        skipped,
+        error: None,
+    }
+}
+
+/// Moves a trashed file (and its sidecar) back to its original location.
+fn restore_trashed_file(vault: &Vault, relative_path: &str) -> Result<()> {
+    let relative = RelativePath::new(relative_path)?;
+    let trash_source = vault.root().join(TRASH_DIR).join(relative.as_path());
+    if !trash_source.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Im Papierkorb nicht gefunden: {relative}"
+        )));
+    }
+    let target = vault.resolve(relative.as_path())?;
+    if target.exists() {
+        return Err(VaultError::InvalidVaultPath(
+            "Zielpfad existiert bereits.".to_string(),
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(VaultError::from)?;
+    }
+    move_file_with_fallback(&trash_source, &target)?;
+
+    // Bring the sidecar back too, if it was trashed alongside.
+    if let Ok(sidecar_rel) = sidecar_path_for(&relative) {
+        let sidecar_source = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+        if sidecar_source.exists() {
+            if let Ok(sidecar_target) = vault.resolve(sidecar_rel.as_path()) {
+                if let Some(parent) = sidecar_target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = move_file_with_fallback(&sidecar_source, &sidecar_target);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_trash_purge_response(body: &[u8]) -> TrashActionResponse {
+    let req: TrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return TrashActionResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.vault_root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return TrashActionResponse::error(message),
+    };
+    let trash_root = vault.root().join(TRASH_DIR);
+
+    if req.all {
+        if trash_root.exists() {
+            if let Err(error) = fs::remove_dir_all(&trash_root) {
+                return TrashActionResponse::error(format!(
+                    "Papierkorb konnte nicht geleert werden: {error}"
+                ));
+            }
+        }
+        return TrashActionResponse {
+            processed: vec!["*".to_string()],
+            skipped: Vec::new(),
+            error: None,
+        };
+    }
+
+    let mut processed = Vec::new();
+    let mut skipped = Vec::new();
+    for rel in &req.paths {
+        match purge_trashed_file(&vault, rel) {
+            Ok(()) => processed.push(rel.clone()),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: rel.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+    TrashActionResponse {
+        processed,
+        skipped,
+        error: None,
+    }
+}
+
+/// Permanently deletes a trashed file and its sidecar.
+fn purge_trashed_file(vault: &Vault, relative_path: &str) -> Result<()> {
+    let relative = RelativePath::new(relative_path)?;
+    let trash_source = vault.root().join(TRASH_DIR).join(relative.as_path());
+    if trash_source.exists() {
+        fs::remove_file(&trash_source).map_err(VaultError::from)?;
+    }
+    if let Ok(sidecar_rel) = sidecar_path_for(&relative) {
+        let sidecar_source = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+        if sidecar_source.exists() {
+            let _ = fs::remove_file(&sidecar_source);
+        }
+    }
     Ok(())
 }
 
