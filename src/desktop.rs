@@ -7186,8 +7186,9 @@ fn clear_relay_cookies(handle: &tauri::AppHandle) {
 fn close_browser_window() {
     if let Some(handle) = APP_HANDLE.get() {
         let handle = handle.clone();
+        let inner = handle.clone();
         let _ = handle.run_on_main_thread(move || {
-            if let Some(window) = handle.get_webview_window(BROWSER_WINDOW_LABEL) {
+            if let Some(window) = inner.get_webview_window(BROWSER_WINDOW_LABEL) {
                 let _ = window.close();
             }
         });
