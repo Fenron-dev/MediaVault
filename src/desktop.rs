@@ -6179,6 +6179,7 @@ fn run_webnovel_check(
     let mut uses_window = false;
     if options.manual {
         client = client.with_renderer(std::sync::Arc::new(|url: &str| render_page_via_window(url)));
+        set_current_job_id(Some(job_id.to_string()));
     }
     let mut new_chapters = 0usize;
     let mut failures = 0usize;
@@ -6200,6 +6201,7 @@ fn run_webnovel_check(
             status.novel_title = subscription.title.clone();
             status.current_chapter = 0;
             status.total_chapters = 0;
+            status.message = None;
         });
 
         match check_one_subscription(vault, &client, &mut subscription, options, job_id) {
@@ -6220,6 +6222,7 @@ fn run_webnovel_check(
     if uses_window {
         close_browser_window();
     }
+    set_current_job_id(None);
 
     let mut message = format!("{new_chapters} neue Kapitel geladen.");
     if failures > 0 {
@@ -7028,7 +7031,6 @@ fn build_webnovel_solve_status_response(query: Option<&str>) -> WebnovelSolveSta
         },
     }
 }
-
 // ---------------------------------------------------------------------------
 // Embedded-browser fetch engine (whitelisted, manual-only)
 // ---------------------------------------------------------------------------
@@ -7036,26 +7038,48 @@ fn build_webnovel_solve_status_response(query: Option<&str>) -> WebnovelSolveSta
 // For hosts in `WEBVIEW_ROUTED_HOSTS` a plain HTTP request either can't pass
 // Cloudflare (clearance is TLS-fingerprint-bound) or never sees the content
 // (rendered client-side by JavaScript). We drive a visible, sandboxed browser
-// window page-by-page and read the fully-rendered HTML back through the ONLY
-// channel Rust can read from a foreign-origin window: cookies. An injected
-// script gzip+hex-encodes the rendered `outerHTML` into chunk cookies; Rust
-// reassembles and gunzips them. The window has no IPC/app access whatsoever.
+// window page-by-page and read the fully-rendered HTML back through the window
+// TITLE — the only Rust-readable channel that is NOT sent to the server (unlike
+// cookies, which overflow request headers). An injected script gzip+hex-encodes
+// the rendered `outerHTML` into a JS variable; Rust pulls it in chunks by
+// eval-ing "set title to chunk i" and reading the title. The window has no
+// IPC / app access whatsoever.
 
 /// Label of the persistent fetch/browser window.
 const BROWSER_WINDOW_LABEL: &str = "mv-browser";
 /// Hard cap for rendering a single page (excluding manual challenge time).
-const RENDER_TIMEOUT_SECS: u64 = 40;
-/// Extra time to keep grabbing newer snapshots (JS content that fills in).
-const RENDER_STABILIZE_SECS: u64 = 4;
+const RENDER_TIMEOUT_SECS: u64 = 45;
 /// How long the user may take to solve an in-window challenge per page.
 const CHALLENGE_WAIT_SECS: u64 = 180;
+/// Characters of hex per title chunk pulled from the window.
+const TITLE_CHUNK_LEN: usize = 4000;
+
+/// Reflects the current browser-fetch state to the running job's message.
+static CURRENT_JOB_ID: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+
+fn set_current_job_id(job_id: Option<String>) {
+    if let Ok(mut guard) = CURRENT_JOB_ID.lock() {
+        *guard = job_id;
+    }
+}
+
+fn note_browser_status(message: &str) {
+    let job_id = CURRENT_JOB_ID.lock().ok().and_then(|g| g.clone());
+    if let Some(job_id) = job_id {
+        let owned = message.to_string();
+        update_webnovel_job(&job_id, move |status| status.message = Some(owned));
+    }
+}
 
 /// Injected once per navigation. Runs in the foreign page context, has no
-/// access to the app — it only writes cookies the Rust side reads.
+/// access to the app. Exposes `window.__mvGet(kind, i)` for the Rust puller
+/// and builds the encoded payload after the page settles.
 const BROWSER_RELAY_SCRIPT: &str = r#"
 (function(){
-  if (window.__mvRelayInstalled) { return; }
-  window.__mvRelayInstalled = true;
+  if (window.__mvInstalled) { return; }
+  window.__mvInstalled = true;
+  window.__mvData = null;
+  window.__mvMode = 'gz';
   function isChallenge(){
     var t=(document.title||'').toLowerCase();
     if(t.indexOf('just a moment')>=0) return true;
@@ -7063,15 +7087,17 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
     if(document.querySelector('#challenge-running,#cf-challenge-running,.cf-browser-verification,#challenge-form,#turnstile-wrapper')) return true;
     return false;
   }
-  function setCookie(n,v){ try{ document.cookie=n+'='+v+';path=/;SameSite=Lax'; }catch(e){} }
-  function toHex(bytes){
-    var h=''; var d='0123456789abcdef';
-    for(var i=0;i<bytes.length;i++){ var b=bytes[i]; h+=d[(b>>>4)&15]+d[b&15]; }
-    return h;
-  }
-  async function relay(){
+  window.__mvGet = function(kind, i){
+    try {
+      if (isChallenge()) { return 'CH'; }
+      if (window.__mvData === null) { return 'WAIT'; }
+      if (kind === 'meta') { return 'READY:' + window.__mvData.length + ':' + window.__mvMode; }
+      return window.__mvData.substr(i * 4000, 4000);
+    } catch(e) { return 'ERR'; }
+  };
+  async function build(){
     try{
-      if(isChallenge()){ setCookie('mvpg_state','challenge'); return; }
+      if (isChallenge()) { return; }
       var html=document.documentElement.outerHTML;
       html=html.replace(/<script[\s\S]*?<\/script>/gi,'');
       html=html.replace(/<style[\s\S]*?<\/style>/gi,'');
@@ -7087,16 +7113,12 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
           bytes=new Uint8Array(ab); mode='gz';
         }catch(e){ bytes=enc; mode='raw'; }
       }
-      var hex=toHex(bytes);
-      var CH=3000; var n=Math.ceil(hex.length/CH);
-      if(n>120){ setCookie('mvpg_state','toolarge'); return; }
-      for(var i=0;i<n;i++){ setCookie('mvpg_c'+i, hex.substr(i*CH,CH)); }
-      var nonce=Date.now();
-      setCookie('mvpg_state','ready');
-      setCookie('mvpg_meta', nonce+'.'+n+'.'+mode);
-    }catch(e){ setCookie('mvpg_state','error'); }
+      var d='0123456789abcdef'; var hex='';
+      for(var i=0;i<bytes.length;i++){ hex+=d[(bytes[i]>>>4)&15]+d[bytes[i]&15]; }
+      window.__mvData=hex; window.__mvMode=mode;
+    }catch(e){ window.__mvData=''; window.__mvMode='err'; }
   }
-  function schedule(){ setTimeout(relay,2000); setTimeout(relay,5000); setTimeout(relay,10000); }
+  function schedule(){ setTimeout(build,1500); setTimeout(build,4000); setTimeout(build,9000); }
   if(document.readyState==='complete'){ schedule(); }
   else { window.addEventListener('load', schedule); }
 })();
@@ -7127,30 +7149,24 @@ fn hex_decode(hex: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Reassembles the relayed HTML from a cookie map, or `None` if incomplete.
-fn decode_relayed_html(cookies: &HashMap<String, String>) -> Option<(u64, String)> {
-    let meta = cookies.get("mvpg_meta")?;
-    let mut parts = meta.split('.');
-    let nonce: u64 = parts.next()?.parse().ok()?;
-    let count: usize = parts.next()?.parse().ok()?;
-    let mode = parts.next().unwrap_or("gz");
-
-    let mut hex = String::new();
-    for i in 0..count {
-        let chunk = cookies.get(&format!("mvpg_c{i}"))?;
-        hex.push_str(chunk);
+/// Runs a closure on the main thread and returns its value (needed because
+/// webview title/eval calls must run there).
+fn on_main_thread<T, F>(handle: &tauri::AppHandle, f: F) -> Option<T>
+where
+    F: FnOnce(&tauri::AppHandle) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let inner = handle.clone();
+    if handle
+        .run_on_main_thread(move || {
+            let _ = tx.send(f(&inner));
+        })
+        .is_err()
+    {
+        return None;
     }
-    let bytes = hex_decode(&hex)?;
-    let html = if mode == "gz" {
-        use std::io::Read;
-        let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
-        let mut text = String::new();
-        decoder.read_to_string(&mut text).ok()?;
-        text
-    } else {
-        String::from_utf8(bytes).ok()?
-    };
-    Some((nonce, html))
+    rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
 }
 
 /// Navigates the browser window to `url` (creating it on first use).
@@ -7173,13 +7189,46 @@ fn navigate_browser_window(handle: &tauri::AppHandle, url: &tauri::Url) {
     }
 }
 
-/// Clears the relay cookies in the current page so the next navigation starts
-/// clean (runs on the main thread).
-fn clear_relay_cookies(handle: &tauri::AppHandle) {
-    if let Some(window) = handle.get_webview_window(BROWSER_WINDOW_LABEL) {
-        let script = "document.cookie.split(';').forEach(function(c){var k=c.split('=')[0].trim(); if(k.indexOf('mvpg_')===0){document.cookie=k+'=;path=/;expires=Thu, 01 Jan 1970 00:00:00 GMT';}});";
-        let _ = window.eval(script);
+/// Asks the window (via title) for `__mvGet(kind, i)` and returns the value.
+/// Uses a request nonce so a stale title read is ignored.
+fn pull_from_title(handle: &tauri::AppHandle, kind: &str, index: usize) -> Option<String> {
+    let nonce = format!("{}", unix_now_ms());
+    let arg = if kind == "meta" {
+        "'meta',0".to_string()
+    } else {
+        format!("'chunk',{index}")
+    };
+    let script = format!(
+        "try{{document.title='MV:{nonce}:'+window.__mvGet({arg});}}catch(e){{document.title='MV:{nonce}:ERR';}}"
+    );
+    let _ = on_main_thread(handle, move |h| {
+        if let Some(window) = h.get_webview_window(BROWSER_WINDOW_LABEL) {
+            let _ = window.eval(&script);
+        }
+    });
+    let prefix = format!("MV:{nonce}:");
+    for _ in 0..25 {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let title = on_main_thread(handle, |h| {
+            h.get_webview_window(BROWSER_WINDOW_LABEL)
+                .and_then(|w| w.title().ok())
+        })
+        .flatten();
+        if let Some(title) = title {
+            if let Some(rest) = title.strip_prefix(&prefix) {
+                return Some(rest.to_string());
+            }
+        }
     }
+    None
+}
+
+/// Milliseconds since the UNIX epoch (title nonce).
+fn unix_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 /// Closes the browser window at the end of a manual run.
@@ -7198,7 +7247,7 @@ fn close_browser_window() {
 /// Fetches a page's fully-rendered HTML through the browser window.
 ///
 /// Blocks the calling (worker) thread until the injected relay delivers the
-/// page via cookies, a challenge times out, or the render times out.
+/// page via the window title, a challenge times out, or rendering times out.
 fn render_page_via_window(url: &str) -> Result<String> {
     let handle = APP_HANDLE
         .get()
@@ -7208,38 +7257,31 @@ fn render_page_via_window(url: &str) -> Result<String> {
         .parse::<tauri::Url>()
         .map_err(|_| VaultError::ExternalApi(format!("URL ungültig: {url}")))?;
 
-    let nav_handle = handle.clone();
     let nav_url = target.clone();
-    let _ = handle.run_on_main_thread(move || navigate_browser_window(&nav_handle, &nav_url));
+    let _ = on_main_thread(&handle, move |h| navigate_browser_window(h, &nav_url));
 
     let start = std::time::Instant::now();
-    let mut best: Option<(u64, String)> = None;
-    let mut best_at = start;
     let mut challenge_seen = false;
 
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(800));
 
-        let Some(window) = handle.get_webview_window(BROWSER_WINDOW_LABEL) else {
-            // The window is created asynchronously on the main thread; give it
-            // a grace period before treating its absence as "user closed it".
+        // Give the window a grace period to appear (created async on main).
+        if handle.get_webview_window(BROWSER_WINDOW_LABEL).is_none() {
             if start.elapsed() < std::time::Duration::from_secs(8) {
                 continue;
             }
             return Err(VaultError::ExternalApi(
                 "Browserfenster wurde geschlossen.".to_string(),
             ));
-        };
-        let cookies: HashMap<String, String> = window
-            .cookies_for_url(target.clone())
-            .unwrap_or_default()
-            .iter()
-            .map(|cookie| (cookie.name().to_string(), cookie.value().to_string()))
-            .collect();
+        }
 
-        let state = cookies.get("mvpg_state").map(String::as_str).unwrap_or("");
-        if state == "challenge" {
+        let meta = pull_from_title(&handle, "meta", 0).unwrap_or_default();
+        if meta == "CH" {
             challenge_seen = true;
+            note_browser_status(
+                "Bitte die Sicherheitsprüfung im Browserfenster bestätigen (Fenster offen lassen) …",
+            );
             if start.elapsed() >= std::time::Duration::from_secs(CHALLENGE_WAIT_SECS) {
                 return Err(VaultError::ExternalApi(
                     "Zeitüberschreitung bei der Sicherheitsprüfung im Fenster.".to_string(),
@@ -7247,42 +7289,67 @@ fn render_page_via_window(url: &str) -> Result<String> {
             }
             continue;
         }
-        if state == "toolarge" {
-            return Err(VaultError::ExternalApi(
-                "Seite zu groß für das Browser-Routing.".to_string(),
-            ));
-        }
-
-        if let Some((nonce, html)) = decode_relayed_html(&cookies) {
-            if best.as_ref().map(|(n, _)| nonce > *n).unwrap_or(true) {
-                best = Some((nonce, html));
-                best_at = std::time::Instant::now();
+        if let Some(ready) = meta.strip_prefix("READY:") {
+            let mut parts = ready.split(':');
+            let total: usize = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mode = parts.next().unwrap_or("gz").to_string();
+            if total == 0 {
+                continue;
             }
+            // Content is ready — drop any lingering challenge hint so the
+            // normal progress line shows again.
+            note_browser_status("");
+            // Pull the hex payload chunk by chunk over the title.
+            let chunk_count = total.div_ceil(TITLE_CHUNK_LEN);
+            let mut hex = String::with_capacity(total);
+            let mut ok = true;
+            for i in 0..chunk_count {
+                match pull_from_title(&handle, "chunk", i) {
+                    Some(chunk) if chunk != "ERR" && chunk != "WAIT" => hex.push_str(&chunk),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok || hex.len() != total {
+                // Content changed mid-pull (SPA still rendering) — retry.
+                if start.elapsed() >= std::time::Duration::from_secs(RENDER_TIMEOUT_SECS) {
+                    return Err(VaultError::ExternalApi(
+                        "Seite konnte nicht vollständig gelesen werden.".to_string(),
+                    ));
+                }
+                continue;
+            }
+            let bytes = hex_decode(&hex).ok_or_else(|| {
+                VaultError::ExternalApi("Ungültige Daten aus dem Browserfenster.".to_string())
+            })?;
+            let html = if mode == "gz" {
+                use std::io::Read;
+                let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+                let mut text = String::new();
+                decoder.read_to_string(&mut text).map_err(|e| {
+                    VaultError::ExternalApi(format!("Dekomprimierung fehlgeschlagen: {e}"))
+                })?;
+                text
+            } else {
+                String::from_utf8(bytes).map_err(|e| {
+                    VaultError::ExternalApi(format!("Ungültiges UTF-8: {e}"))
+                })?
+            };
+            return Ok(html);
         }
 
-        // Stop once content has been stable for a while, or on hard timeout.
-        if best.is_some()
-            && best_at.elapsed() >= std::time::Duration::from_secs(RENDER_STABILIZE_SECS)
-        {
-            break;
-        }
+        // meta == "WAIT"/"ERR"/empty → keep waiting up to the render budget.
         let budget = if challenge_seen {
             CHALLENGE_WAIT_SECS
         } else {
             RENDER_TIMEOUT_SECS
         };
         if start.elapsed() >= std::time::Duration::from_secs(budget) {
-            break;
+            return Err(VaultError::ExternalApi(
+                "Seite konnte im Browserfenster nicht gerendert werden (Timeout).".to_string(),
+            ));
         }
-    }
-
-    let clear_handle = handle.clone();
-    let _ = handle.run_on_main_thread(move || clear_relay_cookies(&clear_handle));
-
-    match best {
-        Some((_, html)) => Ok(html),
-        None => Err(VaultError::ExternalApi(
-            "Seite konnte im Browserfenster nicht gerendert werden (Timeout).".to_string(),
-        )),
     }
 }

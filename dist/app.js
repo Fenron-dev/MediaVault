@@ -8163,9 +8163,15 @@ async function pollWebnovelJob(jobId) {
         status.total_chapters > 0
           ? ` — Kapitel ${status.current_chapter}/${status.total_chapters}`
           : "";
-      webnovelJobText.textContent = status.novel_title
-        ? `Prüfe „${status.novel_title}“${chapterPart} (${status.downloaded} geladen)`
-        : "Prüfe Abonnements …";
+      // A live message (e.g. "bitte Sicherheitsprüfung bestätigen") takes
+      // precedence over the routine progress line while the job runs.
+      if (status.state === "running" && status.message) {
+        webnovelJobText.textContent = status.message;
+      } else {
+        webnovelJobText.textContent = status.novel_title
+          ? `Prüfe „${status.novel_title}“${chapterPart} (${status.downloaded} geladen)`
+          : "Prüfe Abonnements …";
+      }
     }
     if (webnovelJobBar) {
       const fraction =
