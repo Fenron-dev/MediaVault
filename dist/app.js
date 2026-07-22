@@ -8005,7 +8005,13 @@ async function subscribeWebnovel() {
     setWebnovelFeedback("Bitte eine Novel-URL eingeben.", true);
     return;
   }
-  setWebnovelFeedback("Novel wird abgerufen …");
+  if (isWebviewRoutedUrl(url)) {
+    setWebnovelFeedback(
+      "Diese Seite wird über das Browserfenster geladen (bitte geöffnet lassen; ggf. Sicherheitsprüfung darin bestätigen).",
+    );
+  } else {
+    setWebnovelFeedback("Novel wird abgerufen …");
+  }
   if (webnovelSubscribeBtn) webnovelSubscribeBtn.disabled = true;
   try {
     const payload = await webnovelApi("/api/webnovel/subscribe", {
@@ -8115,6 +8121,9 @@ async function triggerWebnovelCheck(reason, id = undefined) {
         buildBatch: settings.buildBatchEpub,
         delayMs: Math.round(settings.delaySeconds * 1000),
         goodreadsMode: settings.goodreadsMode,
+        // User-initiated checks may use the visible browser window for
+        // whitelisted (Cloudflare / JS-rendered) hosts.
+        manual: reason === "manual" || reason === "subscribe",
       }),
     });
     if (payload.error) {
@@ -8844,6 +8853,24 @@ document.getElementById("webnovel-solve-btn")?.addEventListener("click", async (
 // Supported sources list + user bookmarks
 // ---------------------------------------------------------------------------
 
+// Hosts routed through the visible browser window (must match the Rust
+// WEBVIEW_ROUTED_HOSTS list).
+const WEBVIEW_ROUTED_HOSTS = [
+  "novelupdates.com",
+  "novellunar.com",
+  "novelarrow.com",
+  "freewebnovel.com",
+];
+
+function isWebviewRoutedUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return WEBVIEW_ROUTED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
 const WEBNOVEL_SOURCES = [
   ["RoyalRoad", "https://www.royalroad.com", "voll unterstützt"],
   ["NovelFull", "https://novelfull.com", "voll unterstützt"],
@@ -8852,12 +8879,13 @@ const WEBNOVEL_SOURCES = [
   ["Novgo", "https://novgo.net", "voll unterstützt"],
   ["NovelPhoenix", "https://novelphoenix.com", "voll unterstützt"],
   ["DivineDaoLibrary", "https://www.divinedaolibrary.com", "voll unterstützt"],
-  ["NovelUpdates", "https://www.novelupdates.com", "Sicherheitsprüfung nötig"],
-  ["FreeWebNovel", "https://freewebnovel.com", "Best-Effort + Sicherheitsprüfung"],
+  ["Novellunar", "https://novellunar.com", "Browserfenster (nur manuell)"],
+  ["NovelUpdates", "https://www.novelupdates.com", "Browserfenster (nur manuell)"],
+  ["NovelArrow", "https://novelarrow.com", "Browserfenster (nur manuell)"],
+  ["FreeWebNovel", "https://freewebnovel.com", "Browserfenster (nur manuell)"],
   ["EmpireNovel", "https://empirenovel.com", "Best-Effort"],
   ["ReadNovelMTL", "https://readnovelmtl.com", "Best-Effort"],
   ["Novelight", "https://novelight.net", "nur neueste ~50 Kapitel"],
-  ["NovelArrow", "https://novelarrow.com", "nicht unterstützt (nur JavaScript)"],
 ];
 
 const webnovelBookmarksKey = "mediavault.sourceBookmarks";
