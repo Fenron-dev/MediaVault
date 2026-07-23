@@ -6,14 +6,15 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 
 use crate::api::anilist::{AniListAnimeMetadata, AniListClient};
 use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::api::goodreads::GoodreadsClient;
 use crate::api::novel::{
-    detect_image_media_type, detect_source, sanitize_to_xhtml, ChapterRef, PoliteClient,
+    detect_image_media_type, detect_source, host_of, is_webview_routed, sanitize_to_xhtml,
+    set_browser_session, BrowserSession, ChapterRef, PoliteClient,
 };
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
@@ -32,16 +33,22 @@ use crate::core::progress::{
 use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
 use crate::core::vault::{RelativePath, Vault};
 use crate::core::webnovel::{
-    blocked_reason, delete_subscription, list_subscriptions, load_subscription, normalize_url,
-    save_subscription, unix_now, KnownChapter, Subscription,
+    blocked_reason, list_subscriptions, list_trashed_subscriptions, load_blocklist_entries,
+    load_subscription, normalize_url, purge_trashed_subscription, restore_subscription,
+    save_subscription, save_user_blocklist, trash_subscription, unix_now, BlocklistEntry,
+    KnownChapter, Subscription,
 };
 use crate::error::{Result, VaultError};
 use crate::media::{MediaEntry, MediaStatus, MediaType, PropertySource};
 use serde::{Deserialize, Serialize};
 use tauri::http::{header::CONTENT_TYPE, Request, Response, StatusCode};
+use tauri::Manager;
 
 const PROTOCOL_SCHEME: &str = "mediavault";
 const LEGACY_SYSTEM_DIR: &str = ".mediashelf";
+/// In-vault trash folder; deleted files move here (reversible) preserving
+/// their original relative path.
+const TRASH_DIR: &str = ".trash";
 const LEGACY_SIDECAR_SUFFIX: &str = ".mediashelf.yaml";
 const ANILIST_CACHE_FILE: &str = "anilist_cache.json";
 
@@ -108,7 +115,10 @@ pub(crate) fn run() -> Result<()> {
         // the synchronous webview thread and can no longer freeze the UI. (#7)
         .register_asynchronous_uri_scheme_protocol(
             PROTOCOL_SCHEME,
-            |_context, request, responder| {
+            |context, request, responder| {
+                // The Cloudflare-solve window needs an AppHandle from worker
+                // threads; capture it once from the protocol context.
+                let _ = APP_HANDLE.set(context.app_handle().clone());
                 std::thread::spawn(move || {
                     responder.respond(handle_request(&request));
                 });
@@ -249,6 +259,21 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
             StatusCode::OK,
             &build_list_subtitles_response(request.uri().query()),
         ),
+        "/api/open-url" => json_response(
+            StatusCode::OK,
+            &build_open_url_response(request.uri().query()),
+        ),
+        "/api/trash/list" => json_response(
+            StatusCode::OK,
+            &build_trash_list_response(request.uri().query()),
+        ),
+        "/api/trash/restore" => json_response(
+            StatusCode::OK,
+            &build_trash_restore_response(request.body()),
+        ),
+        "/api/trash/purge" => {
+            json_response(StatusCode::OK, &build_trash_purge_response(request.body()))
+        }
         "/api/webnovel/list" => json_response(
             StatusCode::OK,
             &build_webnovel_list_response(request.uri().query()),
@@ -268,6 +293,34 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/webnovel/check" => json_response(
             StatusCode::OK,
             &build_webnovel_check_response(request.body()),
+        ),
+        "/api/webnovel/solve" => json_response(
+            StatusCode::OK,
+            &build_webnovel_solve_response(request.body()),
+        ),
+        "/api/webnovel/solve-status" => json_response(
+            StatusCode::OK,
+            &build_webnovel_solve_status_response(request.uri().query()),
+        ),
+        "/api/webnovel/trash" => json_response(
+            StatusCode::OK,
+            &build_webnovel_trash_response(request.uri().query()),
+        ),
+        "/api/webnovel/restore" => json_response(
+            StatusCode::OK,
+            &build_webnovel_restore_response(request.body()),
+        ),
+        "/api/webnovel/purge" => json_response(
+            StatusCode::OK,
+            &build_webnovel_purge_response(request.body()),
+        ),
+        "/api/webnovel/blocklist" => json_response(
+            StatusCode::OK,
+            &build_webnovel_blocklist_response(request.uri().query()),
+        ),
+        "/api/webnovel/blocklist/save" => json_response(
+            StatusCode::OK,
+            &build_webnovel_blocklist_save_response(request.body()),
         ),
         "/api/webnovel/job" => json_response(
             StatusCode::OK,
@@ -824,26 +877,276 @@ fn delete_vault_file(vault: &Vault, path: &str, permanent: bool) -> Result<()> {
         )));
     }
 
+    let sidecar_relative = sidecar_path_for(&relative).ok();
+    let sidecar_absolute = sidecar_relative
+        .as_ref()
+        .and_then(|rel| vault.resolve(rel.as_path()).ok());
+
     if permanent {
         fs::remove_file(&absolute).map_err(VaultError::from)?;
+        // Remove the sidecar too (best effort — never fail the delete).
+        if let Some(sidecar) = &sidecar_absolute {
+            let _ = fs::remove_file(sidecar);
+        }
     } else {
         // Move to .trash/<original relative path> so structure is preserved and
         // name collisions across folders are avoided.
-        let trash_target = vault.root().join(".trash").join(relative.as_path());
+        let trash_target = vault.root().join(TRASH_DIR).join(relative.as_path());
         if let Some(parent) = trash_target.parent() {
             fs::create_dir_all(parent).map_err(VaultError::from)?;
         }
         move_file_with_fallback(&absolute, &trash_target)?;
-    }
-
-    // Remove the sidecar if it exists (best effort — never fail the delete).
-    if let Ok(sidecar_relative) = sidecar_path_for(&relative) {
-        if let Ok(sidecar_absolute) = vault.resolve(sidecar_relative.as_path()) {
-            let _ = fs::remove_file(sidecar_absolute);
+        // Move the sidecar ALONGSIDE the file (not delete it) so a restore
+        // brings the metadata back.
+        if let (Some(sidecar_rel), Some(sidecar_abs)) = (&sidecar_relative, &sidecar_absolute) {
+            if sidecar_abs.exists() {
+                let sidecar_trash = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+                if let Some(parent) = sidecar_trash.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = move_file_with_fallback(sidecar_abs, &sidecar_trash);
+            }
         }
     }
 
     prune_empty_inbox_dirs(vault, absolute.parent());
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Vault trash browser (list / restore / purge)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct TrashEntry {
+    /// Path relative to the vault root (== original location).
+    relative_path: String,
+    /// File name for display.
+    name: String,
+    size_bytes: u64,
+    /// Modification time in the trash (UNIX seconds) — proxy for deletion time.
+    trashed_at: u64,
+}
+
+#[derive(Serialize)]
+struct TrashListResponse {
+    entries: Vec<TrashEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Returns whether a file name is a sidecar (skipped in the trash listing —
+/// sidecars ride along with their media file).
+fn is_sidecar_name(name: &str) -> bool {
+    name.ends_with(".mediavault.yaml") || name.ends_with(LEGACY_SIDECAR_SUFFIX)
+}
+
+/// Recursively collects trashed media files (skips sidecars).
+fn collect_trash_entries(base: &Path, dir: &Path, entries: &mut Vec<TrashEntry>) {
+    let Ok(read) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_trash_entries(base, &path, entries);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if is_sidecar_name(name) {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(base) else {
+            continue;
+        };
+        let metadata = path.metadata().ok();
+        let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+        let trashed_at = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        entries.push(TrashEntry {
+            relative_path: relative.to_string_lossy().replace('\\', "/"),
+            name: name.to_string(),
+            size_bytes,
+            trashed_at,
+        });
+    }
+}
+
+fn build_trash_list_response(query: Option<&str>) -> TrashListResponse {
+    let root_override = query.and_then(|query| extract_query_value(query, "root"));
+    let vault = match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => {
+            return TrashListResponse {
+                entries: Vec::new(),
+                error: Some(message),
+            }
+        }
+    };
+    let trash_root = vault.root().join(TRASH_DIR);
+    let mut entries = Vec::new();
+    if trash_root.exists() {
+        collect_trash_entries(&trash_root, &trash_root, &mut entries);
+    }
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.trashed_at));
+    TrashListResponse {
+        entries,
+        error: None,
+    }
+}
+
+#[derive(Deserialize)]
+struct TrashActionRequest {
+    #[serde(default)]
+    paths: Vec<String>,
+    #[serde(default)]
+    all: bool,
+    vault_root: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TrashActionResponse {
+    processed: Vec<String>,
+    skipped: Vec<ApplyImportSkipped>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl TrashActionResponse {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            processed: Vec::new(),
+            skipped: Vec::new(),
+            error: Some(message.into()),
+        }
+    }
+}
+
+fn build_trash_restore_response(body: &[u8]) -> TrashActionResponse {
+    let req: TrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return TrashActionResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.vault_root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return TrashActionResponse::error(message),
+    };
+
+    let mut processed = Vec::new();
+    let mut skipped = Vec::new();
+    for rel in &req.paths {
+        match restore_trashed_file(&vault, rel) {
+            Ok(()) => processed.push(rel.clone()),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: rel.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+    TrashActionResponse {
+        processed,
+        skipped,
+        error: None,
+    }
+}
+
+/// Moves a trashed file (and its sidecar) back to its original location.
+fn restore_trashed_file(vault: &Vault, relative_path: &str) -> Result<()> {
+    let relative = RelativePath::new(relative_path)?;
+    let trash_source = vault.root().join(TRASH_DIR).join(relative.as_path());
+    if !trash_source.exists() {
+        return Err(VaultError::InvalidVaultPath(format!(
+            "Im Papierkorb nicht gefunden: {relative}"
+        )));
+    }
+    let target = vault.resolve(relative.as_path())?;
+    if target.exists() {
+        return Err(VaultError::InvalidVaultPath(
+            "Zielpfad existiert bereits.".to_string(),
+        ));
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(VaultError::from)?;
+    }
+    move_file_with_fallback(&trash_source, &target)?;
+
+    // Bring the sidecar back too, if it was trashed alongside.
+    if let Ok(sidecar_rel) = sidecar_path_for(&relative) {
+        let sidecar_source = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+        if sidecar_source.exists() {
+            if let Ok(sidecar_target) = vault.resolve(sidecar_rel.as_path()) {
+                if let Some(parent) = sidecar_target.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                let _ = move_file_with_fallback(&sidecar_source, &sidecar_target);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn build_trash_purge_response(body: &[u8]) -> TrashActionResponse {
+    let req: TrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return TrashActionResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.vault_root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return TrashActionResponse::error(message),
+    };
+    let trash_root = vault.root().join(TRASH_DIR);
+
+    if req.all {
+        if trash_root.exists() {
+            if let Err(error) = fs::remove_dir_all(&trash_root) {
+                return TrashActionResponse::error(format!(
+                    "Papierkorb konnte nicht geleert werden: {error}"
+                ));
+            }
+        }
+        return TrashActionResponse {
+            processed: vec!["*".to_string()],
+            skipped: Vec::new(),
+            error: None,
+        };
+    }
+
+    let mut processed = Vec::new();
+    let mut skipped = Vec::new();
+    for rel in &req.paths {
+        match purge_trashed_file(&vault, rel) {
+            Ok(()) => processed.push(rel.clone()),
+            Err(error) => skipped.push(ApplyImportSkipped {
+                source_path: rel.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+    TrashActionResponse {
+        processed,
+        skipped,
+        error: None,
+    }
+}
+
+/// Permanently deletes a trashed file and its sidecar.
+fn purge_trashed_file(vault: &Vault, relative_path: &str) -> Result<()> {
+    let relative = RelativePath::new(relative_path)?;
+    let trash_source = vault.root().join(TRASH_DIR).join(relative.as_path());
+    if trash_source.exists() {
+        fs::remove_file(&trash_source).map_err(VaultError::from)?;
+    }
+    if let Ok(sidecar_rel) = sidecar_path_for(&relative) {
+        let sidecar_source = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+        if sidecar_source.exists() {
+            let _ = fs::remove_file(&sidecar_source);
+        }
+    }
     Ok(())
 }
 
@@ -1180,6 +1483,19 @@ fn build_vault_plan_with_root(vault_root: PathBuf, refresh: bool) -> Result<Demo
 
     group_audiobook_folders(&mut plan_items, Some(vault_root.as_path()));
 
+    // Attach cover art (cover.jpg/poster.png next to the file) so collection
+    // cards and the inspector can show it without extra requests.
+    for plan_item in &mut plan_items {
+        if plan_item.cover_url.is_none() {
+            plan_item.cover_url = find_cover_url(&vault, &plan_item.source_path);
+        }
+        plan_item.modified_at = fs::metadata(vault.root().join(&plan_item.source_path))
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs());
+    }
+
     // Append parts list to the sidecar YAML preview for audiobook group representatives.
     for item in &mut plan_items {
         if let Some(parts) = item.audiobook_parts.as_deref() {
@@ -1481,6 +1797,11 @@ struct ParsedSidecar {
     anilist_id: Option<u32>,
     anilist_url: Option<String>,
     status: Option<MediaStatus>,
+    description: Option<String>,
+    rating_external: Option<f32>,
+    author: Option<String>,
+    genres: Vec<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1624,6 +1945,23 @@ struct DemoPlanItem {
     airing_season: Option<String>,
     anilist_id: Option<u32>,
     anilist_url: Option<String>,
+    /// Cover image URL (vault cover file next to the media), when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rating_external: Option<f32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    genres: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    /// File modification time (UNIX seconds), for date sorting in the UI.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at: Option<u64>,
+    /// Lifecycle status from the sidecar (completed, in-library, …).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
     collection_path: String,
     size_bytes: u64,
     folder_segment: String,
@@ -1761,6 +2099,17 @@ impl DemoPlanItem {
             anilist_url: sidecar
                 .and_then(|value| value.anilist_url.clone())
                 .or_else(|| anilist.and_then(|metadata| metadata.anilist_url.clone())),
+            cover_url: None,
+            description: sidecar.and_then(|value| value.description.clone()),
+            rating_external: sidecar.and_then(|value| value.rating_external),
+            genres: sidecar
+                .map(|value| value.genres.clone())
+                .unwrap_or_default(),
+            tags: sidecar.map(|value| value.tags.clone()).unwrap_or_default(),
+            modified_at: None,
+            status: sidecar
+                .and_then(|value| value.status)
+                .map(|status| status.to_string()),
             collection_path,
             size_bytes: file.size_bytes,
             folder_segment: media_type.folder_segment().to_string(),
@@ -1773,7 +2122,7 @@ impl DemoPlanItem {
             steps: item.steps.iter().cloned().map(format_plan_step).collect(),
             audiobook_parts: None,
             is_audiobook_part: false,
-            author: None,
+            author: sidecar.and_then(|value| value.author.clone()),
         }
     }
 }
@@ -3483,18 +3832,38 @@ fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassifica
 fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
     let mut sidecar = ParsedSidecar::default();
     let mut lines = raw.lines();
+    // Tracks which list ("genres"/"tags") the following "- item" lines feed.
+    let mut active_list: Option<&str> = None;
 
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "---" {
+            active_list = None;
+            continue;
+        }
+
+        // List entries rendered as `  - "value"` under a "genres:"/"tags:" key.
+        if let Some(entry) = trimmed.strip_prefix("- ") {
+            let value = unquote_yaml(entry);
+            match active_list {
+                Some("genres") if !value.is_empty() => sidecar.genres.push(value),
+                Some("tags") if !value.is_empty() => sidecar.tags.push(value),
+                _ => {}
+            }
             continue;
         }
 
         let Some((key, value)) = trimmed.split_once(':') else {
+            active_list = None;
             continue;
         };
         let key = key.trim();
         let value = value.trim();
+        active_list = match (key, value.is_empty()) {
+            ("genres", true) => Some("genres"),
+            ("tags", true) => Some("tags"),
+            _ => None,
+        };
 
         match key {
             "media_type" => sidecar.media_type = parse_media_type(unquote_yaml(value)),
@@ -3513,6 +3882,9 @@ fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
             "anilist_id" => sidecar.anilist_id = value.parse::<u32>().ok(),
             "anilist_url" => sidecar.anilist_url = Some(unquote_yaml(value)),
             "status" => sidecar.status = parse_media_status(unquote_yaml(value).as_str()),
+            "description" => sidecar.description = Some(unquote_yaml(value)),
+            "author" => sidecar.author = Some(unquote_yaml(value)),
+            "rating_external" => sidecar.rating_external = value.parse::<f32>().ok(),
             _ => {}
         }
     }
@@ -5137,7 +5509,23 @@ struct WebnovelSubscriptionSummary {
     title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    genres: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    goodreads_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anilist_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rating_external: Option<f32>,
+    /// Vault-relative path of the cached cover image, when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cover_path: Option<String>,
     completed: bool,
+    hiatus: bool,
     enabled: bool,
     known_chapters: usize,
     downloaded_chapters: usize,
@@ -5148,14 +5536,31 @@ struct WebnovelSubscriptionSummary {
 }
 
 impl WebnovelSubscriptionSummary {
-    fn from_subscription(subscription: &Subscription) -> Self {
+    fn from_subscription(subscription: &Subscription, vault: &Vault) -> Self {
+        // Detail views want the cover; resolve the cached file (if any) to a
+        // vault-relative path the frontend can feed into /api/media-file.
+        let cover_path = load_novel_cover_path(&webnovel_folder(vault, &subscription.title))
+            .and_then(|absolute| {
+                vault
+                    .relative_from_absolute(&absolute)
+                    .ok()
+                    .map(|relative| relative.to_string())
+            });
         Self {
             id: subscription.id.clone(),
             url: subscription.url.clone(),
             source: subscription.source.clone(),
             title: subscription.title.clone(),
             author: subscription.author.clone(),
+            description: subscription.description.clone(),
+            genres: subscription.genres.clone(),
+            tags: subscription.tags.clone(),
+            goodreads_url: subscription.goodreads_url.clone(),
+            anilist_url: subscription.anilist_url.clone(),
+            rating_external: subscription.rating_external,
+            cover_path,
             completed: subscription.completed,
+            hiatus: subscription.hiatus,
             enabled: subscription.enabled,
             known_chapters: subscription.known_chapters.len(),
             downloaded_chapters: subscription.downloaded_count(),
@@ -5188,7 +5593,9 @@ fn build_webnovel_list_response(query: Option<&str>) -> WebnovelListResponse {
         Ok(subscriptions) => WebnovelListResponse {
             subscriptions: subscriptions
                 .iter()
-                .map(WebnovelSubscriptionSummary::from_subscription)
+                .map(|subscription| {
+                    WebnovelSubscriptionSummary::from_subscription(subscription, &vault)
+                })
                 .collect(),
             error: None,
         },
@@ -5260,7 +5667,9 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
     match load_subscription(&vault.system_dir(), &id) {
         Ok(Some(existing)) => {
             return WebnovelSubscribeResponse {
-                subscription: Some(WebnovelSubscriptionSummary::from_subscription(&existing)),
+                subscription: Some(WebnovelSubscriptionSummary::from_subscription(
+                    &existing, &vault,
+                )),
                 already_subscribed: true,
                 error: None,
             }
@@ -5269,15 +5678,29 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
         Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
     }
 
-    let client = match PoliteClient::new() {
+    let mut client = match PoliteClient::new() {
         Ok(client) => client,
         Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
     };
+    // Subscribing is always user-initiated → whitelisted (Cloudflare /
+    // JS-rendered) hosts are fetched through the visible browser window.
+    let uses_window = is_webview_routed(&url);
+    if uses_window {
+        client = client.with_renderer(std::sync::Arc::new(|url: &str| render_page_via_window(url)));
+    }
     let source = detect_source(&url);
     let info = match source.fetch_novel_info(&client, &url) {
         Ok(info) => info,
-        Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
+        Err(error) => {
+            if uses_window {
+                close_browser_window();
+            }
+            return WebnovelSubscribeResponse::error(error.to_string());
+        }
     };
+    if uses_window {
+        close_browser_window();
+    }
 
     let mut subscription = Subscription::new(url, source.id(), info.title.clone());
     subscription.author = info.author.clone();
@@ -5302,6 +5725,7 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
         Ok(()) => WebnovelSubscribeResponse {
             subscription: Some(WebnovelSubscriptionSummary::from_subscription(
                 &subscription,
+                &vault,
             )),
             already_subscribed: false,
             error: None,
@@ -5356,27 +5780,159 @@ fn build_webnovel_unsubscribe_response(body: &[u8]) -> WebnovelSimpleResponse {
         Err(message) => return WebnovelSimpleResponse::error(message),
     };
 
-    let subscription = match load_subscription(&vault.system_dir(), &req.id) {
+    // Soft delete: the record moves to the in-app trash and can be restored.
+    let subscription = match trash_subscription(&vault.system_dir(), &req.id) {
         Ok(Some(subscription)) => subscription,
         Ok(None) => return WebnovelSimpleResponse::error("Abo nicht gefunden."),
         Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
     };
 
     if !req.keep_files {
+        // Files move into the vault .trash folder (same convention as
+        // delete-files) instead of being removed — reversible via restore.
         let novel_dir = webnovel_folder(&vault, &subscription.title);
         if novel_dir.exists() {
-            if let Err(error) = fs::remove_dir_all(&novel_dir) {
+            let trash_target = vault
+                .root()
+                .join(".trash")
+                .join(MediaType::Webnovel.folder_segment())
+                .join(sanitize_path_segment(&subscription.title));
+            if let Some(parent) = trash_target.parent() {
+                fs::create_dir_all(parent).ok();
+            }
+            if trash_target.exists() {
+                fs::remove_dir_all(&trash_target).ok();
+            }
+            if let Err(error) = fs::rename(&novel_dir, &trash_target) {
                 return WebnovelSimpleResponse::error(format!(
-                    "Dateien konnten nicht gelöscht werden: {error}"
+                    "Dateien konnten nicht in den Papierkorb verschoben werden: {error}"
                 ));
             }
         }
     }
 
-    match delete_subscription(&vault.system_dir(), &req.id) {
-        Ok(()) => WebnovelSimpleResponse::ok(),
-        Err(error) => WebnovelSimpleResponse::error(error.to_string()),
+    WebnovelSimpleResponse::ok()
+}
+
+/// Vault-trash location of a novel's files.
+fn webnovel_trash_folder(vault: &Vault, title: &str) -> PathBuf {
+    vault
+        .root()
+        .join(".trash")
+        .join(MediaType::Webnovel.folder_segment())
+        .join(sanitize_path_segment(title))
+}
+
+#[derive(Serialize)]
+struct WebnovelTrashEntry {
+    id: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trashed_at_unix: Option<u64>,
+    /// True when the novel's files also sit in the vault trash.
+    files_in_trash: bool,
+}
+
+#[derive(Serialize)]
+struct WebnovelTrashResponse {
+    entries: Vec<WebnovelTrashEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_webnovel_trash_response(query: Option<&str>) -> WebnovelTrashResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    let vault = match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => {
+            return WebnovelTrashResponse {
+                entries: Vec::new(),
+                error: Some(message),
+            }
+        }
+    };
+    match list_trashed_subscriptions(&vault.system_dir()) {
+        Ok(trashed) => WebnovelTrashResponse {
+            entries: trashed
+                .iter()
+                .map(|subscription| WebnovelTrashEntry {
+                    id: subscription.id.clone(),
+                    title: subscription.title.clone(),
+                    trashed_at_unix: subscription.trashed_at_unix,
+                    files_in_trash: webnovel_trash_folder(&vault, &subscription.title).exists(),
+                })
+                .collect(),
+            error: None,
+        },
+        Err(error) => WebnovelTrashResponse {
+            entries: Vec::new(),
+            error: Some(error.to_string()),
+        },
     }
+}
+
+#[derive(Deserialize)]
+struct WebnovelTrashActionRequest {
+    id: String,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+fn build_webnovel_restore_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelTrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+    let subscription = match restore_subscription(&vault.system_dir(), &req.id) {
+        Ok(subscription) => subscription,
+        Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
+    };
+    // Bring trashed files back, if any.
+    let trash_source = webnovel_trash_folder(&vault, &subscription.title);
+    if trash_source.exists() {
+        let target = webnovel_folder(&vault, &subscription.title);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        if !target.exists() {
+            fs::rename(&trash_source, &target).ok();
+        }
+    }
+    WebnovelSimpleResponse::ok()
+}
+
+fn build_webnovel_purge_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelTrashActionRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+    // Need the title before purging the record to find the trashed folder.
+    let title = list_trashed_subscriptions(&vault.system_dir())
+        .ok()
+        .and_then(|entries| {
+            entries
+                .into_iter()
+                .find(|subscription| subscription.id == req.id)
+                .map(|subscription| subscription.title)
+        });
+    if let Err(error) = purge_trashed_subscription(&vault.system_dir(), &req.id) {
+        return WebnovelSimpleResponse::error(error.to_string());
+    }
+    if let Some(title) = title {
+        let folder = webnovel_trash_folder(&vault, &title);
+        if folder.exists() {
+            fs::remove_dir_all(&folder).ok();
+        }
+    }
+    WebnovelSimpleResponse::ok()
 }
 
 #[derive(Deserialize)]
@@ -5384,6 +5940,8 @@ struct WebnovelUpdateRequest {
     id: String,
     #[serde(default)]
     completed: Option<bool>,
+    #[serde(default)]
+    hiatus: Option<bool>,
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -5408,6 +5966,9 @@ fn build_webnovel_update_response(body: &[u8]) -> WebnovelSimpleResponse {
 
     if let Some(completed) = req.completed {
         subscription.completed = completed;
+    }
+    if let Some(hiatus) = req.hiatus {
+        subscription.hiatus = hiatus;
     }
     if let Some(enabled) = req.enabled {
         subscription.enabled = enabled;
@@ -5437,6 +5998,10 @@ struct WebnovelCheckRequest {
     /// Goodreads metadata mode: `off`, `fill` (default), or `override`.
     #[serde(default)]
     goodreads_mode: Option<String>,
+    /// True when the user started the check by hand — required to route
+    /// whitelisted hosts through the (visible) browser window.
+    #[serde(default)]
+    manual: bool,
 }
 
 #[derive(Serialize)]
@@ -5454,6 +6019,7 @@ struct WebnovelCheckOptions {
     build_batch: bool,
     delay_ms: Option<u64>,
     goodreads_mode: GoodreadsMode,
+    manual: bool,
 }
 
 /// How Goodreads results are merged into a subscription's metadata.
@@ -5524,6 +6090,7 @@ fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
         build_batch: req.build_batch,
         delay_ms: req.delay_ms,
         goodreads_mode: GoodreadsMode::parse(req.goodreads_mode.as_deref()),
+        manual: req.manual,
     };
     let thread_job_id = job_id.clone();
     std::thread::spawn(move || {
@@ -5608,7 +6175,9 @@ fn run_webnovel_check(
             .collect(),
         None => all
             .into_iter()
-            .filter(|subscription| subscription.enabled && !subscription.completed)
+            .filter(|subscription| {
+                subscription.enabled && !subscription.completed && !subscription.hiatus
+            })
             .collect(),
     };
 
@@ -5616,18 +6185,37 @@ fn run_webnovel_check(
         return Ok("Keine passenden Abonnements.".to_string());
     }
 
-    let client = match options.delay_ms {
+    let mut client = match options.delay_ms {
         Some(delay_ms) => PoliteClient::with_delay_ms(delay_ms)?,
         None => PoliteClient::new()?,
     };
+    // Manual runs may route whitelisted hosts through the browser window.
+    let mut uses_window = false;
+    if options.manual {
+        client = client.with_renderer(std::sync::Arc::new(|url: &str| render_page_via_window(url)));
+        set_current_job_id(Some(job_id.to_string()));
+    }
     let mut new_chapters = 0usize;
     let mut failures = 0usize;
 
     for mut subscription in selected {
+        // Whitelisted hosts need the visible browser window and the user's
+        // presence — never touch them in automatic (startup/interval) runs.
+        if !options.manual && is_webview_routed(&subscription.url) {
+            subscription.last_error =
+                Some("Nur manuell prüfbar (Sicherheitsprüfung / JavaScript-Seite).".to_string());
+            save_subscription(&system_dir, &subscription)?;
+            continue;
+        }
+        if is_webview_routed(&subscription.url) {
+            uses_window = true;
+        }
+
         update_webnovel_job(job_id, |status| {
             status.novel_title = subscription.title.clone();
             status.current_chapter = 0;
             status.total_chapters = 0;
+            status.message = None;
         });
 
         match check_one_subscription(vault, &client, &mut subscription, options, job_id) {
@@ -5643,6 +6231,12 @@ fn run_webnovel_check(
         subscription.last_check_unix = Some(unix_now());
         save_subscription(&system_dir, &subscription)?;
     }
+
+    // Close the browser window once the run that opened it is done.
+    if uses_window {
+        close_browser_window();
+    }
+    set_current_job_id(None);
 
     let mut message = format!("{new_chapters} neue Kapitel geladen.");
     if failures > 0 {
@@ -5787,10 +6381,15 @@ fn check_one_subscription(
     // The complete EPUB is also rebuilt when it is missing entirely or when a
     // cover arrived after the last build (covers embed into the EPUB itself).
     let safe_title = sanitize_path_segment(&subscription.title);
-    let complete_missing = !novel_dir.join(format!("{safe_title}.epub")).exists();
+    let complete_file = format!("{safe_title}.epub");
+    let complete_missing = !novel_dir.join(&complete_file).exists();
     if options.build_complete && (!downloaded_indices.is_empty() || cover_added || complete_missing)
     {
         build_complete_epub(vault, subscription)?;
+    } else if !complete_missing {
+        // No rebuild needed, but Goodreads/AniList enrichment may have added
+        // metadata — keep the sidecar (and thus the collections view) in sync.
+        write_webnovel_sidecar(vault, subscription, &complete_file, &subscription.id, None)?;
     }
 
     if let Some(error) = fetch_error {
@@ -6033,6 +6632,28 @@ fn build_complete_epub(vault: &Vault, subscription: &Subscription) -> Result<()>
 }
 
 /// Writes the `.mediavault.yaml` sidecar next to a generated EPUB.
+/// Unions the tags already present in a novel's sidecar with the incoming
+/// ones (subscription-derived), preserving user-added tags across re-checks.
+/// Case-insensitive de-duplication; incoming tags win the casing.
+fn merge_webnovel_tags(vault: &Vault, relative: &RelativePath, incoming: &[String]) -> Vec<String> {
+    let mut result: Vec<String> = incoming.to_vec();
+    let mut seen: HashSet<String> = result.iter().map(|tag| tag.to_lowercase()).collect();
+
+    if let Ok(sidecar_relative) = sidecar_path_for(relative) {
+        let sidecar_path = vault.root().join(sidecar_relative.as_path());
+        if let Ok(raw) = fs::read_to_string(&sidecar_path) {
+            if let Ok(existing) = parse_sidecar_metadata(&raw) {
+                for tag in existing.tags {
+                    if seen.insert(tag.to_lowercase()) {
+                        result.push(tag);
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
 fn write_webnovel_sidecar(
     vault: &Vault,
     subscription: &Subscription,
@@ -6052,10 +6673,13 @@ fn write_webnovel_sidecar(
     entry.created_at_unix = unix_now();
     entry.updated_at_unix = entry.created_at_unix;
     entry.properties.title = Some(subscription.title.clone());
+    entry.properties.author = subscription.author.clone();
     entry.properties.description = subscription.description.clone();
     entry.properties.series_title = Some(subscription.title.clone());
     entry.properties.genres = subscription.genres.clone();
-    entry.properties.tags = subscription.tags.clone();
+    // Preserve tags a user added by hand in the inspector: union the existing
+    // sidecar tags with the subscription's, so a re-check never wipes them.
+    entry.properties.tags = merge_webnovel_tags(vault, &relative, &subscription.tags);
     entry.properties.anilist_id = subscription.anilist_id;
     entry.properties.anilist_url = subscription.anilist_url.clone();
     entry.properties.rating_external = subscription.rating_external;
@@ -6066,6 +6690,9 @@ fn write_webnovel_sidecar(
     });
     entry.properties.status = Some(if subscription.completed {
         MediaStatus::Completed
+    } else if subscription.hiatus {
+        // OnHold doubles as "hiatus": abandoned upstream, never finished.
+        MediaStatus::OnHold
     } else {
         MediaStatus::InLibrary
     });
@@ -6091,4 +6718,664 @@ fn write_webnovel_sidecar(
     let sidecar_relative = sidecar_path_for(&relative)?;
     fs::write(vault.root().join(sidecar_relative.as_path()), yaml).map_err(VaultError::from)?;
     Ok(())
+}
+
+/// Opens an external web link in the system browser.
+///
+/// Only `http`/`https` URLs are accepted — anything else (file paths, custom
+/// schemes) is rejected so this endpoint cannot be abused to launch local
+/// programs or leak files.
+fn build_open_url_response(query: Option<&str>) -> WebnovelSimpleResponse {
+    let url = match query.and_then(|q| extract_query_value(q, "url")) {
+        Some(url) => url,
+        None => return WebnovelSimpleResponse::error("missing url"),
+    };
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return WebnovelSimpleResponse::error("Nur http/https-Links erlaubt.");
+    }
+
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+
+    match result {
+        Ok(_) => WebnovelSimpleResponse::ok(),
+        Err(error) => {
+            WebnovelSimpleResponse::error(format!("Browser-Start fehlgeschlagen: {error}"))
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelBlocklistResponse {
+    entries: Vec<BlocklistEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+fn build_webnovel_blocklist_response(query: Option<&str>) -> WebnovelBlocklistResponse {
+    let root_override = query.and_then(|q| extract_query_value(q, "root"));
+    match resolve_webnovel_vault(root_override.as_deref()) {
+        Ok(vault) => WebnovelBlocklistResponse {
+            entries: load_blocklist_entries(&vault.system_dir()),
+            error: None,
+        },
+        Err(message) => WebnovelBlocklistResponse {
+            entries: Vec::new(),
+            error: Some(message),
+        },
+    }
+}
+
+#[derive(Deserialize)]
+struct WebnovelBlocklistSaveRequest {
+    entries: Vec<BlocklistEntry>,
+    #[serde(default)]
+    root: Option<String>,
+}
+
+fn build_webnovel_blocklist_save_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelBlocklistSaveRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let vault = match resolve_webnovel_vault(req.root.as_deref()) {
+        Ok(vault) => vault,
+        Err(message) => return WebnovelSimpleResponse::error(message),
+    };
+    match save_user_blocklist(&vault.system_dir(), &req.entries) {
+        Ok(()) => WebnovelSimpleResponse::ok(),
+        Err(error) => WebnovelSimpleResponse::error(error.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive Cloudflare solve window
+// ---------------------------------------------------------------------------
+
+/// App handle captured from the URI-scheme context (set on first request).
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Per-host state of the solve flow: `pending`, `done`, `failed:<msg>`.
+static SOLVE_STATES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Window label of the solve window (one at a time).
+const SOLVE_WINDOW_LABEL: &str = "cf-solve";
+/// Fixed browser user agent for the solve window AND the follow-up requests —
+/// Cloudflare binds its clearance cookie to the user agent.
+const SOLVE_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+    AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
+/// How long the user gets to solve the challenge.
+const SOLVE_TIMEOUT_SECS: u64 = 240;
+/// Poll interval for the (local, cheap) cookie check.
+const SOLVE_POLL_SECS: u64 = 3;
+/// Grace period before probing sites that never issue an interactive
+/// challenge (auto-pass) — probing too early burns a running challenge.
+const SOLVE_GRACE_SECS: u64 = 15;
+/// Probe attempts after a clearance cookie appeared. Each failed probe can
+/// invalidate the clearance again (TLS binding), so we stop early with a
+/// clear message instead of looping the user's challenge forever.
+const SOLVE_MAX_PROBES: u32 = 3;
+
+fn set_solve_state(host: &str, state: impl Into<String>) {
+    if let Ok(mut states) = SOLVE_STATES.lock() {
+        states.insert(host.to_string(), state.into());
+    }
+}
+
+#[derive(Deserialize)]
+struct WebnovelSolveRequest {
+    url: String,
+}
+
+#[derive(Serialize)]
+struct WebnovelSolveResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Opens a visible, isolated browser window on the target URL so the user can
+/// solve the Cloudflare/captcha challenge manually. A background thread polls
+/// the window's cookies; once `cf_clearance` appears the cookies (plus the
+/// matching user agent) are stored for this host and the window closes.
+///
+/// Security: the window has no IPC capabilities and no access to app
+/// internals — it is equivalent to opening the site in a normal browser.
+fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
+    let req: WebnovelSolveRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => {
+            return WebnovelSolveResponse {
+                host: None,
+                error: Some(format!("Invalid request: {error}")),
+            }
+        }
+    };
+    if !req.url.starts_with("http://") && !req.url.starts_with("https://") {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("Nur http/https-Links erlaubt.".to_string()),
+        };
+    }
+    let Some(host) = host_of(&req.url) else {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("URL ohne gültigen Host.".to_string()),
+        };
+    };
+    let Some(handle) = APP_HANDLE.get().cloned() else {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("App-Fenster noch nicht bereit — bitte erneut versuchen.".to_string()),
+        };
+    };
+    let Ok(target_url) = req.url.parse::<tauri::Url>() else {
+        return WebnovelSolveResponse {
+            host: None,
+            error: Some("URL konnte nicht geparst werden.".to_string()),
+        };
+    };
+
+    set_solve_state(&host, "pending");
+
+    // Window creation must happen on the main thread on macOS.
+    let build_handle = handle.clone();
+    let build_url = target_url.clone();
+    let _ = handle.run_on_main_thread(move || {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        if let Some(existing) = build_handle.get_webview_window(SOLVE_WINDOW_LABEL) {
+            let _ = existing.close();
+        }
+        let _ = WebviewWindowBuilder::new(
+            &build_handle,
+            SOLVE_WINDOW_LABEL,
+            WebviewUrl::External(build_url),
+        )
+        .title("Sicherheitsprüfung bestätigen — Fenster schließt sich automatisch")
+        .inner_size(1024.0, 820.0)
+        .user_agent(SOLVE_USER_AGENT)
+        .build();
+    });
+
+    // Poll on a worker thread: adopt whatever cookies the window has and
+    // verify with a real probe request. Cloudflare sometimes waves the
+    // WebView through WITHOUT a visible challenge (no cf_clearance cookie at
+    // all) — only the probe tells us whether plain requests now pass.
+    let poll_host = host.clone();
+    let probe_url = req.url.clone();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let deadline = started + std::time::Duration::from_secs(SOLVE_TIMEOUT_SECS);
+        let grace = std::time::Duration::from_secs(SOLVE_GRACE_SECS);
+        let mut cycle: u64 = 0;
+        let mut probes_after_clearance: u32 = 0;
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(SOLVE_POLL_SECS));
+            cycle += 1;
+
+            let window = handle.get_webview_window(SOLVE_WINDOW_LABEL);
+
+            // Adopt current cookies (whatever they are) + matching UA.
+            let mut has_clearance = false;
+            if let Some(active) = window.as_ref() {
+                if let Ok(cookies) = active.cookies_for_url(target_url.clone()) {
+                    has_clearance = cookies.iter().any(|cookie| cookie.name() == "cf_clearance");
+                    if !cookies.is_empty() {
+                        let header = cookies
+                            .iter()
+                            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        set_browser_session(
+                            &poll_host,
+                            BrowserSession {
+                                cookie_header: header,
+                                user_agent: SOLVE_USER_AGENT.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+
+            // NEVER probe while an interactive challenge is still running:
+            // a probe with freshly issued cookies but a different TLS
+            // fingerprint makes Cloudflare revoke the clearance — the user
+            // then sees the checkbox loop forever. Probe only once the
+            // clearance cookie exists, or (auto-pass sites without any
+            // interactive challenge) after a grace period, spaced out.
+            let should_probe = if has_clearance {
+                probes_after_clearance < SOLVE_MAX_PROBES
+            } else {
+                started.elapsed() >= grace && cycle % 4 == 0
+            };
+
+            if should_probe {
+                if solve_probe_passes(&probe_url) {
+                    set_solve_state(&poll_host, "done");
+                    if let Some(active) = window {
+                        let _ = active.close();
+                    }
+                    return;
+                }
+                if has_clearance {
+                    probes_after_clearance += 1;
+                    if probes_after_clearance >= SOLVE_MAX_PROBES {
+                        set_solve_state(
+                            &poll_host,
+                            "failed:Die Freigabe ist strikt an das Browserfenster gebunden —                              App-Downloads bleiben für diese Seite blockiert.",
+                        );
+                        if let Some(active) = window {
+                            let _ = active.close();
+                        }
+                        return;
+                    }
+                }
+            }
+
+            if window.is_none() {
+                // Window closed by the user: one final probe decides.
+                if solve_probe_passes(&probe_url) {
+                    set_solve_state(&poll_host, "done");
+                } else {
+                    set_solve_state(
+                        &poll_host,
+                        "failed:Fenster geschlossen, Zugriff weiterhin blockiert.",
+                    );
+                }
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                set_solve_state(&poll_host, "failed:Zeitüberschreitung.");
+                if let Some(active) = handle.get_webview_window(SOLVE_WINDOW_LABEL) {
+                    let _ = active.close();
+                }
+                return;
+            }
+        }
+    });
+
+    WebnovelSolveResponse {
+        host: Some(host),
+        error: None,
+    }
+}
+
+/// One plain request against the blocked URL — success means the stored
+/// session (or the now-trusted client) passes without a challenge.
+fn solve_probe_passes(url: &str) -> bool {
+    match PoliteClient::new() {
+        Ok(client) => client.get_text(url).is_ok(),
+        Err(_) => false,
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelSolveStatusResponse {
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+fn build_webnovel_solve_status_response(query: Option<&str>) -> WebnovelSolveStatusResponse {
+    let host = query
+        .and_then(|q| extract_query_value(q, "host"))
+        .unwrap_or_default();
+    let raw = SOLVE_STATES
+        .lock()
+        .ok()
+        .and_then(|states| states.get(&host).cloned())
+        .unwrap_or_else(|| "unknown".to_string());
+    match raw.strip_prefix("failed:") {
+        Some(message) => WebnovelSolveStatusResponse {
+            state: "failed".to_string(),
+            message: Some(message.to_string()),
+        },
+        None => WebnovelSolveStatusResponse {
+            state: raw,
+            message: None,
+        },
+    }
+}
+// ---------------------------------------------------------------------------
+// Embedded-browser fetch engine (whitelisted, manual-only)
+// ---------------------------------------------------------------------------
+//
+// For hosts in `WEBVIEW_ROUTED_HOSTS` a plain HTTP request either can't pass
+// Cloudflare (clearance is TLS-fingerprint-bound) or never sees the content
+// (rendered client-side by JavaScript). We drive a visible, sandboxed browser
+// window page-by-page and read the fully-rendered HTML back through the window
+// TITLE — the only Rust-readable channel that is NOT sent to the server (unlike
+// cookies, which overflow request headers). An injected script gzip+hex-encodes
+// the rendered `outerHTML` into a JS variable; Rust pulls it in chunks by
+// eval-ing "set title to chunk i" and reading the title. The window has no
+// IPC / app access whatsoever.
+
+/// Label of the persistent fetch/browser window.
+const BROWSER_WINDOW_LABEL: &str = "mv-browser";
+/// Hard cap for rendering a single page (excluding manual challenge time).
+const RENDER_TIMEOUT_SECS: u64 = 45;
+/// How long the user may take to solve an in-window challenge per page.
+const CHALLENGE_WAIT_SECS: u64 = 180;
+/// Characters of hex per title chunk pulled from the window.
+const TITLE_CHUNK_LEN: usize = 4000;
+
+/// Reflects the current browser-fetch state to the running job's message.
+static CURRENT_JOB_ID: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+
+fn set_current_job_id(job_id: Option<String>) {
+    if let Ok(mut guard) = CURRENT_JOB_ID.lock() {
+        *guard = job_id;
+    }
+}
+
+fn note_browser_status(message: &str) {
+    let job_id = CURRENT_JOB_ID.lock().ok().and_then(|g| g.clone());
+    if let Some(job_id) = job_id {
+        let owned = message.to_string();
+        update_webnovel_job(&job_id, move |status| status.message = Some(owned));
+    }
+}
+
+/// Injected once per navigation. Runs in the foreign page context, has no
+/// access to the app. Exposes `window.__mvGet(kind, i)` for the Rust puller
+/// and builds the encoded payload after the page settles.
+const BROWSER_RELAY_SCRIPT: &str = r#"
+(function(){
+  if (window.__mvInstalled) { return; }
+  window.__mvInstalled = true;
+  window.__mvData = null;
+  window.__mvMode = 'gz';
+  function isChallenge(){
+    var t=(document.title||'').toLowerCase();
+    if(t.indexOf('just a moment')>=0) return true;
+    if(t.indexOf('attention required')>=0) return true;
+    if(document.querySelector('#challenge-running,#cf-challenge-running,.cf-browser-verification,#challenge-form,#turnstile-wrapper')) return true;
+    return false;
+  }
+  window.__mvGet = function(kind, i){
+    try {
+      if (isChallenge()) { return 'CH'; }
+      if (window.__mvData === null) { return 'WAIT'; }
+      if (kind === 'meta') { return 'READY:' + window.__mvData.length + ':' + window.__mvMode; }
+      return window.__mvData.substr(i * 4000, 4000);
+    } catch(e) { return 'ERR'; }
+  };
+  async function build(){
+    try{
+      if (isChallenge()) { return; }
+      var html=document.documentElement.outerHTML;
+      html=html.replace(/<script[\s\S]*?<\/script>/gi,'');
+      html=html.replace(/<style[\s\S]*?<\/style>/gi,'');
+      html=html.replace(/<svg[\s\S]*?<\/svg>/gi,'');
+      html=html.replace(/<!--[\s\S]*?-->/g,'');
+      var enc=new TextEncoder().encode(html);
+      var mode='raw'; var bytes=enc;
+      if(typeof CompressionStream!=='undefined'){
+        try{
+          var cs=new CompressionStream('gzip');
+          var w=cs.writable.getWriter(); w.write(enc); w.close();
+          var ab=await new Response(cs.readable).arrayBuffer();
+          bytes=new Uint8Array(ab); mode='gz';
+        }catch(e){ bytes=enc; mode='raw'; }
+      }
+      var d='0123456789abcdef'; var hex='';
+      for(var i=0;i<bytes.length;i++){ hex+=d[(bytes[i]>>>4)&15]+d[bytes[i]&15]; }
+      window.__mvData=hex; window.__mvMode=mode;
+    }catch(e){ window.__mvData=''; window.__mvMode='err'; }
+  }
+  function schedule(){ setTimeout(build,1500); setTimeout(build,4000); setTimeout(build,9000); }
+  if(document.readyState==='complete'){ schedule(); }
+  else { window.addEventListener('load', schedule); }
+})();
+"#;
+
+/// Decodes a lowercase-hex string into bytes.
+fn hex_decode(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let bytes = hex.as_bytes();
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let nibble = |c: u8| -> Option<u8> {
+        match c {
+            b'0'..=b'9' => Some(c - b'0'),
+            b'a'..=b'f' => Some(c - b'a' + 10),
+            b'A'..=b'F' => Some(c - b'A' + 10),
+            _ => None,
+        }
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        let hi = nibble(bytes[i])?;
+        let lo = nibble(bytes[i + 1])?;
+        out.push((hi << 4) | lo);
+        i += 2;
+    }
+    Some(out)
+}
+
+/// Runs a closure on the main thread and returns its value (needed because
+/// webview title/eval calls must run there).
+fn on_main_thread<T, F>(handle: &tauri::AppHandle, f: F) -> Option<T>
+where
+    F: FnOnce(&tauri::AppHandle) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let inner = handle.clone();
+    if handle
+        .run_on_main_thread(move || {
+            let _ = tx.send(f(&inner));
+        })
+        .is_err()
+    {
+        return None;
+    }
+    rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+}
+
+/// Navigates the browser window to `url` (creating it on first use).
+fn navigate_browser_window(handle: &tauri::AppHandle, url: &tauri::Url) {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+    if let Some(window) = handle.get_webview_window(BROWSER_WINDOW_LABEL) {
+        let target = serde_json::to_string(url.as_str()).unwrap_or_else(|_| "\"\"".to_string());
+        let _ = window.eval(&format!("window.location.href = {target};"));
+    } else {
+        let _ = WebviewWindowBuilder::new(
+            handle,
+            BROWSER_WINDOW_LABEL,
+            WebviewUrl::External(url.clone()),
+        )
+        .title("MediaVault-Browser — lädt Novel-Seiten (bitte geöffnet lassen)")
+        .inner_size(1024.0, 820.0)
+        .user_agent(SOLVE_USER_AGENT)
+        .initialization_script(BROWSER_RELAY_SCRIPT)
+        .build();
+    }
+}
+
+/// Asks the window for `__mvGet(kind, i)` and returns the value.
+///
+/// The value is written to BOTH the URL hash and the window title, and read
+/// back from whichever channel carries our request nonce. The hash survives
+/// SPA title management (React/Next.js reset `document.title`) and is never
+/// sent to the server; the title is a fallback for engines where the hash
+/// isn't reflected by `url()`. A per-request nonce guards against stale reads.
+fn pull_from_title(handle: &tauri::AppHandle, kind: &str, index: usize) -> Option<String> {
+    let nonce = format!("{}", unix_now_ms());
+    let arg = if kind == "meta" {
+        "'meta',0".to_string()
+    } else {
+        format!("'chunk',{index}")
+    };
+    let script = format!(
+        "try{{var v='MV:{nonce}:'+window.__mvGet({arg});location.hash=v;document.title=v;}}catch(e){{location.hash='MV:{nonce}:ERR';}}"
+    );
+    let _ = on_main_thread(handle, move |h| {
+        if let Some(window) = h.get_webview_window(BROWSER_WINDOW_LABEL) {
+            let _ = window.eval(&script);
+        }
+    });
+    let prefix = format!("MV:{nonce}:");
+    for _ in 0..25 {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let read = on_main_thread(handle, |h| {
+            let window = h.get_webview_window(BROWSER_WINDOW_LABEL)?;
+            // Prefer the hash; fall back to the title.
+            let from_hash = window
+                .url()
+                .ok()
+                .and_then(|url| url.fragment().map(str::to_string));
+            let from_title = window.title().ok();
+            Some((from_hash, from_title))
+        })
+        .flatten();
+        if let Some((from_hash, from_title)) = read {
+            for candidate in [from_hash, from_title].into_iter().flatten() {
+                if let Some(rest) = candidate.strip_prefix(&prefix) {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Milliseconds since the UNIX epoch (title nonce).
+fn unix_now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Closes the browser window at the end of a manual run.
+fn close_browser_window() {
+    if let Some(handle) = APP_HANDLE.get() {
+        let handle = handle.clone();
+        let inner = handle.clone();
+        let _ = handle.run_on_main_thread(move || {
+            if let Some(window) = inner.get_webview_window(BROWSER_WINDOW_LABEL) {
+                let _ = window.close();
+            }
+        });
+    }
+}
+
+/// Fetches a page's fully-rendered HTML through the browser window.
+///
+/// Blocks the calling (worker) thread until the injected relay delivers the
+/// page via the window title, a challenge times out, or rendering times out.
+fn render_page_via_window(url: &str) -> Result<String> {
+    let handle = APP_HANDLE
+        .get()
+        .cloned()
+        .ok_or_else(|| VaultError::ExternalApi("App-Fenster noch nicht bereit.".to_string()))?;
+    let target = url
+        .parse::<tauri::Url>()
+        .map_err(|_| VaultError::ExternalApi(format!("URL ungültig: {url}")))?;
+
+    let nav_url = target.clone();
+    let _ = on_main_thread(&handle, move |h| navigate_browser_window(h, &nav_url));
+
+    let start = std::time::Instant::now();
+    let mut challenge_seen = false;
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(800));
+
+        // Give the window a grace period to appear (created async on main).
+        if handle.get_webview_window(BROWSER_WINDOW_LABEL).is_none() {
+            if start.elapsed() < std::time::Duration::from_secs(8) {
+                continue;
+            }
+            return Err(VaultError::ExternalApi(
+                "Browserfenster wurde geschlossen.".to_string(),
+            ));
+        }
+
+        let meta = pull_from_title(&handle, "meta", 0).unwrap_or_default();
+        if meta == "CH" {
+            challenge_seen = true;
+            note_browser_status(
+                "Bitte die Sicherheitsprüfung im Browserfenster bestätigen (Fenster offen lassen) …",
+            );
+            if start.elapsed() >= std::time::Duration::from_secs(CHALLENGE_WAIT_SECS) {
+                return Err(VaultError::ExternalApi(
+                    "Zeitüberschreitung bei der Sicherheitsprüfung im Fenster.".to_string(),
+                ));
+            }
+            continue;
+        }
+        if let Some(ready) = meta.strip_prefix("READY:") {
+            let mut parts = ready.split(':');
+            let total: usize = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mode = parts.next().unwrap_or("gz").to_string();
+            if total == 0 {
+                continue;
+            }
+            // Content is ready — drop any lingering challenge hint so the
+            // normal progress line shows again.
+            note_browser_status("");
+            // Pull the hex payload chunk by chunk over the title.
+            let chunk_count = total.div_ceil(TITLE_CHUNK_LEN);
+            let mut hex = String::with_capacity(total);
+            let mut ok = true;
+            for i in 0..chunk_count {
+                match pull_from_title(&handle, "chunk", i) {
+                    Some(chunk) if chunk != "ERR" && chunk != "WAIT" => hex.push_str(&chunk),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if !ok || hex.len() != total {
+                // Content changed mid-pull (SPA still rendering) — retry.
+                if start.elapsed() >= std::time::Duration::from_secs(RENDER_TIMEOUT_SECS) {
+                    return Err(VaultError::ExternalApi(
+                        "Seite konnte nicht vollständig gelesen werden.".to_string(),
+                    ));
+                }
+                continue;
+            }
+            let bytes = hex_decode(&hex).ok_or_else(|| {
+                VaultError::ExternalApi("Ungültige Daten aus dem Browserfenster.".to_string())
+            })?;
+            let html = if mode == "gz" {
+                use std::io::Read;
+                let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+                let mut text = String::new();
+                decoder.read_to_string(&mut text).map_err(|e| {
+                    VaultError::ExternalApi(format!("Dekomprimierung fehlgeschlagen: {e}"))
+                })?;
+                text
+            } else {
+                String::from_utf8(bytes)
+                    .map_err(|e| VaultError::ExternalApi(format!("Ungültiges UTF-8: {e}")))?
+            };
+            return Ok(html);
+        }
+
+        // meta == "WAIT"/"ERR"/empty → keep waiting up to the render budget.
+        let budget = if challenge_seen {
+            CHALLENGE_WAIT_SECS
+        } else {
+            RENDER_TIMEOUT_SECS
+        };
+        if start.elapsed() >= std::time::Duration::from_secs(budget) {
+            return Err(VaultError::ExternalApi(
+                "Seite konnte im Browserfenster nicht gerendert werden (Timeout).".to_string(),
+            ));
+        }
+    }
 }

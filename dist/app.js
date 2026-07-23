@@ -98,6 +98,9 @@ const inspectorName = document.getElementById("inspector-name");
 const inspectorMediaType = document.getElementById("inspector-media-type");
 const inspectorYear = document.getElementById("inspector-year");
 const inspectorStatus = document.getElementById("inspector-status");
+const inspectorTagsChips = document.getElementById("inspector-tags-chips");
+const inspectorTagsInput = document.getElementById("inspector-tags-input");
+const inspectorTagsDatalist = document.getElementById("inspector-tags-datalist");
 const inspectorApply = document.getElementById("inspector-apply");
 const inspectorApiFeedback = document.getElementById("inspector-api-feedback");
 const inspectorPropertyAddToggle = document.getElementById("inspector-property-add-toggle");
@@ -225,6 +228,7 @@ const labels = {
   playlists: "Wiedergabelisten",
   webnovels: "Webnovels",
   settings: "Einstellungen",
+  trash: "Papierkorb",
 };
 
 const mediaTypeOptions = [
@@ -324,15 +328,26 @@ function setActiveTab(tab, options = {}) {
   }
   document.body.classList.toggle("is-collections", tab === "collections");
 
-  // Hide the right-hand inspector on tabs that don't use it so they get
-  // the full workspace width.  Restore it when switching to collections.
-  const noInspector = tab === "inbox" || tab === "review";
-  document.body.classList.toggle("inspector-hidden", noInspector);
-
-  // Clear the inspector when leaving the collections tab so stale
-  // property values don't bleed through to other tabs.
-  if (noInspector) {
+  // The right-hand inspector only makes sense in the collections view,
+  // where a file/folder selection feeds it. Everywhere else it either
+  // showed stale data from the last selection or wasted a third of the
+  // screen — hide it and clear its contents when leaving collections.
+  const showInspector = tab === "collections";
+  document.body.classList.toggle("inspector-hidden", !showInspector);
+  if (!showInspector) {
     renderInspector(null);
+  }
+
+  // Vault actions (scan / import / Finder) only apply to file-centric
+  // views; settings, playlists, and webnovels get a clean header.
+  const vaultActionTabs = ["overview", "inbox", "review", "collections"];
+  const topbarVaultActions = document.getElementById("topbar-vault-actions");
+  if (topbarVaultActions) {
+    topbarVaultActions.hidden = !vaultActionTabs.includes(tab);
+  }
+
+  if (tab === "trash") {
+    loadVaultTrash();
   }
 
   if (statusStrip) {
@@ -340,9 +355,14 @@ function setActiveTab(tab, options = {}) {
   }
 }
 
-function setMetrics(summary) {
+function setMetrics(summary, items = []) {
   if (metricInbox) {
-    metricInbox.textContent = `${summary.total_files} Dateien`;
+    // Only files physically waiting in Inbox/ — summary.total_files counts
+    // the whole vault, which made the tile read "13" with an empty inbox.
+    const inboxCount = items.filter((item) =>
+      String(item.source_path ?? "").startsWith("Inbox/"),
+    ).length;
+    metricInbox.textContent = `${inboxCount} Dateien`;
   }
   if (metricReview) {
     metricReview.textContent = `${summary.items_needing_review} unklar`;
@@ -543,6 +563,11 @@ async function bootstrapVault() {
 
 function rememberCollection(node) {
   if (!node?.path) {
+    return;
+  }
+  // Top-level groups (Anime, Webnovels, …) are one click away anyway —
+  // only remember actual titles inside them (depth >= 2).
+  if (!String(node.path).includes("/")) {
     return;
   }
 
@@ -1141,6 +1166,9 @@ function projectItem(item) {
   }
   if (typeof correction.notes === "string") {
     effective.notes = correction.notes;
+  }
+  if (Array.isArray(correction.tags)) {
+    effective.tags = correction.tags;
   }
 
   effective.has_correction = Boolean(correction.updated_at);
@@ -2226,15 +2254,30 @@ async function loadDashboard() {
     if (data.items && data.items.length > 0) {
       if (dashboardRecentSection) dashboardRecentSection.hidden = false;
       if (dashboardEmptyHint) dashboardEmptyHint.hidden = true;
+      // One row per media type ("Webnovels", "Hörbücher", …) instead of a
+      // single mixed strip — easier to scan when many types arrive at once.
+      const groups = new Map();
       data.items.forEach((item) => {
-        const card = createDashboardCard(item, (it) => {
-          const ext = playerFileExt(it.vault_path);
-          if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
-            openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
-          }
-        });
-        dashboardRecentCards?.appendChild(card);
+        const key = mediaTypeLabel(item.media_type ?? "unclassified");
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
       });
+      const playHandler = (it) => {
+        const ext = playerFileExt(it.vault_path);
+        if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
+          openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
+        }
+      };
+      for (const [label, groupItems] of groups) {
+        const heading = document.createElement("p");
+        heading.className = "dashboard-group-label";
+        heading.textContent = label;
+        dashboardRecentCards?.appendChild(heading);
+        const row = document.createElement("div");
+        row.className = "dashboard-scroll";
+        groupItems.forEach((item) => row.appendChild(createDashboardCard(item, playHandler)));
+        dashboardRecentCards?.appendChild(row);
+      }
     } else {
       if (dashboardRecentSection) dashboardRecentSection.hidden = true;
       if (dashboardEmptyHint) dashboardEmptyHint.hidden = false;
@@ -3144,7 +3187,23 @@ function renderPlaylistDetail(pl) {
       openPlayer({ source_path: vaultPath, target_path: vaultPath });
     });
 
-    row.append(nameSpan, typeSpan, playBtn);
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "action-button icon-button danger";
+    removeBtn.title = "Aus der Liste entfernen";
+    removeBtn.textContent = "✕";
+    const removeIndex = i;
+    removeBtn.addEventListener("click", async () => {
+      pl.items.splice(removeIndex, 1);
+      try {
+        await savePlaylistObject(pl);
+      } catch (error) {
+        if (statusStrip) statusStrip.textContent = `Entfernen fehlgeschlagen: ${error.message}`;
+      }
+      renderPlaylistDetail(pl);
+      await loadPlaylists();
+    });
+
+    row.append(nameSpan, typeSpan, playBtn, removeBtn);
     playlistItemsRows.appendChild(row);
   }
 }
@@ -4121,10 +4180,9 @@ function getSelectedItem() {
     return null;
   }
 
-  return (
-    currentPlan.items.find((item) => item.source_path === selectedItemKey) ??
-    currentPlan.items[0]
-  );
+  // No fallback to the first item: without an explicit selection the
+  // review detail shows its empty state instead of an arbitrary file.
+  return currentPlan.items.find((item) => item.source_path === selectedItemKey) ?? null;
 }
 
 function renderInboxRows(items) {
@@ -4494,6 +4552,8 @@ function propertyEntriesFor(value) {
     ["media_type", mediaTypeLabel(mediaSelectionValue(item))],
     ["format", item.format],
     ["title", item.title],
+    ["description", item.description],
+    ["rating_external", item.rating_external],
     ["series_title", item.series_title],
     ["season_number", item.season_number],
     ["episode_start", item.episode_start],
@@ -4558,6 +4618,9 @@ function renderInspector(value) {
   if (inspectorStatus) {
     inspectorStatus.value = item?.status ?? (item && needsReviewInUi(item) ? "needs-review" : "inbox");
   }
+  // Seed the tag editor from the current item's tags; genres stay read-only.
+  inspectorEditTags = Array.isArray(item?.tags) ? [...item.tags] : [];
+  renderInspectorTagEditor();
 
   if (inspectorProperties) {
     clearNode(inspectorProperties);
@@ -4582,7 +4645,19 @@ function renderInspector(value) {
         const name = document.createElement("strong");
         name.textContent = key;
         const body = document.createElement("p");
-        body.textContent = propertyDisplayValue(value);
+        if ((key === "genres" || key === "tags") && Array.isArray(value) && value.length) {
+          // Clickable chips: jump to the collections view filtered by tag.
+          value.slice(0, 12).forEach((tag) => {
+            const chip = document.createElement("button");
+            chip.type = "button";
+            chip.className = "tag-chip";
+            chip.textContent = tag;
+            chip.addEventListener("click", () => setCollectionTagFilter(tag));
+            body.appendChild(chip);
+          });
+        } else {
+          body.textContent = propertyDisplayValue(value);
+        }
 
         label.appendChild(icon);
         label.appendChild(name);
@@ -4621,12 +4696,25 @@ function renderInspector(value) {
       PLAYER_EPUB_EXTS.has(ext);
     inspectorPlay.hidden = !item || !playable;
   }
+  {
+    const addButton = document.getElementById("inspector-add-playlist");
+    if (addButton) {
+      const srcPath = item?.source_path || item?.target_path || "";
+      addButton.hidden = !item || !srcPath;
+    }
+  }
   if (inspectorFetchMetadata) {
-    inspectorFetchMetadata.disabled = !metadataAllowed;
+    const fetchType = canonicalMediaType(item ? mediaSelectionValue(item) : "");
+    // Provider follows the media type: Audible for audiobooks, Goodreads
+    // (via the subscription check) for webnovels, AniList otherwise.
+    const isWebnovelFetch = fetchType === "webnovel";
+    inspectorFetchMetadata.disabled = !metadataAllowed && !isWebnovelFetch;
     inspectorFetchMetadata.textContent =
-      canonicalMediaType(item ? mediaSelectionValue(item) : "") === "audiobook"
+      fetchType === "audiobook"
         ? "Audible abrufen"
-        : "AniList abrufen";
+        : isWebnovelFetch
+          ? "Goodreads/AniList aktualisieren"
+          : "AniList abrufen";
   }
   if (inspectorNotDuplicate) {
     const duplicateRelevant = selectionHasDuplicateFlag(selection) || selectionHasDuplicateOverride(selection);
@@ -4663,10 +4751,21 @@ function renderPlan(plan) {
     return;
   }
 
-  setMetrics(plan.summary);
+  setMetrics(plan.summary, plan.items);
   renderInboxRows(plan.items);
   renderReviewRows(plan.items);
   renderCollections(plan.items);
+
+  // A rescan can remove the file the inspector was showing — drop the
+  // selection instead of displaying properties of a vanished item.
+  if (inspectorSelection?.item?.source_path) {
+    const stillPresent = plan.items.some(
+      (item) => item.source_path === inspectorSelection.item.source_path,
+    );
+    if (!stillPresent) {
+      renderInspector(null);
+    }
+  }
 
   const selected = getSelectedItem();
   renderDetail(selected);
@@ -4748,6 +4847,12 @@ function collectionNodeKind(node) {
   if (!node.path) {
     return "root";
   }
+  if (node.path === "Webnovels") {
+    return "group";
+  }
+  if (node.path.startsWith("Webnovels/")) {
+    return "webnovel";
+  }
   if (node.path.includes("/Staffel ")) {
     return "season";
   }
@@ -4795,6 +4900,8 @@ function nodeTypeLabel(node) {
       return "Film";
     case "audiobook":
       return "Hörbuch";
+    case "webnovel":
+      return "Webnovel";
     case "group":
       return "Ordner";
     default:
@@ -4864,7 +4971,7 @@ function selectionEditable(selection) {
     return true;
   }
   const kind = collectionNodeKind(selection.node);
-  return ["series", "season", "movie", "audiobook"].includes(kind);
+  return ["series", "season", "movie", "audiobook", "webnovel"].includes(kind);
 }
 
 function selectionSupportsMetadata(selection) {
@@ -5032,6 +5139,22 @@ function renderCollectionMeta(node) {
   });
 }
 
+// Counts distinct titles (series/novels/albums) below a node, based on the
+// series_title of its items; falls back to the raw file count.
+function collectionTitleCount(node) {
+  const titles = new Set();
+  (node.items ?? []).forEach((item) => {
+    const key =
+      item.series_title ||
+      item.title ||
+      String(item.source_path ?? "").split("/").slice(0, -1).pop();
+    if (key) {
+      titles.add(String(key).toLowerCase());
+    }
+  });
+  return titles.size || (node.items ?? []).length;
+}
+
 function renderCollectionNavigation(root, node) {
   if (!collectionSidebarList) {
     return;
@@ -5072,7 +5195,11 @@ function renderCollectionNavigation(root, node) {
     const label = document.createElement("strong");
     label.textContent = child.label;
     const count = document.createElement("span");
-    count.textContent = `${child.items.length}`;
+    // Group nodes (Anime, Webnovels, …) show how many TITLES they hold, not
+    // how many files — "1 Anime mit 2 Folgen" reads as 1, not 2.
+    count.textContent = sortedChildren(child).length
+      ? `${collectionTitleCount(child)}`
+      : `${child.items.length}`;
 
     button.appendChild(label);
     button.appendChild(count);
@@ -5082,6 +5209,9 @@ function renderCollectionNavigation(root, node) {
   if (!node.path) {
     const recent = validRecentCollections(root);
     if (recent.length) {
+      const divider = document.createElement("div");
+      divider.className = "collection-recent-divider";
+      collectionSidebarList.appendChild(divider);
       const heading = document.createElement("p");
       heading.className = "panel-label collection-recent-label";
       heading.textContent = "Zuletzt angesehen";
@@ -5163,6 +5293,20 @@ function renderCollectionProfile(node) {
 
   const primary = representativeItem(node);
   const nodeKind = collectionNodeKind(node);
+
+  // Novel folders get their own file table inside the profile; the standard
+  // content grid below would duplicate it. The shared inspector is only
+  // useful once a single file is picked (via the table), so hide it here.
+  const isNovelNode = nodeKind === "webnovel";
+  const viewbar = document.getElementById("collection-viewbar");
+  const cardGrid = document.getElementById("collection-cards");
+  if (viewbar) viewbar.hidden = isNovelNode;
+  if (cardGrid) cardGrid.hidden = isNovelNode;
+  if (isNovelNode && inspectorSelection?.type !== "file") {
+    document.body.classList.add("inspector-hidden");
+  } else if (document.body.classList.contains("is-collections")) {
+    document.body.classList.remove("inspector-hidden");
+  }
   if (!primary || ["root", "group", "folder"].includes(nodeKind)) {
     return;
   }
@@ -5200,12 +5344,16 @@ function renderCollectionProfile(node) {
   name.className = "media-title";
   const meta = document.createElement("p");
   const parts = [
+    primary.author,
     primary.format,
     primary.airing_season,
     primary.year,
     typeof primary.episode_count === "number" ? `${primary.episode_count} Folgen` : "",
     typeof primary.runtime_minutes === "number" ? `${primary.runtime_minutes} Min.` : "",
     typeof primary.average_score === "number" ? `${Math.round(primary.average_score)} / 100` : "",
+    typeof primary.rating_external === "number"
+      ? `★ ${primary.rating_external.toFixed(2)} (Goodreads)`
+      : "",
   ].filter(Boolean);
   meta.textContent = parts.join(" · ") || "Noch keine externen Metadaten vorhanden.";
 
@@ -5213,21 +5361,50 @@ function renderCollectionProfile(node) {
   description.className = "collection-profile-description";
   description.textContent =
     primary.description?.replace(/<[^>]*>/g, "") ||
-    (nodeKind === "audiobook"
+    (nodeKind === "webnovel"
+      ? "Noch keine Beschreibung vorhanden — beim nächsten Webnovel-Check werden Metadaten ergänzt."
+      : nodeKind === "audiobook"
       ? "Noch keine Beschreibung vorhanden. Audible-Abgleich in der rechten Seitenleiste starten."
       : "Noch keine Beschreibung vorhanden. Starte AniList in der rechten Seitenleiste, um Serien- oder Staffelinformationen zu ergänzen.");
 
   const tagBar = document.createElement("div");
   tagBar.className = "media-tagbar";
-  (primary.genres || []).slice(0, 8).forEach((genre) => {
-    const tag = document.createElement("span");
+  [...(primary.genres || []), ...(primary.tags || [])].slice(0, 12).forEach((genre) => {
+    const tag = document.createElement("button");
+    tag.type = "button";
+    tag.className = "tag-chip";
     tag.textContent = genre;
+    tag.addEventListener("click", () => setCollectionTagFilter(genre));
     tagBar.appendChild(tag);
   });
 
   heading.appendChild(label);
   heading.appendChild(name);
   heading.appendChild(meta);
+  if (primary.status) {
+    const statusChip = document.createElement("button");
+    statusChip.type = "button";
+    const statusClass =
+      primary.status === "completed"
+        ? "is-completed"
+        : primary.status === "on-hold"
+          ? "is-hiatus"
+          : "is-ongoing";
+    statusChip.className = `tag-chip status-chip ${statusClass}`;
+    statusChip.textContent =
+      primary.status === "completed"
+        ? "abgeschlossen"
+        : primary.status === "on-hold"
+          ? "Hiatus"
+          : "laufend";
+    statusChip.addEventListener("click", () =>
+      setCollectionTagFilter(`status:${primary.status}`),
+    );
+    const statusRow = document.createElement("div");
+    statusRow.className = "media-tagbar";
+    statusRow.appendChild(statusChip);
+    heading.appendChild(statusRow);
+  }
   if (tagBar.childNodes.length) {
     heading.appendChild(tagBar);
   }
@@ -5245,6 +5422,45 @@ function renderCollectionProfile(node) {
 
   collectionProfile.appendChild(profile);
 
+  if (nodeKind === "webnovel") {
+    // Novel view: hero + description + read button + sortable file table.
+    // Relations/characters do not exist for novels; keep the page focused.
+    const stack = document.createElement("div");
+    stack.className = "media-section-stack";
+
+    const synopsis = createMediaSection("Beschreibung");
+    const synopsisBody = document.createElement("p");
+    synopsisBody.className = "media-synopsis";
+    synopsisBody.textContent = description.textContent;
+    synopsis.appendChild(synopsisBody);
+    stack.appendChild(synopsis);
+
+    const readRow = document.createElement("div");
+    readRow.className = "toolbar";
+    const readButton = document.createElement("button");
+    readButton.className = "action-button primary";
+    readButton.textContent = "▶ Weiterlesen";
+    readButton.addEventListener("click", () => {
+      const target = webnovelPrimaryFile(node);
+      if (target) {
+        openPlayer({
+          source_path: target.source_path,
+          target_path: target.target_path || target.source_path,
+          title: target.title || node.label,
+        });
+      }
+    });
+    readRow.appendChild(readButton);
+    stack.appendChild(readRow);
+
+    const files = createMediaSection("Dateien", `${node.items.length} Dateien`);
+    files.appendChild(buildWebnovelFileTable(node));
+    stack.appendChild(files);
+
+    collectionProfile.appendChild(stack);
+    return;
+  }
+
   const children = sortedChildren(node);
   if (children.length) {
     const stack = document.createElement("div");
@@ -5257,23 +5473,168 @@ function renderCollectionProfile(node) {
     });
     seasons.appendChild(cards);
     stack.appendChild(seasons);
-    appendCollectionMetadataSections(stack, primary, description.textContent);
+    appendCollectionMetadataSections(stack, primary, description.textContent, nodeKind);
     collectionProfile.appendChild(stack);
   } else {
     const stack = document.createElement("div");
     stack.className = "media-section-stack";
-    appendCollectionMetadataSections(stack, primary, description.textContent);
+    appendCollectionMetadataSections(stack, primary, description.textContent, nodeKind);
     collectionProfile.appendChild(stack);
   }
 }
 
-function appendCollectionMetadataSections(stack, item, synopsisText) {
+// Picks the "main" file of a novel folder: the complete EPUB (no chapter
+// range in the name) wins over batch EPUBs.
+function webnovelPrimaryFile(node) {
+  const epubs = node.items.filter((item) =>
+    String(item.source_path ?? "").toLowerCase().endsWith(".epub"),
+  );
+  return (
+    epubs.find((item) => !/Kapitel \d/.test(item.source_path)) ?? epubs[0] ?? node.items[0] ?? null
+  );
+}
+
+let webnovelFileSortKey = "chapter";
+let webnovelFileSortDir = 1;
+
+function buildWebnovelFileTable(node) {
+  const table = document.createElement("table");
+  table.className = "webnovel-file-table";
+
+  const columns = [
+    ["chapter", "Kapitel"],
+    ["name", "Name"],
+    ["date", "Datum"],
+    ["", ""],
+  ];
+  const head = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  columns.forEach(([key, label]) => {
+    const th = document.createElement("th");
+    if (!key) {
+      headRow.appendChild(th);
+      return;
+    }
+    const arrow = webnovelFileSortKey === key ? (webnovelFileSortDir > 0 ? " ▲" : " ▼") : "";
+    th.textContent = label + arrow;
+    th.addEventListener("click", () => {
+      if (webnovelFileSortKey === key) {
+        webnovelFileSortDir = -webnovelFileSortDir;
+      } else {
+        webnovelFileSortKey = key;
+        webnovelFileSortDir = 1;
+      }
+      renderCollections(currentPlan?.items ?? []);
+    });
+    headRow.appendChild(th);
+  });
+  head.appendChild(headRow);
+  table.appendChild(head);
+
+  const sortValue = (item) => {
+    switch (webnovelFileSortKey) {
+      case "name":
+        return String(item.title || item.source_path || "").toLowerCase();
+      case "date":
+        return item.modified_at ?? 0;
+      default:
+        return item.episode_start ?? -1;
+    }
+  };
+  const rowsData = [...node.items].sort((a, b) => {
+    const va = sortValue(a);
+    const vb = sortValue(b);
+    if (va < vb) return -1 * webnovelFileSortDir;
+    if (va > vb) return 1 * webnovelFileSortDir;
+    return 0;
+  });
+
+  const body = document.createElement("tbody");
+  rowsData.forEach((item) => {
+    const tr = document.createElement("tr");
+    const chapter = document.createElement("td");
+    chapter.textContent =
+      typeof item.episode_start === "number"
+        ? item.episode_end && item.episode_end !== item.episode_start
+          ? `${item.episode_start}–${item.episode_end}`
+          : `${item.episode_start}`
+        : "Gesamt";
+    const name = document.createElement("td");
+    name.textContent =
+      String(item.source_path ?? "").split("/").pop() || item.title || "-";
+    const date = document.createElement("td");
+    date.textContent = item.modified_at
+      ? new Date(item.modified_at * 1000).toLocaleDateString("de-DE")
+      : "-";
+    const actions = document.createElement("td");
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "action-button icon-button danger";
+    removeBtn.title = "In den Papierkorb verschieben";
+    removeBtn.textContent = "🗑";
+    removeBtn.addEventListener("dblclick", (event) => event.stopPropagation());
+    removeBtn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const fileName = String(item.source_path ?? "").split("/").pop();
+      const confirmed = await showConfirmDialog({
+        title: "In den Papierkorb?",
+        body: `„${fileName}“ wird in den Vault-Papierkorb verschoben (widerrufbar).`,
+        confirmLabel: "In den Papierkorb",
+        danger: true,
+      });
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await fetch("mediavault://localhost/api/delete-files", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            vault_root: getVaultRoot(),
+            paths: [item.source_path],
+            permanent: false,
+          }),
+        });
+        if (statusStrip) {
+          statusStrip.textContent = `„${fileName}“ in den Papierkorb verschoben.`;
+        }
+        loadPlan();
+      } catch (error) {
+        if (statusStrip) statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+      }
+    });
+    actions.appendChild(removeBtn);
+    tr.append(chapter, name, date, actions);
+    tr.addEventListener("click", () => {
+      selectedCollectionItemKey = item.source_path;
+      document.body.classList.remove("inspector-hidden");
+      renderInspector(item);
+    });
+    tr.addEventListener("dblclick", () => {
+      openPlayer({
+        source_path: item.source_path,
+        target_path: item.target_path || item.source_path,
+        title: item.title || node.label,
+      });
+    });
+    body.appendChild(tr);
+  });
+  table.appendChild(body);
+  return table;
+}
+
+function appendCollectionMetadataSections(stack, item, synopsisText, nodeKind = "") {
   const synopsis = createMediaSection("Synopsis");
   const synopsisBody = document.createElement("p");
   synopsisBody.className = "media-synopsis";
   synopsisBody.textContent = synopsisText;
   synopsis.appendChild(synopsisBody);
   stack.appendChild(synopsis);
+
+  // Season view stays lean: cover + synopsis + the episode list below are
+  // enough — relations, characters, and staff belong to the series level.
+  if (nodeKind === "season") {
+    return;
+  }
 
   const details = createMediaSection("Details");
   details.appendChild(createDetailsGrid(item));
@@ -5486,6 +5847,22 @@ function selectedBulkItems() {
 
 function renderBulkInspector() {
   renderInspector({ type: "bulk", items: selectedBulkItems() });
+  updateCollectionBulkbar();
+}
+
+// Bulk actions live in the main area too — the sidebar alone was too easy
+// to miss when a multi selection is active.
+function updateCollectionBulkbar() {
+  const bar = document.getElementById("collection-bulkbar");
+  if (!bar) {
+    return;
+  }
+  const count = multiSelectedKeys.size;
+  bar.hidden = !isMultiEdit || count === 0;
+  const label = document.getElementById("collection-bulk-count");
+  if (label) {
+    label.textContent = `${count} ausgewählt`;
+  }
 }
 
 function toggleBulkItem(item) {
@@ -5497,6 +5874,27 @@ function toggleBulkItem(item) {
   } else {
     multiSelectedKeys.add(item.source_path);
   }
+  renderCollections(currentPlan?.items ?? []);
+  renderBulkInspector();
+}
+
+// (De)selects every file of a collection node at once (multi mode on
+// title/series cards).
+function toggleBulkNode(node) {
+  const paths = (node.items ?? [])
+    .map((entry) => entry.source_path)
+    .filter(Boolean);
+  if (!paths.length) {
+    return;
+  }
+  const allSelected = paths.every((path) => multiSelectedKeys.has(path));
+  paths.forEach((path) => {
+    if (allSelected) {
+      multiSelectedKeys.delete(path);
+    } else {
+      multiSelectedKeys.add(path);
+    }
+  });
   renderCollections(currentPlan?.items ?? []);
   renderBulkInspector();
 }
@@ -5537,6 +5935,13 @@ function createPosterCard(value, ordinal = null) {
     button.classList.toggle("is-bulk-selected", multiSelectedKeys.has(item.source_path));
     installLongPressSelection(button, item);
   }
+  if (isNode) {
+    const nodeItems = node.items ?? [];
+    button.classList.toggle(
+      "is-bulk-selected",
+      nodeItems.length > 0 && nodeItems.every((entry) => multiSelectedKeys.has(entry.source_path)),
+    );
+  }
   button.addEventListener("click", () => {
     if (button.dataset.longPressFired === "true") {
       button.dataset.longPressFired = "";
@@ -5544,6 +5949,12 @@ function createPosterCard(value, ordinal = null) {
     }
     if (!isNode && isMultiEdit) {
       toggleBulkItem(item);
+      return;
+    }
+    if (isNode && isMultiEdit) {
+      // Multi mode on a title card: (de)select ALL files of that title
+      // instead of navigating into it.
+      toggleBulkNode(node);
       return;
     }
     if (isNode) {
@@ -5791,7 +6202,65 @@ function syncCollectionViewMode(node = null) {
   syncCollectionSortButtons();
 }
 
+// Active genre/tag filter for the collections view ("" = none).
+let activeTagFilter = "";
+
+function itemMatchesTagFilter(item, tag) {
+  if (tag.startsWith("status:")) {
+    return String(item.status ?? "").toLowerCase() === tag.slice(7);
+  }
+  const haystack = [...(item.genres ?? []), ...(item.tags ?? [])].map((entry) =>
+    String(entry).toLowerCase(),
+  );
+  return haystack.includes(tag);
+}
+
+function setCollectionTagFilter(tag) {
+  activeTagFilter = String(tag ?? "").toLowerCase();
+  closeWebnovelDetailIfOpen();
+  setActiveTab("collections", { resetCollections: true });
+  renderCollections(currentPlan?.items ?? []);
+  if (statusStrip) {
+    statusStrip.textContent = activeTagFilter
+      ? `Sammlungen gefiltert nach „${tag}“.`
+      : "Tag-Filter entfernt.";
+  }
+}
+
+function closeWebnovelDetailIfOpen() {
+  const detail = document.getElementById("webnovel-detail");
+  if (detail) {
+    detail.hidden = true;
+  }
+}
+
+function renderTagFilterBar() {
+  const bar = document.getElementById("collection-tag-filter");
+  if (!bar) {
+    return;
+  }
+  clearNode(bar);
+  bar.hidden = !activeTagFilter;
+  if (!activeTagFilter) {
+    return;
+  }
+  const label = document.createElement("span");
+  label.textContent = `Filter: ${activeTagFilter}`;
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "action-button";
+  clear.textContent = "✕ Filter entfernen";
+  clear.addEventListener("click", () => setCollectionTagFilter(""));
+  bar.appendChild(label);
+  bar.appendChild(clear);
+}
+
 function renderCollections(items) {
+  if (activeTagFilter) {
+    items = items.filter((item) => itemMatchesTagFilter(item, activeTagFilter));
+  }
+  renderTagFilterBar();
+  updateCollectionBulkbar();
   const root = buildCollectionTree(items);
   const selected = findCollectionNode(root, selectedCollectionKey);
 
@@ -6087,7 +6556,7 @@ function applySelectionCorrection(selection, overrides = {}) {
 
     if (selection.type === "node") {
       const kind = collectionNodeKind(selection.node);
-      if (["series", "season"].includes(kind)) {
+      if (["series", "season", "webnovel"].includes(kind)) {
         next.series_title = titleValue;
       } else if (kind === "movie") {
         next.title = titleValue;
@@ -6112,10 +6581,94 @@ function applySelectionCorrection(selection, overrides = {}) {
     if (!next.status) {
       delete next.status;
     }
+    // Tags edited in the inspector apply to the whole selection.
+    if (Array.isArray(inspectorEditTags)) {
+      next.tags = [...inspectorEditTags];
+    }
     corrections[item.source_path] = next;
   });
 
   saveStoredJson(correctionsKey, corrections);
+}
+
+// ---------------------------------------------------------------------------
+// Inspector tag editor (chips + datalist autocomplete)
+// ---------------------------------------------------------------------------
+
+let inspectorEditTags = [];
+
+// All distinct tags/genres across the current plan, for autocomplete.
+function allKnownTags() {
+  const set = new Set();
+  (currentPlan?.items ?? []).forEach((item) => {
+    [...(item.tags ?? []), ...(item.genres ?? [])].forEach((tag) => {
+      const trimmed = String(tag).trim();
+      if (trimmed) {
+        set.add(trimmed);
+      }
+    });
+  });
+  return [...set].sort((a, b) => a.localeCompare(b, "de", { sensitivity: "base" }));
+}
+
+function renderInspectorTagEditor() {
+  if (inspectorTagsDatalist) {
+    clearNode(inspectorTagsDatalist);
+    allKnownTags().forEach((tag) => {
+      const option = document.createElement("option");
+      option.value = tag;
+      inspectorTagsDatalist.appendChild(option);
+    });
+  }
+  if (!inspectorTagsChips) {
+    return;
+  }
+  clearNode(inspectorTagsChips);
+  inspectorEditTags.forEach((tag, index) => {
+    const chip = document.createElement("span");
+    chip.className = "tag-chip is-editable";
+    chip.textContent = tag;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "tag-chip-remove";
+    remove.textContent = "✕";
+    remove.title = "Tag entfernen";
+    remove.addEventListener("click", () => {
+      inspectorEditTags.splice(index, 1);
+      renderInspectorTagEditor();
+    });
+    chip.appendChild(remove);
+    inspectorTagsChips.appendChild(chip);
+  });
+}
+
+function addInspectorTag(raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) {
+    return;
+  }
+  const exists = inspectorEditTags.some((tag) => tag.toLowerCase() === value.toLowerCase());
+  if (!exists) {
+    inspectorEditTags.push(value);
+    renderInspectorTagEditor();
+  }
+}
+
+if (inspectorTagsInput) {
+  inspectorTagsInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === ",") {
+      event.preventDefault();
+      addInspectorTag(inspectorTagsInput.value);
+      inspectorTagsInput.value = "";
+    }
+  });
+  // Selecting from the datalist fires an input event with the full value.
+  inspectorTagsInput.addEventListener("change", () => {
+    if (inspectorTagsInput.value.trim()) {
+      addInspectorTag(inspectorTagsInput.value);
+      inspectorTagsInput.value = "";
+    }
+  });
 }
 
 function openTrashDialog(selection) {
@@ -6136,35 +6689,48 @@ function openTrashDialog(selection) {
   showModalCard(trashDialog);
 }
 
-function commitTrashSelection(selection) {
+async function commitTrashSelection(selection) {
   if (!selectionEditable(selection)) {
     return;
   }
 
-  const count = selection.items.length;
-  const at = new Date().toISOString();
-  selection.items.forEach((item) => {
-    trashedEntries[item.source_path] = {
-      source_path: item.source_path,
-      title: item.title || item.series_title || fileStem(item.source_path),
-      at,
-    };
-    delete corrections[item.source_path];
-    delete apiMetadata[item.source_path];
+  const paths = selection.items.map((item) => item.source_path).filter(Boolean);
+  const count = paths.length;
+  closeActionModal();
+
+  // Actually move the files into the vault <.trash> (reversible via the
+  // Papierkorb tab) — not just hide them locally.
+  try {
+    const response = await fetch("mediavault://localhost/api/delete-files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: getVaultRoot(), paths, permanent: false }),
+    });
+    const payload = await response.json();
+    if (payload.error) {
+      if (statusStrip) statusStrip.textContent = payload.error;
+      return;
+    }
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Löschen fehlgeschlagen: ${error.message}`;
+    return;
+  }
+
+  paths.forEach((path) => {
+    delete corrections[path];
+    delete apiMetadata[path];
   });
-  saveStoredJson(trashKey, trashedEntries);
   saveStoredJson(correctionsKey, corrections);
   saveStoredJson(metadataKey, apiMetadata);
   multiSelectedKeys.clear();
   selectedCollectionItemKey = "";
   selectedItemKey = "";
-  currentPlan = projectPlan(sourcePlan);
-  renderPlan(currentPlan);
-  updateAuditTrail(`${count} Eintrag(e) in den App-Papierkorb verschoben.`);
+  await loadPlan();
+  renderInspector(null);
+  updateAuditTrail(`${count} Datei(en) in den Papierkorb verschoben.`);
   if (statusStrip) {
-    statusStrip.textContent = `${count} Eintrag(e) in den MediaVault-Papierkorb verschoben.`;
+    statusStrip.textContent = `${count} Datei(en) in den Papierkorb verschoben (Tab „Papierkorb“).`;
   }
-  closeActionModal();
 }
 
 function trashSelection(selection) {
@@ -6250,7 +6816,8 @@ if (collectionMultiToggle) {
 
 if (demoButton) {
   demoButton.addEventListener("click", () => {
-    setActiveTab("review");
+    // Stay on the current view — jumping to Prüfung on every scan forced
+    // the user to navigate back each time.
     if (!document.body.classList.contains("is-vault-open")) {
       openVault(getVaultRoot());
     } else {
@@ -6688,13 +7255,23 @@ if (inspectorPlay) {
 
 if (inspectorFetchMetadata) {
   inspectorFetchMetadata.addEventListener("click", async () => {
-    if (!selectionSupportsMetadata(inspectorSelection) || !inspectorSelection.item) {
+    if (!inspectorSelection?.item) {
       return;
     }
 
     const mediaType = canonicalMediaType(
       inspectorMediaType?.value || mediaSelectionValue(inspectorSelection.item)
     );
+    if (mediaType === "webnovel") {
+      // Metadata for novels comes from the subscription pipeline
+      // (source site → Goodreads → AniList); a check refreshes everything
+      // including the sidecar the collections view reads.
+      await fetchWebnovelMetadataForItem(inspectorSelection.item);
+      return;
+    }
+    if (!selectionSupportsMetadata(inspectorSelection)) {
+      return;
+    }
     const isAudiobook = mediaType === "audiobook";
 
     try {
@@ -7018,6 +7595,9 @@ const WEBNOVEL_DEFAULT_DELAY_S = 1.5;
 let webnovelCheckRunning = false;
 let webnovelActiveFilter = "all";
 let webnovelSubscriptionsCache = [];
+let webnovelMultiMode = false;
+const webnovelSelectedIds = new Set();
+let webnovelTrashCache = [];
 let webnovelIntervalTimer = null;
 let webnovelStartCheckDone = false;
 let webnovelInitialized = false;
@@ -7038,6 +7618,9 @@ function loadWebnovelSettings() {
       Math.max(WEBNOVEL_MIN_DELAY_S, Number(stored.delaySeconds) || WEBNOVEL_DEFAULT_DELAY_S),
     ),
     listView: stored.listView ?? false,
+    sortBy: ["title", "last_check", "new_chapters", "rating"].includes(stored.sortBy)
+      ? stored.sortBy
+      : "title",
     goodreadsMode: ["off", "fill", "override"].includes(stored.goodreadsMode)
       ? stored.goodreadsMode
       : "fill",
@@ -7121,10 +7704,86 @@ async function refreshWebnovelList() {
       return;
     }
     webnovelSubscriptionsCache = payload.subscriptions ?? [];
-    renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+    if (webnovelActiveFilter === "trash") {
+      await renderWebnovelTrash();
+    } else {
+      renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+    }
   } catch (error) {
     setWebnovelFeedback(`Abos konnten nicht geladen werden: ${error.message}`, true);
   }
+}
+
+async function renderWebnovelTrash() {
+  if (!webnovelList) return;
+  try {
+    const payload = await webnovelApi(`/api/webnovel/trash?_=${Date.now()}${webnovelRootQuery()}`);
+    webnovelTrashCache = payload.entries ?? [];
+  } catch (error) {
+    setWebnovelFeedback(`Papierkorb nicht ladbar: ${error.message}`, true);
+    return;
+  }
+  clearNode(webnovelList);
+  if (webnovelListEmpty) {
+    webnovelListEmpty.hidden = webnovelTrashCache.length > 0;
+    webnovelListEmpty.textContent = "Der Papierkorb ist leer.";
+  }
+  webnovelTrashCache.forEach((entry) => {
+    const card = document.createElement("article");
+    card.className = "webnovel-card";
+    const body = document.createElement("div");
+    body.className = "webnovel-card-body";
+    const title = document.createElement("span");
+    title.className = "webnovel-card-title";
+    title.textContent = entry.title;
+    body.appendChild(title);
+    const meta = document.createElement("p");
+    meta.className = "webnovel-card-meta";
+    meta.textContent =
+      `gelöscht: ${formatWebnovelTimestamp(entry.trashed_at_unix)}` +
+      (entry.files_in_trash ? " · Dateien im Papierkorb" : " · nur Abo");
+    body.appendChild(meta);
+    const actions = document.createElement("div");
+    actions.className = "webnovel-card-actions";
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "action-button primary";
+    restoreBtn.textContent = "Wiederherstellen";
+    restoreBtn.addEventListener("click", async () => {
+      await webnovelTrashAction("/api/webnovel/restore", entry, "wiederhergestellt");
+    });
+    const purgeBtn = document.createElement("button");
+    purgeBtn.className = "action-button danger";
+    purgeBtn.textContent = "Endgültig löschen";
+    purgeBtn.addEventListener("click", async () => {
+      const confirmed = await showConfirmDialog({
+        title: "Endgültig löschen?",
+        body: `„${entry.title}“ wird ENDGÜLTIG gelöscht — das kann nicht widerrufen werden.`,
+        confirmLabel: "Endgültig löschen",
+        danger: true,
+      });
+      if (!confirmed) {
+        return;
+      }
+      await webnovelTrashAction("/api/webnovel/purge", entry, "endgültig gelöscht");
+    });
+    actions.append(restoreBtn, purgeBtn);
+    body.appendChild(actions);
+    card.appendChild(body);
+    webnovelList.appendChild(card);
+  });
+}
+
+async function webnovelTrashAction(path, entry, doneLabel) {
+  try {
+    const payload = await webnovelApi(path, {
+      method: "POST",
+      body: JSON.stringify({ id: entry.id, root: getVaultRoot() || undefined }),
+    });
+    setWebnovelFeedback(payload.error ?? `„${entry.title}“ ${doneLabel}.`, Boolean(payload.error));
+  } catch (error) {
+    setWebnovelFeedback(`Aktion fehlgeschlagen: ${error.message}`, true);
+  }
+  await refreshWebnovelList();
 }
 
 function formatWebnovelTimestamp(unixSeconds) {
@@ -7139,7 +7798,36 @@ function formatWebnovelTimestamp(unixSeconds) {
   }
 }
 
+function sortWebnovelSubscriptions(subscriptions) {
+  const sortBy = loadWebnovelSettings().sortBy;
+  const sorted = [...subscriptions];
+  switch (sortBy) {
+    case "last_check":
+      sorted.sort((a, b) => (b.last_check_unix ?? 0) - (a.last_check_unix ?? 0));
+      break;
+    case "new_chapters":
+      sorted.sort(
+        (a, b) =>
+          (b.known_chapters ?? 0) -
+          (b.downloaded_chapters ?? 0) -
+          ((a.known_chapters ?? 0) - (a.downloaded_chapters ?? 0)),
+      );
+      break;
+    case "rating":
+      sorted.sort((a, b) => (b.rating_external ?? 0) - (a.rating_external ?? 0));
+      break;
+    default:
+      sorted.sort((a, b) =>
+        String(a.title ?? "").localeCompare(String(b.title ?? ""), "de", {
+          sensitivity: "base",
+        }),
+      );
+  }
+  return sorted;
+}
+
 function applyWebnovelFilter(subscriptions) {
+  subscriptions = sortWebnovelSubscriptions(subscriptions);
   switch (webnovelActiveFilter) {
     case "ongoing":
       return subscriptions.filter((sub) => !sub.completed && sub.enabled);
@@ -7165,7 +7853,14 @@ function setWebnovelFilter(filter) {
       chip.classList.toggle("is-active", chip.dataset.webnovelFilter === filter);
     });
   }
-  renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+  if (filter === "trash") {
+    renderWebnovelTrash();
+  } else {
+    if (webnovelListEmpty) {
+      webnovelListEmpty.textContent = "Noch keine Abos vorhanden.";
+    }
+    renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+  }
 }
 
 function applyWebnovelViewMode() {
@@ -7199,6 +7894,21 @@ function renderWebnovelList(subscriptions) {
     const card = document.createElement("article");
     card.className = "webnovel-card";
 
+    if (subscription.cover_path) {
+      const cover = document.createElement("img");
+      cover.className = "webnovel-card-cover";
+      cover.loading = "lazy";
+      cover.alt = "";
+      const root = getVaultRoot();
+      cover.src = `/api/media-file?path=${encodeURIComponent(subscription.cover_path)}${
+        root ? `&root=${encodeURIComponent(root)}` : ""
+      }`;
+      card.appendChild(cover);
+    }
+
+    const cardBody = document.createElement("div");
+    cardBody.className = "webnovel-card-body";
+
     const head = document.createElement("div");
     head.className = "webnovel-card-head";
     const title = document.createElement("span");
@@ -7226,6 +7936,12 @@ function renderWebnovelList(subscriptions) {
       doneBadge.textContent = "abgeschlossen";
       badges.appendChild(doneBadge);
     }
+    if (subscription.hiatus) {
+      const hiatusBadge = document.createElement("span");
+      hiatusBadge.className = "webnovel-badge is-hiatus";
+      hiatusBadge.textContent = "Hiatus";
+      badges.appendChild(hiatusBadge);
+    }
     if (!subscription.enabled) {
       const pausedBadge = document.createElement("span");
       pausedBadge.className = "webnovel-badge is-paused";
@@ -7240,7 +7956,7 @@ function renderWebnovelList(subscriptions) {
       badges.appendChild(errorBadge);
     }
     head.appendChild(badges);
-    card.appendChild(head);
+    cardBody.appendChild(head);
 
     const meta = document.createElement("p");
     meta.className = "webnovel-card-meta";
@@ -7248,49 +7964,25 @@ function renderWebnovelList(subscriptions) {
     meta.textContent =
       `${authorPart}${subscription.downloaded_chapters}/${subscription.known_chapters} Kapitel · ` +
       `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.last_check_unix)}`;
-    card.appendChild(meta);
+    cardBody.appendChild(meta);
+    card.appendChild(cardBody);
 
-    if (subscription.last_error) {
-      const errorLine = document.createElement("p");
-      errorLine.className = "webnovel-card-meta is-error";
-      errorLine.textContent = subscription.last_error;
-      card.appendChild(errorLine);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "webnovel-card-actions";
-
-    const checkBtn = document.createElement("button");
-    checkBtn.className = "action-button";
-    checkBtn.textContent = "Jetzt prüfen";
-    checkBtn.addEventListener("click", () => triggerWebnovelCheck("manual", subscription.id));
-    actions.appendChild(checkBtn);
-
-    const completedBtn = document.createElement("button");
-    completedBtn.className = "action-button";
-    completedBtn.textContent = subscription.completed
-      ? "Als laufend markieren"
-      : "Als abgeschlossen markieren";
-    completedBtn.addEventListener("click", () =>
-      updateWebnovelSubscription(subscription.id, { completed: !subscription.completed }),
-    );
-    actions.appendChild(completedBtn);
-
-    const pauseBtn = document.createElement("button");
-    pauseBtn.className = "action-button";
-    pauseBtn.textContent = subscription.enabled ? "Pausieren" : "Fortsetzen";
-    pauseBtn.addEventListener("click", () =>
-      updateWebnovelSubscription(subscription.id, { enabled: !subscription.enabled }),
-    );
-    actions.appendChild(pauseBtn);
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.className = "action-button danger";
-    deleteBtn.textContent = "Löschen";
-    deleteBtn.addEventListener("click", () => unsubscribeWebnovel(subscription));
-    actions.appendChild(deleteBtn);
-
-    card.appendChild(actions);
+    // Cards stay slim; details and all actions live in the detail overlay.
+    card.classList.add("is-clickable");
+    card.classList.toggle("is-bulk-selected", webnovelSelectedIds.has(subscription.id));
+    card.addEventListener("click", () => {
+      if (webnovelMultiMode) {
+        if (webnovelSelectedIds.has(subscription.id)) {
+          webnovelSelectedIds.delete(subscription.id);
+        } else {
+          webnovelSelectedIds.add(subscription.id);
+        }
+        renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+        updateWebnovelBulkbar();
+        return;
+      }
+      openWebnovelDetail(subscription);
+    });
     webnovelList.appendChild(card);
   });
 }
@@ -7301,7 +7993,13 @@ async function subscribeWebnovel() {
     setWebnovelFeedback("Bitte eine Novel-URL eingeben.", true);
     return;
   }
-  setWebnovelFeedback("Novel wird abgerufen …");
+  if (isWebviewRoutedUrl(url)) {
+    setWebnovelFeedback(
+      "Diese Seite wird über das Browserfenster geladen (bitte geöffnet lassen; ggf. Sicherheitsprüfung darin bestätigen).",
+    );
+  } else {
+    setWebnovelFeedback("Novel wird abgerufen …");
+  }
   if (webnovelSubscribeBtn) webnovelSubscribeBtn.disabled = true;
   try {
     const payload = await webnovelApi("/api/webnovel/subscribe", {
@@ -7347,27 +8045,36 @@ async function updateWebnovelSubscription(id, patch) {
 }
 
 async function unsubscribeWebnovel(subscription) {
-  const removeFiles = window.confirm(
-    `„${subscription.title}“ abbestellen.\n\nOK = Abo UND heruntergeladene Dateien löschen.\n` +
-      "Abbrechen wählen und erneut versuchen, falls unsicher.\n\n" +
-      "Zum Behalten der Dateien unten „Abbrechen“ wählen und stattdessen pausieren.",
-  );
-  if (!removeFiles) {
+  const confirmed = await showConfirmDialog({
+    title: "In den Papierkorb?",
+    body: `„${subscription.title}“ wird in den Papierkorb verschoben (widerrufbar über den Filter „Papierkorb“).`,
+    confirmLabel: "In den Papierkorb",
+    danger: true,
+  });
+  if (!confirmed) {
     return;
   }
+  const removeFiles = await showConfirmDialog({
+    title: "Auch die Dateien?",
+    body: "Sollen auch die heruntergeladenen Dateien in den Papierkorb? „Abbrechen“ = nur das Abo, die Dateien bleiben im Vault.",
+    confirmLabel: "Dateien mit verschieben",
+    danger: true,
+  });
   try {
     const payload = await webnovelApi("/api/webnovel/unsubscribe", {
       method: "POST",
       body: JSON.stringify({
         id: subscription.id,
-        keep_files: false,
+        keep_files: !removeFiles,
         root: getVaultRoot() || undefined,
       }),
     });
     if (payload.error) {
       setWebnovelFeedback(payload.error, true);
     } else {
-      setWebnovelFeedback(`„${subscription.title}“ wurde entfernt.`);
+      setWebnovelFeedback(
+        `„${subscription.title}“ liegt im Papierkorb (Filter „Papierkorb“ zum Wiederherstellen).`,
+      );
     }
     await refreshWebnovelList();
   } catch (error) {
@@ -7400,6 +8107,9 @@ async function triggerWebnovelCheck(reason, id = undefined) {
         buildBatch: settings.buildBatchEpub,
         delayMs: Math.round(settings.delaySeconds * 1000),
         goodreadsMode: settings.goodreadsMode,
+        // User-initiated checks may use the visible browser window for
+        // whitelisted (Cloudflare / JS-rendered) hosts.
+        manual: reason === "manual" || reason === "subscribe",
       }),
     });
     if (payload.error) {
@@ -7439,9 +8149,15 @@ async function pollWebnovelJob(jobId) {
         status.total_chapters > 0
           ? ` — Kapitel ${status.current_chapter}/${status.total_chapters}`
           : "";
-      webnovelJobText.textContent = status.novel_title
-        ? `Prüfe „${status.novel_title}“${chapterPart} (${status.downloaded} geladen)`
-        : "Prüfe Abonnements …";
+      // A live message (e.g. "bitte Sicherheitsprüfung bestätigen") takes
+      // precedence over the routine progress line while the job runs.
+      if (status.state === "running" && status.message) {
+        webnovelJobText.textContent = status.message;
+      } else {
+        webnovelJobText.textContent = status.novel_title
+          ? `Prüfe „${status.novel_title}“${chapterPart} (${status.downloaded} geladen)`
+          : "Prüfe Abonnements …";
+      }
     }
     if (webnovelJobBar) {
       const fraction =
@@ -7472,6 +8188,7 @@ function applyWebnovelSchedule() {
 
 function initWebnovels() {
   refreshWebnovelList();
+  loadWebnovelBlocklist();
   applyWebnovelSchedule();
 
   const settings = loadWebnovelSettings();
@@ -7495,6 +8212,16 @@ function initWebnovels() {
     }
   });
   webnovelViewToggle?.addEventListener("click", toggleWebnovelViewMode);
+  const sortSelect = document.getElementById("webnovel-sort");
+  if (sortSelect) {
+    sortSelect.value = loadWebnovelSettings().sortBy;
+    sortSelect.addEventListener("change", () => {
+      const settings = loadWebnovelSettings();
+      settings.sortBy = sortSelect.value;
+      saveWebnovelSettings(settings);
+      renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+    });
+  }
   webnovelSubscribeBtn?.addEventListener("click", subscribeWebnovel);
   webnovelCheckAllBtn?.addEventListener("click", () => triggerWebnovelCheck("manual"));
   webnovelUrlInput?.addEventListener("keydown", (event) => {
@@ -7517,3 +8244,786 @@ function initWebnovels() {
     });
   }
 }
+
+// ---------------------------------------------------------------------------
+// Settings sub-tabs
+// ---------------------------------------------------------------------------
+
+const settingsTabsKey = "mediavault.settingsTab";
+const settingsTabsBar = document.getElementById("settings-tabs");
+
+function setActiveSettingsTab(name) {
+  const panes = document.querySelectorAll("[data-settings-pane]");
+  let found = false;
+  panes.forEach((pane) => {
+    const isActive = pane.dataset.settingsPane === name;
+    pane.classList.toggle("is-active", isActive);
+    found = found || isActive;
+  });
+  if (!found && panes.length) {
+    panes[0].classList.add("is-active");
+    name = panes[0].dataset.settingsPane;
+  }
+  settingsTabsBar?.querySelectorAll("[data-settings-tab]").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.settingsTab === name);
+  });
+  localStorage.setItem(settingsTabsKey, name);
+}
+
+settingsTabsBar?.addEventListener("click", (event) => {
+  const tab = event.target.closest("[data-settings-tab]");
+  if (tab) {
+    setActiveSettingsTab(tab.dataset.settingsTab);
+  }
+});
+
+setActiveSettingsTab(localStorage.getItem(settingsTabsKey) || "general");
+
+// ---------------------------------------------------------------------------
+// Add to playlist (from the collections inspector)
+// ---------------------------------------------------------------------------
+
+const playlistPickDialog = document.getElementById("playlist-pick-dialog");
+const playlistPickList = document.getElementById("playlist-pick-list");
+const playlistPickFile = document.getElementById("playlist-pick-file");
+const playlistPickNewName = document.getElementById("playlist-pick-new-name");
+const playlistPickCreate = document.getElementById("playlist-pick-create");
+const playlistPickCancel = document.getElementById("playlist-pick-cancel");
+const inspectorAddPlaylist = document.getElementById("inspector-add-playlist");
+
+let playlistPickPath = "";
+
+async function savePlaylistObject(playlist) {
+  const root = getVaultRoot();
+  playlist.updated_at = Math.floor(Date.now() / 1000);
+  await fetch("mediavault://localhost/api/playlist/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ vault_root: root, playlist }),
+  });
+}
+
+async function addPathToPlaylist(playlist, vaultPath) {
+  if (playlist.items.includes(vaultPath)) {
+    if (statusStrip) {
+      statusStrip.textContent = `Bereits in „${playlist.name}“ enthalten.`;
+    }
+    hideModalCards();
+    return;
+  }
+  playlist.items.push(vaultPath);
+  try {
+    await savePlaylistObject(playlist);
+    if (statusStrip) {
+      statusStrip.textContent = `Zu „${playlist.name}“ hinzugefügt (${playlist.items.length} Einträge).`;
+    }
+  } catch (error) {
+    if (statusStrip) {
+      statusStrip.textContent = `Hinzufügen fehlgeschlagen: ${error.message}`;
+    }
+  }
+  hideModalCards();
+  await loadPlaylists();
+}
+
+async function openPlaylistPicker(vaultPath) {
+  if (!playlistPickDialog || !vaultPath) {
+    return;
+  }
+  playlistPickPath = vaultPath;
+  if (playlistPickFile) {
+    const stem = vaultPath.split("/").pop() || vaultPath;
+    playlistPickFile.textContent = stem;
+    playlistPickFile.title = vaultPath;
+  }
+  await loadPlaylists();
+  if (playlistPickList) {
+    clearNode(playlistPickList);
+    const manual = activePlaylists.filter((pl) => (pl.kind ?? "manual") === "manual");
+    if (!manual.length) {
+      const hint = document.createElement("p");
+      hint.className = "field-hint";
+      hint.textContent = "Noch keine Wiedergabeliste vorhanden — unten eine neue erstellen.";
+      playlistPickList.appendChild(hint);
+    }
+    manual.forEach((pl) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "action-button playlist-pick-row";
+      row.textContent = `${pl.name} (${pl.items?.length ?? 0})`;
+      row.addEventListener("click", () => addPathToPlaylist(pl, playlistPickPath));
+      playlistPickList.appendChild(row);
+    });
+  }
+  if (playlistPickNewName) {
+    playlistPickNewName.value = "";
+  }
+  showModalCard(playlistPickDialog);
+}
+
+inspectorAddPlaylist?.addEventListener("click", () => {
+  const item = inspectorSelection?.item;
+  const vaultPath = item?.target_path || item?.source_path || "";
+  if (vaultPath) {
+    openPlaylistPicker(vaultPath);
+  }
+});
+
+playlistPickCancel?.addEventListener("click", hideModalCards);
+
+playlistPickCreate?.addEventListener("click", async () => {
+  const name = (playlistPickNewName?.value ?? "").trim();
+  if (!name || !playlistPickPath) {
+    return;
+  }
+  const playlist = {
+    id: `pl_${Date.now()}`,
+    name,
+    kind: "manual",
+    items: [],
+    created_at: Math.floor(Date.now() / 1000),
+    updated_at: Math.floor(Date.now() / 1000),
+  };
+  await addPathToPlaylist(playlist, playlistPickPath);
+});
+
+// ---------------------------------------------------------------------------
+// Webnovel detail overlay
+// ---------------------------------------------------------------------------
+
+const webnovelDetail = document.getElementById("webnovel-detail");
+const webnovelDetailClose = document.getElementById("webnovel-detail-close");
+
+function closeWebnovelDetail() {
+  if (webnovelDetail) {
+    webnovelDetail.hidden = true;
+  }
+}
+
+webnovelDetailClose?.addEventListener("click", closeWebnovelDetail);
+webnovelDetail?.addEventListener("click", (event) => {
+  if (event.target === webnovelDetail) {
+    closeWebnovelDetail();
+  }
+});
+
+function webnovelDetailBadge(text, extraClass = "") {
+  const badge = document.createElement("span");
+  badge.className = `webnovel-badge ${extraClass}`.trim();
+  badge.textContent = text;
+  return badge;
+}
+
+function openWebnovelDetail(subscription) {
+  if (!webnovelDetail) return;
+
+  const cover = document.getElementById("webnovel-detail-cover");
+  if (cover) {
+    if (subscription.cover_path) {
+      const root = getVaultRoot();
+      cover.src = `/api/media-file?path=${encodeURIComponent(subscription.cover_path)}${
+        root ? `&root=${encodeURIComponent(root)}` : ""
+      }`;
+      cover.hidden = false;
+    } else {
+      cover.hidden = true;
+      cover.removeAttribute("src");
+    }
+  }
+
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) {
+      node.textContent = value ?? "";
+      node.hidden = !value;
+    }
+  };
+  setText("webnovel-detail-title", subscription.title || subscription.url);
+  setText("webnovel-detail-author", subscription.author);
+  setText(
+    "webnovel-detail-rating",
+    subscription.rating_external ? `★ ${subscription.rating_external.toFixed(2)} (Goodreads)` : "",
+  );
+  setText("webnovel-detail-description", subscription.description);
+  const genresNode = document.getElementById("webnovel-detail-genres");
+  if (genresNode) {
+    clearNode(genresNode);
+    const genreParts = [...(subscription.genres ?? []), ...(subscription.tags ?? [])];
+    genresNode.hidden = !genreParts.length;
+    genreParts.slice(0, 16).forEach((tag) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "tag-chip";
+      chip.textContent = tag;
+      chip.addEventListener("click", () => setCollectionTagFilter(tag));
+      genresNode.appendChild(chip);
+    });
+  }
+  setText(
+    "webnovel-detail-chapters",
+    `${subscription.downloaded_chapters}/${subscription.known_chapters} Kapitel geladen · ` +
+      `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.last_check_unix)}`,
+  );
+  setText("webnovel-detail-error", subscription.last_error);
+
+  const badges = document.getElementById("webnovel-detail-badges");
+  if (badges) {
+    clearNode(badges);
+    badges.appendChild(webnovelDetailBadge(subscription.source));
+    const pending =
+      (subscription.known_chapters ?? 0) - (subscription.downloaded_chapters ?? 0);
+    if (pending > 0) badges.appendChild(webnovelDetailBadge(`${pending} neu`, "is-new"));
+    if (subscription.completed) {
+      badges.appendChild(webnovelDetailBadge("abgeschlossen", "is-completed"));
+    }
+    if (subscription.hiatus) {
+      badges.appendChild(webnovelDetailBadge("Hiatus", "is-hiatus"));
+    }
+    if (!subscription.enabled) badges.appendChild(webnovelDetailBadge("pausiert", "is-paused"));
+    if (subscription.last_error) badges.appendChild(webnovelDetailBadge("Fehler", "is-error"));
+  }
+
+  const links = document.getElementById("webnovel-detail-links");
+  if (links) {
+    clearNode(links);
+    const linkButton = (label, url) => {
+      if (!url) return;
+      const button = document.createElement("button");
+      button.className = "action-button";
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        fetch(`/api/open-url?url=${encodeURIComponent(url)}`).catch(() => {});
+      });
+      links.appendChild(button);
+    };
+    linkButton("Quelle öffnen", subscription.url);
+    linkButton("Goodreads", subscription.goodreads_url);
+    linkButton("AniList", subscription.anilist_url);
+  }
+
+  const actions = document.getElementById("webnovel-detail-actions");
+  if (actions) {
+    clearNode(actions);
+    const actionButton = (label, extraClass, handler) => {
+      const button = document.createElement("button");
+      button.className = `action-button ${extraClass}`.trim();
+      button.textContent = label;
+      button.addEventListener("click", handler);
+      actions.appendChild(button);
+    };
+    actionButton("Jetzt prüfen", "primary", () => {
+      closeWebnovelDetail();
+      triggerWebnovelCheck("manual", subscription.id);
+    });
+    actionButton(
+      subscription.completed ? "Als laufend markieren" : "Als abgeschlossen markieren",
+      "",
+      async () => {
+        closeWebnovelDetail();
+        await updateWebnovelSubscription(subscription.id, {
+          completed: !subscription.completed,
+        });
+      },
+    );
+    actionButton(
+      subscription.hiatus ? "Hiatus aufheben" : "Als Hiatus markieren",
+      "",
+      async () => {
+        closeWebnovelDetail();
+        await updateWebnovelSubscription(subscription.id, { hiatus: !subscription.hiatus });
+      },
+    );
+    actionButton(subscription.enabled ? "Pausieren" : "Fortsetzen", "", async () => {
+      closeWebnovelDetail();
+      await updateWebnovelSubscription(subscription.id, { enabled: !subscription.enabled });
+    });
+    actionButton("Löschen", "danger", async () => {
+      closeWebnovelDetail();
+      await unsubscribeWebnovel(subscription);
+    });
+  }
+
+  webnovelDetail.hidden = false;
+}
+
+// ---------------------------------------------------------------------------
+// Webnovel blocklist settings
+// ---------------------------------------------------------------------------
+
+const webnovelBlocklistContainer = document.getElementById("webnovel-blocklist");
+const webnovelBlocklistFeedback = document.getElementById("webnovel-blocklist-feedback");
+let webnovelBlocklistEntries = [];
+
+async function loadWebnovelBlocklist() {
+  if (!webnovelBlocklistContainer) return;
+  try {
+    const payload = await webnovelApi(`/api/webnovel/blocklist?_=${Date.now()}${webnovelRootQuery()}`);
+    webnovelBlocklistEntries = payload.entries ?? [];
+    renderWebnovelBlocklist();
+  } catch (error) {
+    if (webnovelBlocklistFeedback) {
+      webnovelBlocklistFeedback.textContent = `Blockliste nicht ladbar: ${error.message}`;
+    }
+  }
+}
+
+function renderWebnovelBlocklist() {
+  if (!webnovelBlocklistContainer) return;
+  clearNode(webnovelBlocklistContainer);
+  if (!webnovelBlocklistEntries.length) {
+    const empty = document.createElement("p");
+    empty.className = "field-hint";
+    empty.textContent = "Keine Einträge.";
+    webnovelBlocklistContainer.appendChild(empty);
+    return;
+  }
+  webnovelBlocklistEntries.forEach((entry) => {
+    const row = document.createElement("div");
+    row.className = "blocklist-row";
+    const host = document.createElement("strong");
+    host.textContent = entry.host;
+    row.appendChild(host);
+    if (entry.builtin) {
+      const badge = document.createElement("span");
+      badge.className = "webnovel-badge";
+      badge.textContent = "eingebaut";
+      row.appendChild(badge);
+    }
+    const note = document.createElement("span");
+    note.className = "blocklist-note";
+    note.textContent = entry.note ?? "";
+    row.appendChild(note);
+    if (!entry.builtin) {
+      const remove = document.createElement("button");
+      remove.className = "action-button icon-button danger";
+      remove.title = "Entfernen";
+      remove.textContent = "✕";
+      remove.addEventListener("click", () => saveWebnovelBlocklist(
+        webnovelBlocklistEntries.filter((candidate) => candidate.host !== entry.host),
+      ));
+      row.appendChild(remove);
+    }
+    webnovelBlocklistContainer.appendChild(row);
+  });
+}
+
+async function saveWebnovelBlocklist(entries) {
+  try {
+    const payload = await webnovelApi("/api/webnovel/blocklist/save", {
+      method: "POST",
+      body: JSON.stringify({ entries, root: getVaultRoot() || undefined }),
+    });
+    if (webnovelBlocklistFeedback) {
+      webnovelBlocklistFeedback.textContent = payload.error ?? "Blockliste gespeichert.";
+    }
+    await loadWebnovelBlocklist();
+  } catch (error) {
+    if (webnovelBlocklistFeedback) {
+      webnovelBlocklistFeedback.textContent = `Speichern fehlgeschlagen: ${error.message}`;
+    }
+  }
+}
+
+document.getElementById("webnovel-blocklist-add-btn")?.addEventListener("click", () => {
+  const hostInput = document.getElementById("webnovel-blocklist-host");
+  const noteInput = document.getElementById("webnovel-blocklist-note");
+  const host = (hostInput?.value ?? "").trim().toLowerCase();
+  if (!host) return;
+  const note = (noteInput?.value ?? "").trim();
+  const entries = [
+    ...webnovelBlocklistEntries,
+    { host, note: note || null, builtin: false },
+  ];
+  if (hostInput) hostInput.value = "";
+  if (noteInput) noteInput.value = "";
+  saveWebnovelBlocklist(entries);
+});
+
+// Loaded from initWebnovels() once the vault is open.
+
+// ---------------------------------------------------------------------------
+// Webnovels: multi-select bulk actions
+// ---------------------------------------------------------------------------
+
+function updateWebnovelBulkbar() {
+  const bulkbar = document.getElementById("webnovel-bulkbar");
+  const count = document.getElementById("webnovel-bulk-count");
+  if (bulkbar) {
+    bulkbar.hidden = !webnovelMultiMode;
+  }
+  if (count) {
+    count.textContent = `${webnovelSelectedIds.size} ausgewählt`;
+  }
+  const toggle = document.getElementById("webnovel-multi-toggle");
+  if (toggle) {
+    toggle.classList.toggle("is-active", webnovelMultiMode);
+    toggle.textContent = webnovelMultiMode ? "Auswahl beenden" : "Mehrfachauswahl";
+  }
+}
+
+document.getElementById("webnovel-multi-toggle")?.addEventListener("click", () => {
+  webnovelMultiMode = !webnovelMultiMode;
+  if (!webnovelMultiMode) {
+    webnovelSelectedIds.clear();
+  }
+  updateWebnovelBulkbar();
+  renderWebnovelList(applyWebnovelFilter(webnovelSubscriptionsCache));
+});
+
+async function webnovelBulkUpdate(patch, doneLabel) {
+  const ids = [...webnovelSelectedIds];
+  for (const id of ids) {
+    await updateWebnovelSubscription(id, patch);
+  }
+  setWebnovelFeedback(`${ids.length} Abos ${doneLabel}.`);
+}
+
+document.getElementById("webnovel-bulk-pause")?.addEventListener("click", () => {
+  if (webnovelSelectedIds.size) webnovelBulkUpdate({ enabled: false }, "pausiert");
+});
+
+document.getElementById("webnovel-bulk-resume")?.addEventListener("click", () => {
+  if (webnovelSelectedIds.size) webnovelBulkUpdate({ enabled: true }, "fortgesetzt");
+});
+
+document.getElementById("webnovel-bulk-delete")?.addEventListener("click", async () => {
+  const ids = [...webnovelSelectedIds];
+  if (!ids.length) return;
+  const confirmed = await showConfirmDialog({
+    title: "In den Papierkorb?",
+    body: `${ids.length} Abos werden in den Papierkorb verschoben (widerrufbar).`,
+    confirmLabel: "In den Papierkorb",
+    danger: true,
+  });
+  if (!confirmed) {
+    return;
+  }
+  const removeFiles = await showConfirmDialog({
+    title: "Auch die Dateien?",
+    body: "Sollen auch die heruntergeladenen Dateien in den Papierkorb? „Abbrechen“ = nur die Abos.",
+    confirmLabel: "Dateien mit verschieben",
+    danger: true,
+  });
+  for (const id of ids) {
+    try {
+      await webnovelApi("/api/webnovel/unsubscribe", {
+        method: "POST",
+        body: JSON.stringify({
+          id,
+          keep_files: !removeFiles,
+          root: getVaultRoot() || undefined,
+        }),
+      });
+    } catch {
+      // Continue with the remaining ids; errors surface via the final refresh.
+    }
+  }
+  webnovelSelectedIds.clear();
+  webnovelMultiMode = false;
+  updateWebnovelBulkbar();
+  setWebnovelFeedback(`${ids.length} Abos in den Papierkorb verschoben.`);
+  await refreshWebnovelList();
+});
+
+// Finds the subscription behind a collection item and runs a check for it —
+// refreshing Goodreads/AniList metadata and the sidecar in one go.
+async function fetchWebnovelMetadataForItem(item) {
+  const wanted = String(item.series_title || item.title || "").toLowerCase();
+  if (!wanted) {
+    if (statusStrip) statusStrip.textContent = "Kein Titel zum Abgleichen gefunden.";
+    return;
+  }
+  try {
+    const payload = await webnovelApi(`/api/webnovel/list?_=${Date.now()}${webnovelRootQuery()}`);
+    const match = (payload.subscriptions ?? []).find(
+      (subscription) => String(subscription.title ?? "").toLowerCase() === wanted,
+    );
+    if (!match) {
+      if (statusStrip) {
+        statusStrip.textContent = `Kein Webnovel-Abo zu „${item.series_title || item.title}“ gefunden.`;
+      }
+      return;
+    }
+    if (statusStrip) {
+      statusStrip.textContent = `Metadaten für „${match.title}“ werden aktualisiert …`;
+    }
+    const keepPath = item.source_path;
+    await triggerWebnovelCheck("manual", match.id);
+    await loadPlan();
+    // Re-select the same file in the freshly rebuilt plan so the inspector
+    // shows the updated metadata instead of a stale (→ "unclassified",
+    // non-editable) object reference.
+    const refreshed = (currentPlan?.items ?? []).find(
+      (candidate) => candidate.source_path === keepPath,
+    );
+    renderInspector(refreshed ?? null);
+    if (statusStrip) {
+      statusStrip.textContent = `Metadaten für „${match.title}“ aktualisiert.`;
+    }
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Abruf fehlgeschlagen: ${error.message}`;
+  }
+}
+
+
+document.getElementById("collection-bulk-trash")?.addEventListener("click", () => {
+  const items = selectedBulkItems();
+  if (items.length) {
+    openTrashDialog({ type: "bulk", items, item: items[0], node: null });
+  }
+});
+
+document.getElementById("collection-bulk-clear")?.addEventListener("click", () => {
+  multiSelectedKeys.clear();
+  isMultiEdit = false;
+  updateCollectionBulkbar();
+  renderCollections(currentPlan?.items ?? []);
+  renderInspector(null);
+});
+
+// ---------------------------------------------------------------------------
+// Supported sources list + user bookmarks
+// ---------------------------------------------------------------------------
+
+// Hosts routed through the visible browser window (must match the Rust
+// WEBVIEW_ROUTED_HOSTS list).
+const WEBVIEW_ROUTED_HOSTS = [
+  "novelupdates.com",
+  "novellunar.com",
+  "novelarrow.com",
+  "freewebnovel.com",
+];
+
+function isWebviewRoutedUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return WEBVIEW_ROUTED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
+const WEBNOVEL_SOURCES = [
+  ["RoyalRoad", "https://www.royalroad.com", "voll unterstützt"],
+  ["NovelFull", "https://novelfull.com", "voll unterstützt"],
+  ["novelfull.net", "https://novelfull.net", "voll unterstützt"],
+  ["ReadNovelFull", "https://readnovelfull.com", "voll unterstützt"],
+  ["Novgo", "https://novgo.net", "voll unterstützt"],
+  ["NovelPhoenix", "https://novelphoenix.com", "voll unterstützt"],
+  ["DivineDaoLibrary", "https://www.divinedaolibrary.com", "voll unterstützt"],
+  ["Novellunar", "https://novellunar.com", "Browserfenster (nur manuell)"],
+  ["NovelUpdates", "https://www.novelupdates.com", "Browserfenster (nur manuell)"],
+  ["NovelArrow", "https://novelarrow.com", "Browserfenster (nur manuell)"],
+  ["FreeWebNovel", "https://freewebnovel.com", "Browserfenster (nur manuell)"],
+  ["EmpireNovel", "https://empirenovel.com", "Best-Effort"],
+  ["ReadNovelMTL", "https://readnovelmtl.com", "Best-Effort"],
+  ["Novelight", "https://novelight.net", "nur neueste ~50 Kapitel"],
+];
+
+const webnovelBookmarksKey = "mediavault.sourceBookmarks";
+
+function openExternalLink(url) {
+  fetch(`/api/open-url?url=${encodeURIComponent(url)}`).catch(() => {});
+}
+
+function renderWebnovelSources() {
+  const container = document.getElementById("webnovel-sources");
+  if (!container) return;
+  clearNode(container);
+  WEBNOVEL_SOURCES.forEach(([label, url, support]) => {
+    const row = document.createElement("div");
+    row.className = "blocklist-row";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "action-button compact";
+    link.textContent = label;
+    link.title = url;
+    link.addEventListener("click", () => openExternalLink(url));
+    const note = document.createElement("span");
+    note.className = "blocklist-note";
+    note.textContent = support;
+    row.append(link, note);
+    container.appendChild(row);
+  });
+}
+
+function loadWebnovelBookmarks() {
+  return loadStoredJson(webnovelBookmarksKey, []);
+}
+
+function renderWebnovelBookmarks() {
+  const container = document.getElementById("webnovel-bookmarks");
+  if (!container) return;
+  clearNode(container);
+  const bookmarks = loadWebnovelBookmarks();
+  if (!bookmarks.length) {
+    const hint = document.createElement("p");
+    hint.className = "field-hint";
+    hint.textContent = "Noch keine Lesezeichen.";
+    container.appendChild(hint);
+    return;
+  }
+  bookmarks.forEach((bookmark, index) => {
+    const row = document.createElement("div");
+    row.className = "blocklist-row";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "action-button compact";
+    link.textContent = bookmark.label || bookmark.url;
+    link.title = bookmark.url;
+    link.addEventListener("click", () => openExternalLink(bookmark.url));
+    const note = document.createElement("span");
+    note.className = "blocklist-note";
+    note.textContent = bookmark.url;
+    const remove = document.createElement("button");
+    remove.className = "action-button icon-button danger";
+    remove.textContent = "✕";
+    remove.title = "Lesezeichen entfernen";
+    remove.addEventListener("click", () => {
+      const updated = loadWebnovelBookmarks();
+      updated.splice(index, 1);
+      saveStoredJson(webnovelBookmarksKey, updated);
+      renderWebnovelBookmarks();
+    });
+    row.append(link, note, remove);
+    container.appendChild(row);
+  });
+}
+
+document.getElementById("webnovel-bookmark-add")?.addEventListener("click", () => {
+  const labelInput = document.getElementById("webnovel-bookmark-label");
+  const urlInput = document.getElementById("webnovel-bookmark-url");
+  const url = (urlInput?.value ?? "").trim();
+  if (!url.startsWith("http://") && !url.startsWith("https://")) {
+    return;
+  }
+  const bookmarks = loadWebnovelBookmarks();
+  bookmarks.push({ label: (labelInput?.value ?? "").trim(), url });
+  saveStoredJson(webnovelBookmarksKey, bookmarks);
+  if (labelInput) labelInput.value = "";
+  if (urlInput) urlInput.value = "";
+  renderWebnovelBookmarks();
+});
+
+renderWebnovelSources();
+renderWebnovelBookmarks();
+
+// ---------------------------------------------------------------------------
+// Vault trash view
+// ---------------------------------------------------------------------------
+
+async function loadVaultTrash() {
+  const list = document.getElementById("trash-list");
+  const emptyHint = document.getElementById("trash-empty-hint");
+  if (!list) return;
+  const root = getVaultRoot();
+  let entries = [];
+  try {
+    const response = await fetch(
+      `mediavault://localhost/api/trash/list?_=${Date.now()}${
+        root ? `&root=${encodeURIComponent(root)}` : ""
+      }`,
+    );
+    const payload = await response.json();
+    if (payload.error) {
+      if (statusStrip) statusStrip.textContent = payload.error;
+      return;
+    }
+    entries = payload.entries ?? [];
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Papierkorb nicht ladbar: ${error.message}`;
+    return;
+  }
+
+  clearNode(list);
+  if (emptyHint) emptyHint.hidden = entries.length > 0;
+
+  entries.forEach((entry) => {
+    const card = document.createElement("article");
+    card.className = "webnovel-card";
+    const body = document.createElement("div");
+    body.className = "webnovel-card-body";
+
+    const title = document.createElement("span");
+    title.className = "webnovel-card-title";
+    title.textContent = entry.name;
+    body.appendChild(title);
+
+    const meta = document.createElement("p");
+    meta.className = "webnovel-card-meta";
+    const dir = entry.relative_path.split("/").slice(0, -1).join("/") || "(Vault-Wurzel)";
+    meta.textContent = `${dir} · ${formatBytes(entry.size_bytes)} · gelöscht: ${formatWebnovelTimestamp(
+      entry.trashed_at,
+    )}`;
+    body.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "webnovel-card-actions";
+
+    const restoreBtn = document.createElement("button");
+    restoreBtn.className = "action-button primary";
+    restoreBtn.textContent = "Wiederherstellen";
+    restoreBtn.addEventListener("click", () => vaultTrashAction("restore", [entry.relative_path]));
+    actions.appendChild(restoreBtn);
+
+    const purgeBtn = document.createElement("button");
+    purgeBtn.className = "action-button danger";
+    purgeBtn.textContent = "Endgültig löschen";
+    purgeBtn.addEventListener("click", async () => {
+      const ok = await showConfirmDialog({
+        title: "Endgültig löschen?",
+        body: `„${entry.name}“ wird unwiderruflich gelöscht.`,
+        confirmLabel: "Endgültig löschen",
+        danger: true,
+      });
+      if (ok) {
+        vaultTrashAction("purge", [entry.relative_path]);
+      }
+    });
+    actions.appendChild(purgeBtn);
+
+    body.appendChild(actions);
+    card.appendChild(body);
+    list.appendChild(card);
+  });
+}
+
+async function vaultTrashAction(kind, paths, all = false) {
+  try {
+    const response = await fetch(`mediavault://localhost/api/trash/${kind}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ vault_root: getVaultRoot(), paths, all }),
+    });
+    const payload = await response.json();
+    if (payload.error) {
+      if (statusStrip) statusStrip.textContent = payload.error;
+    } else if (statusStrip) {
+      const verb = kind === "restore" ? "wiederhergestellt" : "gelöscht";
+      const skipped = (payload.skipped ?? []).length;
+      statusStrip.textContent = `${(payload.processed ?? []).length} Eintrag(e) ${verb}${
+        skipped ? `, ${skipped} übersprungen` : ""
+      }.`;
+    }
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Aktion fehlgeschlagen: ${error.message}`;
+  }
+  await loadVaultTrash();
+  // Restored files re-appear in the collections plan.
+  if (kind === "restore") {
+    loadPlan();
+  }
+}
+
+document.getElementById("trash-refresh")?.addEventListener("click", loadVaultTrash);
+document.getElementById("trash-empty")?.addEventListener("click", async () => {
+  const ok = await showConfirmDialog({
+    title: "Papierkorb leeren?",
+    body: "Alle Dateien im Papierkorb werden unwiderruflich gelöscht.",
+    confirmLabel: "Papierkorb leeren",
+    danger: true,
+  });
+  if (ok) {
+    vaultTrashAction("purge", [], true);
+  }
+});

@@ -19,12 +19,13 @@
 pub mod generic;
 pub mod novelfull;
 pub mod novelight;
+pub mod novelphoenix;
 pub mod novelupdates;
 pub mod royalroad;
 pub mod wordpress;
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use scraper::{Html, Selector};
@@ -105,41 +106,16 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
         Box::new(novelfull::NovelFullSource)
     } else if host.ends_with("novelight.net") {
         Box::new(novelight::NovelightSource)
+    } else if host.ends_with("novelphoenix.com") {
+        Box::new(novelphoenix::NovelPhoenixSource)
     } else if host.ends_with("novelupdates.com") {
         Box::new(novelupdates::NovelUpdatesSource)
-    } else if host.ends_with("novelarrow.com") {
-        // Chapter text is rendered client-side only (Next.js) — plain HTTP
-        // never sees it. Refuse with a clear message instead of failing oddly.
-        Box::new(UnsupportedSource {
-            reason: "novelarrow.com lädt Kapiteltexte nur per JavaScript und kann                      ohne eingebetteten Browser nicht abonniert werden.",
-        })
     } else {
-        // empirenovel.com, readnovelmtl.com and unknown hosts run through the
-        // heuristic parser — works on most standard novel-site layouts.
+        // Everything else — incl. novelarrow.com/novellunar.com (JS-rendered)
+        // and freewebnovel.com (Cloudflare) — runs through the heuristic
+        // parser. For the webview-routed hosts the browser window supplies the
+        // fully-rendered HTML, which the heuristic parses like any other page.
         Box::new(generic::GenericSource)
-    }
-}
-
-/// Placeholder adapter for hosts we explicitly cannot support.
-struct UnsupportedSource {
-    reason: &'static str,
-}
-
-impl NovelSource for UnsupportedSource {
-    fn id(&self) -> &'static str {
-        "unsupported"
-    }
-
-    fn fetch_novel_info(&self, _client: &PoliteClient, _url: &str) -> Result<NovelInfo> {
-        Err(VaultError::ExternalApi(self.reason.to_string()))
-    }
-
-    fn fetch_chapter(
-        &self,
-        _client: &PoliteClient,
-        _chapter: &ChapterRef,
-    ) -> Result<ChapterContent> {
-        Err(VaultError::ExternalApi(self.reason.to_string()))
     }
 }
 
@@ -162,6 +138,60 @@ const MAX_RETRIES: u32 = 3;
 /// Backoff before each retry attempt, in seconds.
 const RETRY_BACKOFF_SECS: [u64; 3] = [2, 5, 12];
 
+/// Browser session (cookies + matching user agent) captured from the
+/// interactive Cloudflare-solve window, keyed by host.
+#[derive(Debug, Clone)]
+pub struct BrowserSession {
+    /// Full `Cookie` header value ("name=value; name2=value2").
+    pub cookie_header: String,
+    /// User agent the cookies were issued for — must match on reuse.
+    pub user_agent: String,
+}
+
+/// Hosts whose pages must be fetched through the embedded browser window,
+/// not plain HTTP — either Cloudflare binds clearance to the browser's TLS
+/// fingerprint (novelupdates, freewebnovel) or the content is rendered
+/// client-side by JavaScript (novellunar, novelarrow).  These are only ever
+/// routed on an explicit, manual user action (never in background checks).
+pub const WEBVIEW_ROUTED_HOSTS: [&str; 4] = [
+    "novelupdates.com",
+    "novellunar.com",
+    "novelarrow.com",
+    "freewebnovel.com",
+];
+
+/// Returns true when a URL's host must go through the browser window.
+pub fn is_webview_routed(url: &str) -> bool {
+    host_of(url)
+        .map(|host| {
+            WEBVIEW_ROUTED_HOSTS
+                .iter()
+                .any(|routed| host == *routed || host.ends_with(&format!(".{routed}")))
+        })
+        .unwrap_or(false)
+}
+
+/// A fetcher that returns fully-rendered HTML for a URL by driving an embedded
+/// browser window. Set on a [`PoliteClient`] for manual, whitelisted checks.
+pub type RenderedFetcher = Arc<dyn Fn(&str) -> Result<String> + Send + Sync>;
+
+/// RAM-only session store — clearance cookies are short-lived anyway.
+static BROWSER_SESSIONS: LazyLock<Mutex<HashMap<String, BrowserSession>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Registers a solved-challenge session for a host.
+pub fn set_browser_session(host: &str, session: BrowserSession) {
+    if let Ok(mut sessions) = BROWSER_SESSIONS.lock() {
+        sessions.insert(host.to_lowercase(), session);
+    }
+}
+
+/// Returns the stored session for a URL's host, if one exists.
+pub fn browser_session_for(url: &str) -> Option<BrowserSession> {
+    let host = host_of(url)?;
+    BROWSER_SESSIONS.lock().ok()?.get(&host).cloned()
+}
+
 /// Blocking HTTP client with per-host rate limiting and bounded retries.
 ///
 /// All webnovel network traffic goes through this client so politeness rules
@@ -172,6 +202,9 @@ pub struct PoliteClient {
     min_delay: Duration,
     /// Last request instant per host, for enforcing `min_delay`.
     last_request: Mutex<HashMap<String, Instant>>,
+    /// When set, whitelisted hosts are fetched through the browser window
+    /// instead of plain HTTP (rendered HTML / TLS-bound Cloudflare sessions).
+    renderer: Option<RenderedFetcher>,
 }
 
 impl PoliteClient {
@@ -202,7 +235,15 @@ impl PoliteClient {
                 delay_ms.clamp(MIN_ALLOWED_DELAY_MS, MAX_ALLOWED_DELAY_MS),
             ),
             last_request: Mutex::new(HashMap::new()),
+            renderer: None,
         })
+    }
+
+    /// Attaches a browser-window fetcher for whitelisted hosts. Used only for
+    /// manual, user-initiated checks (never in background runs).
+    pub fn with_renderer(mut self, renderer: RenderedFetcher) -> Self {
+        self.renderer = Some(renderer);
+        self
     }
 
     /// Fetches a URL and returns `(final_url, body_text)`.
@@ -215,6 +256,16 @@ impl PoliteClient {
     /// # Errors
     /// - `VaultError::ExternalApi` on HTTP errors after retries are exhausted
     pub fn get_text(&self, url: &str) -> Result<(String, String)> {
+        // Whitelisted hosts go through the browser window when a renderer is
+        // attached — plain HTTP either can't pass Cloudflare (TLS-bound) or
+        // never sees the JS-rendered content.
+        if is_webview_routed(url) {
+            if let Some(renderer) = &self.renderer {
+                self.respect_delay(url);
+                let html = renderer(url)?;
+                return Ok((url.to_string(), html));
+            }
+        }
         let mut attempt = 0;
         loop {
             self.respect_delay(url);
@@ -257,7 +308,13 @@ impl PoliteClient {
     }
 
     fn try_get_bytes(&self, url: &str) -> std::result::Result<Vec<u8>, RequestFailure> {
-        let response = self.client.get(url).send().map_err(|e| {
+        let mut request = self.client.get(url);
+        if let Some(session) = browser_session_for(url) {
+            request = request
+                .header("Cookie", session.cookie_header)
+                .header("User-Agent", session.user_agent);
+        }
+        let response = request.send().map_err(|e| {
             RequestFailure::Transient(VaultError::ExternalApi(format!(
                 "request to {url} failed: {e}"
             )))
@@ -282,7 +339,15 @@ impl PoliteClient {
     }
 
     fn try_get(&self, url: &str) -> std::result::Result<(String, String), RequestFailure> {
-        let response = self.client.get(url).send().map_err(|e| {
+        let mut request = self.client.get(url);
+        // A manually solved Cloudflare challenge leaves cookies + UA here;
+        // sending them lets subsequent plain requests pass the check.
+        if let Some(session) = browser_session_for(url) {
+            request = request
+                .header("Cookie", session.cookie_header)
+                .header("User-Agent", session.user_agent);
+        }
+        let response = request.send().map_err(|e| {
             if e.is_timeout() || e.is_connect() {
                 RequestFailure::Transient(VaultError::ExternalApi(format!(
                     "request to {url} failed: {e}"

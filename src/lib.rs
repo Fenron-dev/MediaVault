@@ -31,8 +31,8 @@ pub use core::progress::{
 pub use core::properties::{render_sidecar_yaml, sidecar_path_for};
 pub use core::vault::{RelativePath, Vault};
 pub use core::webnovel::{
-    delete_subscription, list_subscriptions, load_subscription, save_subscription, KnownChapter,
-    Subscription,
+    delete_subscription, list_subscriptions, load_subscription, save_subscription, BlocklistEntry,
+    KnownChapter, Subscription,
 };
 pub use error::{Result, VaultError};
 pub use media::{
