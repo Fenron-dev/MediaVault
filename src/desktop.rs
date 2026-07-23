@@ -5678,15 +5678,29 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
         Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
     }
 
-    let client = match PoliteClient::new() {
+    let mut client = match PoliteClient::new() {
         Ok(client) => client,
         Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
     };
+    // Subscribing is always user-initiated → whitelisted (Cloudflare /
+    // JS-rendered) hosts are fetched through the visible browser window.
+    let uses_window = is_webview_routed(&url);
+    if uses_window {
+        client = client.with_renderer(std::sync::Arc::new(|url: &str| render_page_via_window(url)));
+    }
     let source = detect_source(&url);
     let info = match source.fetch_novel_info(&client, &url) {
         Ok(info) => info,
-        Err(error) => return WebnovelSubscribeResponse::error(error.to_string()),
+        Err(error) => {
+            if uses_window {
+                close_browser_window();
+            }
+            return WebnovelSubscribeResponse::error(error.to_string());
+        }
     };
+    if uses_window {
+        close_browser_window();
+    }
 
     let mut subscription = Subscription::new(url, source.id(), info.title.clone());
     subscription.author = info.author.clone();
