@@ -7670,22 +7670,10 @@ function readWebnovelSettingsForm() {
   return settings;
 }
 
-let webnovelCloudflareUrl = "";
-
 function setWebnovelFeedback(message, isError = false) {
   if (!webnovelFeedback) return;
   webnovelFeedback.textContent = message ?? "";
   webnovelFeedback.classList.toggle("is-error", Boolean(isError));
-  // Cloudflare blocks can be solved interactively — surface the button.
-  const solveBtn = document.getElementById("webnovel-solve-btn");
-  if (solveBtn) {
-    const isCloudflare = Boolean(message && /cloudflare/i.test(message));
-    if (!isCloudflare && !isError) {
-      solveBtn.hidden = true;
-    } else if (isCloudflare) {
-      solveBtn.hidden = false;
-    }
-  }
 }
 
 async function webnovelApi(path, options = {}) {
@@ -8019,7 +8007,6 @@ async function subscribeWebnovel() {
       body: JSON.stringify({ url, root: getVaultRoot() || undefined }),
     });
     if (payload.error) {
-      webnovelCloudflareUrl = url;
       setWebnovelFeedback(payload.error, true);
       return;
     }
@@ -8036,7 +8023,6 @@ async function subscribeWebnovel() {
     }
     await refreshWebnovelList();
   } catch (error) {
-    webnovelCloudflareUrl = url;
     setWebnovelFeedback(`Abonnieren fehlgeschlagen: ${error.message}`, true);
   } finally {
     if (webnovelSubscribeBtn) webnovelSubscribeBtn.disabled = false;
@@ -8793,66 +8779,6 @@ document.getElementById("collection-bulk-clear")?.addEventListener("click", () =
   updateCollectionBulkbar();
   renderCollections(currentPlan?.items ?? []);
   renderInspector(null);
-});
-
-// ---------------------------------------------------------------------------
-// Interactive Cloudflare solve flow
-// ---------------------------------------------------------------------------
-
-document.getElementById("webnovel-solve-btn")?.addEventListener("click", async () => {
-  const url = webnovelCloudflareUrl || (webnovelUrlInput?.value ?? "").trim();
-  if (!url) {
-    setWebnovelFeedback("Keine blockierte URL bekannt — bitte URL eingeben.", true);
-    return;
-  }
-  let host = "";
-  try {
-    const payload = await webnovelApi("/api/webnovel/solve", {
-      method: "POST",
-      body: JSON.stringify({ url }),
-    });
-    if (payload.error) {
-      setWebnovelFeedback(payload.error, true);
-      return;
-    }
-    host = payload.host ?? "";
-  } catch (error) {
-    setWebnovelFeedback(`Fenster konnte nicht geöffnet werden: ${error.message}`, true);
-    return;
-  }
-  setWebnovelFeedback("Bitte die Prüfung im geöffneten Fenster bestätigen …");
-  // Poll until solved, failed, or timed out backend-side.
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 2000));
-    let status;
-    try {
-      status = await webnovelApi(
-        `/api/webnovel/solve-status?host=${encodeURIComponent(host)}`,
-      );
-    } catch {
-      break;
-    }
-    if (status.state === "done") {
-      setWebnovelFeedback("Prüfung bestanden — Zugriff freigeschaltet. Starte erneut …");
-      const solveBtn = document.getElementById("webnovel-solve-btn");
-      if (solveBtn) solveBtn.hidden = true;
-      // Retry what the user was doing: pending subscribe input wins,
-      // otherwise refresh the list state.
-      if ((webnovelUrlInput?.value ?? "").trim()) {
-        await subscribeWebnovel();
-      } else {
-        await refreshWebnovelList();
-      }
-      return;
-    }
-    if (status.state === "failed") {
-      setWebnovelFeedback(`Prüfung nicht abgeschlossen: ${status.message ?? "abgebrochen"}`, true);
-      return;
-    }
-    if (status.state === "unknown") {
-      return;
-    }
-  }
 });
 
 // ---------------------------------------------------------------------------

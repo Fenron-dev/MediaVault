@@ -7189,8 +7189,13 @@ fn navigate_browser_window(handle: &tauri::AppHandle, url: &tauri::Url) {
     }
 }
 
-/// Asks the window (via title) for `__mvGet(kind, i)` and returns the value.
-/// Uses a request nonce so a stale title read is ignored.
+/// Asks the window for `__mvGet(kind, i)` and returns the value.
+///
+/// The value is written to BOTH the URL hash and the window title, and read
+/// back from whichever channel carries our request nonce. The hash survives
+/// SPA title management (React/Next.js reset `document.title`) and is never
+/// sent to the server; the title is a fallback for engines where the hash
+/// isn't reflected by `url()`. A per-request nonce guards against stale reads.
 fn pull_from_title(handle: &tauri::AppHandle, kind: &str, index: usize) -> Option<String> {
     let nonce = format!("{}", unix_now_ms());
     let arg = if kind == "meta" {
@@ -7199,7 +7204,7 @@ fn pull_from_title(handle: &tauri::AppHandle, kind: &str, index: usize) -> Optio
         format!("'chunk',{index}")
     };
     let script = format!(
-        "try{{document.title='MV:{nonce}:'+window.__mvGet({arg});}}catch(e){{document.title='MV:{nonce}:ERR';}}"
+        "try{{var v='MV:{nonce}:'+window.__mvGet({arg});location.hash=v;document.title=v;}}catch(e){{location.hash='MV:{nonce}:ERR';}}"
     );
     let _ = on_main_thread(handle, move |h| {
         if let Some(window) = h.get_webview_window(BROWSER_WINDOW_LABEL) {
@@ -7209,14 +7214,22 @@ fn pull_from_title(handle: &tauri::AppHandle, kind: &str, index: usize) -> Optio
     let prefix = format!("MV:{nonce}:");
     for _ in 0..25 {
         std::thread::sleep(std::time::Duration::from_millis(120));
-        let title = on_main_thread(handle, |h| {
-            h.get_webview_window(BROWSER_WINDOW_LABEL)
-                .and_then(|w| w.title().ok())
+        let read = on_main_thread(handle, |h| {
+            let window = h.get_webview_window(BROWSER_WINDOW_LABEL)?;
+            // Prefer the hash; fall back to the title.
+            let from_hash = window
+                .url()
+                .ok()
+                .and_then(|url| url.fragment().map(str::to_string));
+            let from_title = window.title().ok();
+            Some((from_hash, from_title))
         })
         .flatten();
-        if let Some(title) = title {
-            if let Some(rest) = title.strip_prefix(&prefix) {
-                return Some(rest.to_string());
+        if let Some((from_hash, from_title)) = read {
+            for candidate in [from_hash, from_title].into_iter().flatten() {
+                if let Some(rest) = candidate.strip_prefix(&prefix) {
+                    return Some(rest.to_string());
+                }
             }
         }
     }
