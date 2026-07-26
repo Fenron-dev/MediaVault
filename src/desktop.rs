@@ -7368,8 +7368,13 @@ fn build_webnovel_login_response(body: &[u8]) -> WebnovelLoginResponse {
             if window.is_none() {
                 // Window closed by the user; keep whatever we captured.
                 if !captured {
-                    set_login_state(&poll_host, "failed:Fenster geschlossen — kein Login erkannt.");
-                    debug_log(&format!("login: {poll_host} — Fenster ohne Login geschlossen"));
+                    set_login_state(
+                        &poll_host,
+                        "failed:Fenster geschlossen — kein Login erkannt.",
+                    );
+                    debug_log(&format!(
+                        "login: {poll_host} — Fenster ohne Login geschlossen"
+                    ));
                 }
                 return;
             }
@@ -7410,7 +7415,9 @@ fn build_webnovel_login_status_response(query: Option<&str>) -> WebnovelLoginSta
         .and_then(|states| states.get(&host).cloned())
         .unwrap_or_else(|| "unknown".to_string());
     // A persisted session for the host means "logged in" across restarts.
-    let logged_in = load_stored_sessions().iter().any(|entry| entry.host == host);
+    let logged_in = load_stored_sessions()
+        .iter()
+        .any(|entry| entry.host == host);
     match raw.strip_prefix("failed:") {
         Some(message) => WebnovelLoginStatusResponse {
             logged_in,
