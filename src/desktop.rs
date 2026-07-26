@@ -6372,10 +6372,27 @@ fn check_one_subscription(
             }
         };
         let content = match source.fetch_chapter(client, &chapter_ref) {
-            Ok(content) => content,
+            Ok(content) => {
+                debug_log(&format!(
+                    "chapter {}/{}: OK '{}' ({} Zeichen) {}",
+                    position + 1,
+                    pending.len(),
+                    chapter_ref.title,
+                    content.xhtml.len(),
+                    chapter_ref.url
+                ));
+                content
+            }
             Err(error) => {
                 // Abort the download loop but keep everything fetched so far;
                 // the next run resumes exactly here.
+                debug_log(&format!(
+                    "chapter {}/{}: FEHLER '{}' — {error} — {}",
+                    position + 1,
+                    pending.len(),
+                    chapter_ref.title,
+                    chapter_ref.url
+                ));
                 fetch_error = Some(error);
                 break;
             }

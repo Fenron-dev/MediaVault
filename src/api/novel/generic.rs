@@ -89,6 +89,34 @@ pub(crate) fn extract_best_content(body: &str) -> Option<String> {
         }
     }
 
+    // Readability-style fallback for pages (esp. JS-rendered ones) that use
+    // no recognizable content id/class: pick the block element whose direct
+    // paragraphs hold the most text.
+    if best_len < MIN_CONTENT_TEXT_LEN {
+        if let Ok(block_selector) = Selector::parse("div, section, article, main") {
+            let para_selector = Selector::parse("p").ok();
+            for element in html.select(&block_selector) {
+                let para_text: usize = para_selector
+                    .as_ref()
+                    .map(|sel| {
+                        element
+                            .select(sel)
+                            .map(|p| p.text().map(|t| t.trim().len()).sum::<usize>())
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                if para_text > best_len {
+                    let sanitized = sanitize_to_xhtml(&element.inner_html());
+                    let text_len = visible_text_len(&sanitized);
+                    if text_len > best_len {
+                        best_len = text_len;
+                        best = Some(sanitized);
+                    }
+                }
+            }
+        }
+    }
+
     if best_len >= MIN_CONTENT_TEXT_LEN {
         best
     } else {
