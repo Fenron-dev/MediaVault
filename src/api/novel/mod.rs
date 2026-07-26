@@ -17,6 +17,7 @@
 //! - `reqwest::blocking` – synchronous HTTP inside URI-scheme handler threads
 
 pub mod generic;
+pub mod novelarrow;
 pub mod novelfull;
 pub mod novelight;
 pub mod novelphoenix;
@@ -110,10 +111,14 @@ pub fn detect_source(url: &str) -> Box<dyn NovelSource> {
         Box::new(novelphoenix::NovelPhoenixSource)
     } else if host.ends_with("novelupdates.com") {
         Box::new(novelupdates::NovelUpdatesSource)
+    } else if host.ends_with("novelarrow.com") {
+        // JS-rendered SPA — fetched through the browser window; dedicated
+        // adapter reads the full chapter list from the "chapters" tab.
+        Box::new(novelarrow::NovelArrowSource)
     } else {
-        // Everything else — incl. novelarrow.com/novellunar.com (JS-rendered)
-        // and freewebnovel.com (Cloudflare) — runs through the heuristic
-        // parser. For the webview-routed hosts the browser window supplies the
+        // Everything else — incl. novellunar.com (JS-rendered) and
+        // freewebnovel.com (Cloudflare) — runs through the heuristic parser.
+        // For the webview-routed hosts the browser window supplies the
         // fully-rendered HTML, which the heuristic parses like any other page.
         Box::new(generic::GenericSource)
     }
