@@ -19,7 +19,8 @@
 use scraper::{Html, Selector};
 
 use super::{
-    generic::extract_best_content, ChapterContent, ChapterRef, NovelInfo, NovelSource, PoliteClient,
+    generic::extract_best_content, sanitize_to_xhtml, ChapterContent, ChapterRef, NovelInfo,
+    NovelSource, PoliteClient,
 };
 use crate::error::{Result, VaultError};
 
@@ -85,11 +86,24 @@ impl NovelSource for NovelArrowSource {
     }
 
     fn fetch_chapter(&self, client: &PoliteClient, chapter: &ChapterRef) -> Result<ChapterContent> {
+        // NovelArrow server-renders the chapter body into its Flight (RSC)
+        // payload — a `<id>:T<hexlen>,<html>` text chunk that
+        // `chapterInfo.chapter_content` references as `$<id>`. Reading it from
+        // a plain fetch is timing-independent (no waiting for a client render)
+        // and reliable, so it is tried first.
+        if let Ok(bytes) = client.get_bytes(&chapter.url) {
+            let raw = String::from_utf8_lossy(&bytes);
+            if let Some(html) = extract_flight_chapter(&raw) {
+                return Ok(ChapterContent {
+                    title: chapter.title.clone(),
+                    xhtml: sanitize_to_xhtml(&html),
+                });
+            }
+        }
+
+        // Fallback: the fully rendered window HTML + the generic heuristic.
         let (_final_url, body) = client.get_text(&chapter.url)?;
         let content = extract_best_content(&body).ok_or_else(|| {
-            // Attach a structural outline of the largest text blocks so the
-            // debug log reveals the real content container (the chapter body
-            // is client-rendered and its wrapper is not known up front).
             VaultError::ExternalApi(format!(
                 "Kapitelinhalt nicht erkannt: {} | Struktur: {}",
                 chapter.url,
@@ -101,6 +115,129 @@ impl NovelSource for NovelArrowSource {
             xhtml: content,
         })
     }
+}
+
+/// Extracts the chapter body HTML from NovelArrow's server-rendered Flight
+/// (RSC) payload. Returns `None` if no paragraph-bearing chunk is found.
+fn extract_flight_chapter(raw: &str) -> Option<String> {
+    let flight = collect_flight(raw);
+    // `chapterInfo.chapter_content` points at the body chunk via `$<id>`.
+    let html = chapter_content_id(&flight)
+        .and_then(|id| flight_chunk(&flight, &id))
+        .or_else(|| largest_paragraph_chunk(&flight))?;
+    // Guard against picking a non-prose chunk (e.g. a metadata blob).
+    if html.matches("<p").count() >= 2 {
+        Some(html)
+    } else {
+        None
+    }
+}
+
+/// Concatenates and JSON-unescapes every `self.__next_f.push([1,"…"])` string
+/// literal, reconstructing the raw Flight stream.
+fn collect_flight(raw: &str) -> String {
+    const MARKER: &str = "self.__next_f.push([1,";
+    let bytes = raw.as_bytes();
+    let mut out = String::new();
+    let mut search = 0;
+    while let Some(rel) = raw[search..].find(MARKER) {
+        let start = search + rel + MARKER.len();
+        if bytes.get(start) != Some(&b'"') {
+            search = start;
+            continue;
+        }
+        // Scan to the matching closing quote, honoring backslash escapes.
+        let mut i = start + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => break,
+                _ => i += 1,
+            }
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // `start` and `i` are ASCII quotes → safe slice boundaries.
+        if let Ok(decoded) = serde_json::from_str::<String>(&raw[start..=i]) {
+            out.push_str(&decoded);
+        }
+        search = i + 1;
+    }
+    out
+}
+
+/// Reads the `$<id>` chunk id from `chapterInfo.chapter_content`.
+fn chapter_content_id(flight: &str) -> Option<String> {
+    const KEY: &str = "\"chapter_content\":\"$";
+    let pos = flight.find(KEY)? + KEY.len();
+    let id: String = flight[pos..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Reads a `<id>:T<hexlen>,<payload>` Flight text chunk by its declared length.
+fn flight_chunk(flight: &str, id: &str) -> Option<String> {
+    let head = format!("{id}:T");
+    let at = if flight.starts_with(&head) {
+        0
+    } else {
+        flight.find(&format!("\n{head}"))? + 1
+    };
+    let after = &flight[at + head.len()..];
+    let comma = after.find(',')?;
+    let payload = &after[comma + 1..];
+    match usize::from_str_radix(after[..comma].trim(), 16) {
+        Ok(len) if len > 0 && len <= payload.len() => {
+            // `len` counts UTF-8 bytes of valid content → char boundary.
+            Some(String::from_utf8_lossy(&payload.as_bytes()[..len]).into_owned())
+        }
+        // Length unusable (encoding drift) → cut at the next chunk marker.
+        _ => Some(cut_at_next_chunk(payload)),
+    }
+}
+
+/// Truncates a Flight payload at the next `\n<digits>:` chunk boundary.
+fn cut_at_next_chunk(payload: &str) -> String {
+    let bytes = payload.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && bytes.get(j) == Some(&b':') {
+                break;
+            }
+        }
+        i += 1;
+    }
+    payload[..i].to_string()
+}
+
+/// Fallback: the `T`-chunk containing the most `<p>` tags (the chapter body).
+fn largest_paragraph_chunk(flight: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut best_p = 1usize;
+    for (idx, _) in flight.match_indices(":T") {
+        let after = &flight[idx + 2..];
+        let Some(comma) = after.find(',') else {
+            continue;
+        };
+        if usize::from_str_radix(after[..comma].trim(), 16).is_err() {
+            continue;
+        }
+        let payload = cut_at_next_chunk(&after[comma + 1..]);
+        let paragraphs = payload.matches("<p").count();
+        if paragraphs > best_p {
+            best_p = paragraphs;
+            best = Some(payload);
+        }
+    }
+    best
 }
 
 /// Builds a compact outline of the DOM's most text-heavy elements for
@@ -181,18 +318,28 @@ fn parse_chapter_links(html: &Html, slug: &str) -> Vec<ChapterRef> {
             continue;
         }
         let text = link.text().collect::<Vec<_>>().join(" ");
-        let title = {
-            let t = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if t.is_empty() {
-                format!("Chapter {number}")
-            } else {
-                t
-            }
-        };
+        let title = clean_chapter_title(&text, number);
         found.push((number, ChapterRef { title, url }));
     }
     found.sort_by_key(|(n, _)| *n);
     found.into_iter().map(|(_, chapter)| chapter).collect()
+}
+
+/// Normalizes a NovelArrow chapter-link label. The anchors repeat a short
+/// "C<N>: …" and a full "Chapter <N>: …" label; keep the canonical "Chapter …"
+/// half to avoid duplicated EPUB titles like "C1: X Chapter 1: X".
+fn clean_chapter_title(text: &str, number: u32) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return format!("Chapter {number}");
+    }
+    if let Some(pos) = collapsed.find("Chapter ") {
+        let tail = collapsed[pos..].trim();
+        if !tail.is_empty() {
+            return tail.to_string();
+        }
+    }
+    collapsed
 }
 
 /// Parses the chapter number from a `.../chapter-<N>-…` URL.
@@ -319,5 +466,40 @@ mod tests {
             novel_slug("https://novelarrow.com/novel/my-gene?tab=chapters").as_deref(),
             Some("my-gene")
         );
+    }
+
+    #[test]
+    fn dedupes_repeated_chapter_title() {
+        assert_eq!(
+            clean_chapter_title("C1: Awakening Chapter 1: Awakening", 1),
+            "Chapter 1: Awakening"
+        );
+        assert_eq!(clean_chapter_title("", 5), "Chapter 5");
+        assert_eq!(clean_chapter_title("Prologue", 0), "Prologue");
+    }
+
+    // Two `__next_f` pushes: chapter metadata pointing at chunk `11` via
+    // `$11`, then the body chunk `11:T<hexlen>,<html>`. The body HTML is 30
+    // bytes → 0x1e. Quotes inside the pushed JSON string are `\"`-escaped and
+    // the chunk boundary is a `\n`, exactly like NovelArrow's real output.
+    const FLIGHT_HTML: &str = concat!(
+        "<html><body>",
+        "<script>self.__next_f.push([1,\"1:{\\\"chapterInfo\\\":",
+        "{\\\"chapter_content\\\":\\\"$11\\\"}}\\n\"])</script>",
+        "<script>self.__next_f.push([1,\"11:T1e,",
+        "<p>Hello world.</p><p>Bye.</p>\\n12:x\"])</script>",
+        "</body></html>"
+    );
+
+    #[test]
+    fn extracts_flight_chapter_body() {
+        let html = extract_flight_chapter(FLIGHT_HTML).expect("body chunk should parse");
+        assert_eq!(html, "<p>Hello world.</p><p>Bye.</p>");
+    }
+
+    #[test]
+    fn rejects_flight_without_prose() {
+        let raw = "<script>self.__next_f.push([1,\"3:{\\\"x\\\":1}\"])</script>";
+        assert!(extract_flight_chapter(raw).is_none());
     }
 }
