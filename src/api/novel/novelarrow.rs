@@ -5,13 +5,14 @@
 //! embedded browser window (see `api::novel::WEBVIEW_ROUTED_HOSTS`).
 //!
 //! ## Page structure (verified 07/2026)
-//! - Novel page `/novel/<slug>`: SSR carries `og:novel:*` meta tags
-//!   (title/author/genre/status/latest) but only chapters 1–30 + the newest
-//!   in the DOM.
+//! - Novel page `/novel/<slug>`: SSR carries `og:novel:*` meta tags and the
+//!   `chapter_id`/`chapter_name` RSC arrays (~30 newest) — used as a windowless
+//!   fallback chapter list.
 //! - Chapters tab `/novel/<slug>?tab=chapters`: the browser renders the full
-//!   chapter list here → parsed for all `/chapter/<slug>/chapter-<N>-…` links.
-//! - Chapter page `/chapter/<slug>/chapter-<N>-<title>`: content extracted
-//!   with the generic readability heuristic.
+//!   chapter list here. Chapter URLs come in two shapes:
+//!   `/chapter/<slug>/chapter-<N>-<title>` and the bare `/chapter/<slug>/<N>`.
+//! - Chapter page: the body ships in the server-rendered Flight (RSC) payload
+//!   (`chapterInfo.chapter_content` → `$<id>` text chunk), fetched directly.
 //!
 //! ## Dependencies:
 //! - `api::novel` – shared HTTP client (browser-routed) and HTML utilities
@@ -43,9 +44,14 @@ impl NovelSource for NovelArrowSource {
 
         let mut chapters = parse_chapter_links(&html, &slug);
         if chapters.is_empty() {
-            // Fall back to the plain novel page (chapters 1–30 + latest).
-            let (_f, body2) = client.get_text(url)?;
-            chapters = parse_chapter_links(&Html::parse_document(&body2), &slug);
+            // Fallback: direct-fetch the novel page and read the chapter list
+            // from its server-rendered RSC (~30 newest). This avoids a second
+            // window render — navigating the same path with a different query
+            // triggers a client-side SPA route that never reloads our injected
+            // script, hanging until timeout.
+            if let Ok(bytes) = client.get_bytes(url) {
+                chapters = parse_rsc_chapters(&String::from_utf8_lossy(&bytes), &slug);
+            }
         }
         if chapters.is_empty() {
             return Err(VaultError::ExternalApi(format!(
@@ -301,23 +307,21 @@ fn strip_query(url: &str) -> &str {
     url.split(['?', '#']).next().unwrap_or(url)
 }
 
-/// Collects every `/chapter/<slug>/chapter-<N>-…` link, deduped and sorted by
-/// chapter number ascending (oldest first).
+/// Collects every chapter link for `slug`, deduped and sorted by chapter
+/// number ascending (oldest first). NovelArrow uses two URL shapes:
+/// `/chapter/<slug>/chapter-<N>-<title>` and the bare `/chapter/<slug>/<N>`.
 fn parse_chapter_links(html: &Html, slug: &str) -> Vec<ChapterRef> {
     let Ok(selector) = Selector::parse("a[href*='/chapter/']") else {
         return Vec::new();
     };
-    let needle = format!("/chapter/{slug}/chapter-");
+    let prefix = format!("/chapter/{slug}/");
     let mut found: Vec<(u32, ChapterRef)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for link in html.select(&selector) {
         let Some(href) = link.value().attr("href") else {
             continue;
         };
-        if !href.contains(&needle) {
-            continue;
-        }
-        let Some(number) = chapter_number(href) else {
+        let Some(number) = chapter_number_for(href, &prefix) else {
             continue;
         };
         let url = absolutize_novelarrow(href);
@@ -330,6 +334,57 @@ fn parse_chapter_links(html: &Html, slug: &str) -> Vec<ChapterRef> {
     }
     found.sort_by_key(|(n, _)| *n);
     found.into_iter().map(|(_, chapter)| chapter).collect()
+}
+
+/// Fallback chapter list from the novel page's server-rendered RSC: the
+/// positionally-aligned `chapter_id` + `chapter_name` arrays (~30 newest).
+/// Windowless and reliable — used when the rendered list can't be parsed.
+fn parse_rsc_chapters(raw: &str, slug: &str) -> Vec<ChapterRef> {
+    let flight = collect_flight(raw);
+    let ids = rsc_string_array(&flight, "chapter_id");
+    let names = rsc_string_array(&flight, "chapter_name");
+    let mut found: Vec<(u32, ChapterRef)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (i, id) in ids.iter().enumerate() {
+        let Some(number) = chapter_number_from_id(id) else {
+            continue;
+        };
+        if !seen.insert(number) {
+            continue;
+        }
+        let title = names
+            .get(i)
+            .map(|name| clean_chapter_title(name, number))
+            .unwrap_or_else(|| format!("Chapter {number}"));
+        // `id` is either a bare number or a `chapter-<N>-…` slug — both form a
+        // valid `/chapter/<slug>/<id>` URL.
+        let url = format!("https://novelarrow.com/chapter/{slug}/{id}");
+        found.push((number, ChapterRef { title, url }));
+    }
+    found.sort_by_key(|(n, _)| *n);
+    found.into_iter().map(|(_, chapter)| chapter).collect()
+}
+
+/// Reads consecutive `"<key>":"<value>"` string values out of a Flight stream.
+fn rsc_string_array(flight: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\":\"");
+    let bytes = flight.as_bytes();
+    let mut out = Vec::new();
+    let mut search = 0;
+    while let Some(rel) = flight[search..].find(&needle) {
+        let start = search + rel + needle.len();
+        // Values in the decoded stream carry no escapes → read to next quote.
+        let mut i = start;
+        while i < bytes.len() && bytes[i] != b'"' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        out.push(flight[start..i].to_string());
+        search = i + 1;
+    }
+    out
 }
 
 /// Normalizes a NovelArrow chapter-link label. The anchors repeat a short
@@ -348,10 +403,19 @@ fn clean_chapter_title(text: &str, number: u32) -> String {
     collapsed
 }
 
-/// Parses the chapter number from a `.../chapter-<N>-…` URL.
-fn chapter_number(href: &str) -> Option<u32> {
-    let idx = href.find("/chapter-")?;
-    let rest = &href[idx + "/chapter-".len()..];
+/// Parses the chapter number from an href, given the `/chapter/<slug>/` prefix.
+/// Accepts `chapter-<N>-<title>` and bare `<N>` chapter segments.
+fn chapter_number_for(href: &str, prefix: &str) -> Option<u32> {
+    let idx = href.find(prefix)?;
+    let tail = &href[idx + prefix.len()..];
+    let segment = tail.split(['/', '?', '#']).next()?;
+    chapter_number_from_id(segment)
+}
+
+/// Parses a chapter number from a chapter id/segment: either `chapter-<N>-…`
+/// or a bare leading number.
+fn chapter_number_from_id(id: &str) -> Option<u32> {
+    let rest = id.strip_prefix("chapter-").unwrap_or(id);
     let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse().ok()
 }
@@ -437,6 +501,15 @@ mod tests {
       <a href="/novel/other">unrelated</a>
     </body></html>"#;
 
+    // A novel whose chapters use the bare `/chapter/<slug>/<N>` URL shape.
+    const NUMERIC_HTML: &str = r#"
+    <html><body>
+      <a href="/chapter/god-crafter/2">Chapter 2: Harsh Lessons</a>
+      <a href="/chapter/god-crafter/1">Shadows of a borrowed life</a>
+      <a href="/chapter/god-crafter/10">Chapter 10</a>
+      <a href="/chapter/other-novel/5">wrong slug</a>
+    </body></html>"#;
+
     #[test]
     fn parses_and_sorts_chapters() {
         let html = Html::parse_document(CHAPTERS_HTML);
@@ -447,6 +520,18 @@ mod tests {
             "https://novelarrow.com/chapter/my-gene-evolves-infinitely/chapter-1-a"
         );
         assert!(chapters[2].url.contains("chapter-10-c"));
+    }
+
+    #[test]
+    fn parses_numeric_chapter_urls() {
+        let html = Html::parse_document(NUMERIC_HTML);
+        let chapters = parse_chapter_links(&html, "god-crafter");
+        assert_eq!(chapters.len(), 3);
+        assert_eq!(
+            chapters[0].url,
+            "https://novelarrow.com/chapter/god-crafter/1"
+        );
+        assert_eq!(chapters[2].url, "https://novelarrow.com/chapter/god-crafter/10");
     }
 
     #[test]
@@ -461,9 +546,28 @@ mod tests {
 
     #[test]
     fn chapter_number_parsing() {
-        assert_eq!(chapter_number("/chapter/x/chapter-780-final"), Some(780));
-        assert_eq!(chapter_number("/chapter/x/chapter-1-a"), Some(1));
-        assert_eq!(chapter_number("/novel/x"), None);
+        let prefix = "/chapter/x/";
+        assert_eq!(chapter_number_for("/chapter/x/chapter-780-final", prefix), Some(780));
+        assert_eq!(chapter_number_for("/chapter/x/chapter-1-a", prefix), Some(1));
+        assert_eq!(chapter_number_for("/chapter/x/53", prefix), Some(53));
+        assert_eq!(chapter_number_for("/chapter/x/7?restore=1", prefix), Some(7));
+        assert_eq!(chapter_number_for("/novel/x", prefix), None);
+    }
+
+    #[test]
+    fn rsc_chapter_fallback() {
+        // Positionally-aligned chapter_id / chapter_name arrays in the RSC.
+        let raw = concat!(
+            "<script>self.__next_f.push([1,\"2:[",
+            "{\\\"chapter_id\\\":\\\"1\\\",\\\"chapter_name\\\":\\\"Prologue\\\"},",
+            "{\\\"chapter_id\\\":\\\"2\\\",\\\"chapter_name\\\":\\\"Chapter 2: Start\\\"}",
+            "]\"])</script>"
+        );
+        let chapters = parse_rsc_chapters(raw, "god-crafter");
+        assert_eq!(chapters.len(), 2);
+        assert_eq!(chapters[0].url, "https://novelarrow.com/chapter/god-crafter/1");
+        assert_eq!(chapters[0].title, "Prologue");
+        assert_eq!(chapters[1].title, "Chapter 2: Start");
     }
 
     #[test]
