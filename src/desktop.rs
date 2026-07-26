@@ -7149,7 +7149,9 @@ fn build_open_debug_log_response() -> WebnovelSimpleResponse {
         .args(["/C", "start", "", &path_str])
         .spawn();
     #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
-    let result = std::process::Command::new("xdg-open").arg(&path_str).spawn();
+    let result = std::process::Command::new("xdg-open")
+        .arg(&path_str)
+        .spawn();
 
     match result {
         Ok(_) => WebnovelSimpleResponse::ok(),
