@@ -7385,7 +7385,10 @@ fn render_page_via_window(url: &str) -> Result<String> {
 
         let meta = pull_from_title(&handle, "meta", 0).unwrap_or_else(|| "<none>".to_string());
         if meta != last_meta {
-            debug_log(&format!("render: meta='{meta}' (t={}s)", start.elapsed().as_secs()));
+            debug_log(&format!(
+                "render: meta='{meta}' (t={}s)",
+                start.elapsed().as_secs()
+            ));
             last_meta = meta.clone();
         }
         if meta == "CH" {
