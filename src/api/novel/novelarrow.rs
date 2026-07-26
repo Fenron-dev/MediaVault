@@ -554,9 +554,15 @@ mod tests {
             chapter_number_for("/chapter/x/chapter-780-final", prefix),
             Some(780)
         );
-        assert_eq!(chapter_number_for("/chapter/x/chapter-1-a", prefix), Some(1));
+        assert_eq!(
+            chapter_number_for("/chapter/x/chapter-1-a", prefix),
+            Some(1)
+        );
         assert_eq!(chapter_number_for("/chapter/x/53", prefix), Some(53));
-        assert_eq!(chapter_number_for("/chapter/x/7?restore=1", prefix), Some(7));
+        assert_eq!(
+            chapter_number_for("/chapter/x/7?restore=1", prefix),
+            Some(7)
+        );
         assert_eq!(chapter_number_for("/novel/x", prefix), None);
     }
 
