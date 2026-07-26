@@ -9083,3 +9083,88 @@ document.getElementById("webnovel-debug-copy")?.addEventListener("click", async 
     sel.addRange(range);
   }
 });
+
+// ---------------------------------------------------------------------------
+// NovelUpdates login (session captured from a visible window)
+// ---------------------------------------------------------------------------
+
+const NOVELUPDATES_HOST = "novelupdates.com";
+let novelUpdatesLoginPoll = null;
+
+async function refreshNovelUpdatesLoginStatus() {
+  const statusEl = document.getElementById("webnovel-login-status");
+  const logoutBtn = document.getElementById("webnovel-logout-btn");
+  const loginBtn = document.getElementById("webnovel-login-btn");
+  if (!statusEl) return null;
+  try {
+    const payload = await webnovelApi(
+      `/api/webnovel/login-status?host=${NOVELUPDATES_HOST}&_=${Date.now()}`,
+    );
+    if (payload.logged_in) {
+      statusEl.textContent = "NovelUpdates: eingeloggt ✓";
+      if (logoutBtn) logoutBtn.hidden = false;
+      if (loginBtn) loginBtn.textContent = "Erneut einloggen";
+    } else if (payload.state === "failed") {
+      statusEl.textContent = `NovelUpdates: ${payload.message || "Login fehlgeschlagen"}`;
+      if (logoutBtn) logoutBtn.hidden = true;
+      if (loginBtn) loginBtn.textContent = "Bei NovelUpdates einloggen";
+    } else if (payload.state === "pending") {
+      statusEl.textContent = "NovelUpdates: Login-Fenster offen — bitte anmelden …";
+      if (logoutBtn) logoutBtn.hidden = true;
+    } else {
+      statusEl.textContent = "NovelUpdates: nicht eingeloggt";
+      if (logoutBtn) logoutBtn.hidden = true;
+      if (loginBtn) loginBtn.textContent = "Bei NovelUpdates einloggen";
+    }
+    return payload;
+  } catch (error) {
+    statusEl.textContent = `NovelUpdates: Status unbekannt (${error.message})`;
+    return null;
+  }
+}
+
+document.getElementById("webnovel-login-btn")?.addEventListener("click", async () => {
+  try {
+    await webnovelApi("/api/webnovel/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: NOVELUPDATES_HOST }),
+    });
+    if (statusStrip) {
+      statusStrip.textContent =
+        "Login-Fenster geöffnet — nach dem Anmelden das Fenster schließen.";
+    }
+    // Poll the login status while the window is open.
+    if (novelUpdatesLoginPoll) clearInterval(novelUpdatesLoginPoll);
+    let ticks = 0;
+    novelUpdatesLoginPoll = setInterval(async () => {
+      ticks += 1;
+      const payload = await refreshNovelUpdatesLoginStatus();
+      // Stop once logged in, failed, or after ~15 minutes.
+      if (!payload || payload.logged_in || payload.state === "failed" || ticks > 300) {
+        clearInterval(novelUpdatesLoginPoll);
+        novelUpdatesLoginPoll = null;
+      }
+    }, 3000);
+    await refreshNovelUpdatesLoginStatus();
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Login fehlgeschlagen: ${error.message}`;
+  }
+});
+
+document.getElementById("webnovel-logout-btn")?.addEventListener("click", async () => {
+  try {
+    await webnovelApi("/api/webnovel/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host: NOVELUPDATES_HOST }),
+    });
+    if (statusStrip) statusStrip.textContent = "Von NovelUpdates ausgeloggt.";
+    await refreshNovelUpdatesLoginStatus();
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Ausloggen fehlgeschlagen: ${error.message}`;
+  }
+});
+
+// Reflect the persisted login state on startup.
+refreshNovelUpdatesLoginStatus();

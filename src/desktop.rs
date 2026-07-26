@@ -13,8 +13,9 @@ use crate::api::audible::{AudibleClient, AudibleSearchResponse};
 use crate::api::audiobookshelf::AbsClient;
 use crate::api::goodreads::GoodreadsClient;
 use crate::api::novel::{
-    detect_image_media_type, detect_source, host_of, is_webview_routed, sanitize_to_xhtml,
-    set_browser_session, BrowserSession, ChapterContent, ChapterRef, PoliteClient,
+    clear_browser_session, detect_image_media_type, detect_source, host_of, is_webview_routed,
+    sanitize_to_xhtml, set_browser_session, BrowserSession, ChapterContent, ChapterRef,
+    PoliteClient,
 };
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
@@ -118,7 +119,11 @@ pub(crate) fn run() -> Result<()> {
             |context, request, responder| {
                 // The Cloudflare-solve window needs an AppHandle from worker
                 // threads; capture it once from the protocol context.
-                let _ = APP_HANDLE.set(context.app_handle().clone());
+                if APP_HANDLE.set(context.app_handle().clone()).is_ok() {
+                    // First request wins the OnceLock — restore persisted login
+                    // sessions (NovelUpdates etc.) into the RAM store then.
+                    restore_webnovel_sessions();
+                }
                 std::thread::spawn(move || {
                     responder.respond(handle_request(&request));
                 });
@@ -307,6 +312,18 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/webnovel/solve-status" => json_response(
             StatusCode::OK,
             &build_webnovel_solve_status_response(request.uri().query()),
+        ),
+        "/api/webnovel/login" => json_response(
+            StatusCode::OK,
+            &build_webnovel_login_response(request.body()),
+        ),
+        "/api/webnovel/login-status" => json_response(
+            StatusCode::OK,
+            &build_webnovel_login_status_response(request.uri().query()),
+        ),
+        "/api/webnovel/logout" => json_response(
+            StatusCode::OK,
+            &build_webnovel_logout_response(request.body()),
         ),
         "/api/webnovel/trash" => json_response(
             StatusCode::OK,
@@ -7132,6 +7149,294 @@ fn build_webnovel_solve_status_response(query: Option<&str>) -> WebnovelSolveSta
         },
     }
 }
+
+// ---------------------------------------------------------------------------
+// Site login (NovelUpdates & co. — session captured from a visible window)
+// ---------------------------------------------------------------------------
+//
+// Some sites (NovelUpdates) only expose the real release/chapter links to
+// logged-in users. The user signs in through a visible, sandboxed browser
+// window; because every app webview shares the same cookie store, the routed
+// render window is then logged in too. We additionally capture the login
+// cookies into a persisted `BrowserSession` so plain requests carry them and
+// the login survives an app restart.
+
+/// Window label of the login window (one at a time).
+const LOGIN_WINDOW_LABEL: &str = "mv-login";
+/// How long the login window stays watched before giving up.
+const LOGIN_TIMEOUT_SECS: u64 = 900;
+/// Per-host login state: `pending`, `done`, `failed:<msg>`.
+static LOGIN_STATES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn set_login_state(host: &str, state: impl Into<String>) {
+    if let Ok(mut states) = LOGIN_STATES.lock() {
+        states.insert(host.to_lowercase(), state.into());
+    }
+}
+
+/// The sign-in page for a host (site root when unknown).
+fn login_url_for(host: &str) -> String {
+    if host.ends_with("novelupdates.com") {
+        "https://www.novelupdates.com/login/".to_string()
+    } else {
+        format!("https://{host}/")
+    }
+}
+
+/// Whether a cookie name marks an authenticated session. NovelUpdates runs on
+/// WordPress (`wordpress_logged_in_<hash>`); a few common others are covered
+/// for generic sites.
+fn is_login_cookie(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.contains("logged_in") || lower == "sessionid" || lower.starts_with("wordpress_sec")
+}
+
+/// Path of the persisted session store (`~/.mediavault/webnovel_sessions.json`).
+fn webnovel_sessions_path() -> Option<PathBuf> {
+    debug_log_path().and_then(|p| p.parent().map(|dir| dir.join("webnovel_sessions.json")))
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredSession {
+    host: String,
+    cookie_header: String,
+    user_agent: String,
+}
+
+fn load_stored_sessions() -> Vec<StoredSession> {
+    webnovel_sessions_path()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_stored_sessions(sessions: &[StoredSession]) {
+    let Some(path) = webnovel_sessions_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(sessions) {
+        let _ = fs::write(path, json);
+    }
+}
+
+/// Persists (and activates) a captured login session for a host.
+fn persist_session(host: &str, session: &BrowserSession) {
+    let host = host.to_lowercase();
+    let mut all = load_stored_sessions();
+    all.retain(|entry| entry.host != host);
+    all.push(StoredSession {
+        host: host.clone(),
+        cookie_header: session.cookie_header.clone(),
+        user_agent: session.user_agent.clone(),
+    });
+    write_stored_sessions(&all);
+    set_browser_session(&host, session.clone());
+}
+
+/// Loads persisted sessions into the RAM store (called once at startup).
+fn restore_webnovel_sessions() {
+    for entry in load_stored_sessions() {
+        set_browser_session(
+            &entry.host,
+            BrowserSession {
+                cookie_header: entry.cookie_header,
+                user_agent: entry.user_agent,
+            },
+        );
+    }
+}
+
+/// Drops a host's persisted + active session (logout).
+fn drop_session(host: &str) {
+    let host = host.to_lowercase();
+    let mut all = load_stored_sessions();
+    all.retain(|entry| entry.host != host);
+    write_stored_sessions(&all);
+    clear_browser_session(&host);
+}
+
+#[derive(Deserialize)]
+struct WebnovelLoginRequest {
+    /// Host to log in to (e.g. "novelupdates.com"); a URL is also accepted.
+    host: String,
+}
+
+#[derive(Serialize)]
+struct WebnovelLoginResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// Opens a visible login window for a host and captures the session cookies as
+/// soon as the user is signed in.
+fn build_webnovel_login_response(body: &[u8]) -> WebnovelLoginResponse {
+    let req: WebnovelLoginRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => {
+            return WebnovelLoginResponse {
+                host: None,
+                error: Some(format!("Invalid request: {error}")),
+            }
+        }
+    };
+    // Accept either a bare host or a full URL.
+    let host = host_of(&req.host).unwrap_or_else(|| req.host.trim().to_lowercase());
+    if host.is_empty() || host.contains(' ') {
+        return WebnovelLoginResponse {
+            host: None,
+            error: Some("Ungültiger Host.".to_string()),
+        };
+    }
+    let Some(handle) = APP_HANDLE.get().cloned() else {
+        return WebnovelLoginResponse {
+            host: None,
+            error: Some("App-Fenster noch nicht bereit — bitte erneut versuchen.".to_string()),
+        };
+    };
+    let Ok(login_url) = login_url_for(&host).parse::<tauri::Url>() else {
+        return WebnovelLoginResponse {
+            host: None,
+            error: Some("Login-URL konnte nicht gebildet werden.".to_string()),
+        };
+    };
+
+    set_login_state(&host, "pending");
+    debug_log(&format!("login: Fenster geöffnet für {host}"));
+
+    // Window creation must run on the main thread on macOS.
+    let build_handle = handle.clone();
+    let build_url = login_url.clone();
+    let _ = handle.run_on_main_thread(move || {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        if let Some(existing) = build_handle.get_webview_window(LOGIN_WINDOW_LABEL) {
+            let _ = existing.close();
+        }
+        let _ = WebviewWindowBuilder::new(
+            &build_handle,
+            LOGIN_WINDOW_LABEL,
+            WebviewUrl::External(build_url),
+        )
+        .title("Anmelden — nach dem Login kannst du dieses Fenster schließen")
+        .inner_size(1024.0, 820.0)
+        .user_agent(SOLVE_USER_AGENT)
+        .build();
+    });
+
+    // Poll the window's cookies; capture the session once a login cookie shows
+    // up. The window stays open (2FA, verification) until the user closes it.
+    let poll_host = host.clone();
+    let cookie_url = login_url.clone();
+    std::thread::spawn(move || {
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(LOGIN_TIMEOUT_SECS);
+        let mut captured = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let window = handle.get_webview_window(LOGIN_WINDOW_LABEL);
+
+            if let Some(active) = window.as_ref() {
+                if let Ok(cookies) = active.cookies_for_url(cookie_url.clone()) {
+                    let logged_in = cookies.iter().any(|cookie| is_login_cookie(cookie.name()));
+                    if logged_in {
+                        let header = cookies
+                            .iter()
+                            .map(|cookie| format!("{}={}", cookie.name(), cookie.value()))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        persist_session(
+                            &poll_host,
+                            &BrowserSession {
+                                cookie_header: header,
+                                user_agent: SOLVE_USER_AGENT.to_string(),
+                            },
+                        );
+                        if !captured {
+                            captured = true;
+                            debug_log(&format!("login: {poll_host} — Sitzung erfasst"));
+                        }
+                        set_login_state(&poll_host, "done");
+                    }
+                }
+            }
+
+            if window.is_none() {
+                // Window closed by the user; keep whatever we captured.
+                if !captured {
+                    set_login_state(&poll_host, "failed:Fenster geschlossen — kein Login erkannt.");
+                    debug_log(&format!("login: {poll_host} — Fenster ohne Login geschlossen"));
+                }
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                if !captured {
+                    set_login_state(&poll_host, "failed:Zeitüberschreitung.");
+                }
+                if let Some(active) = handle.get_webview_window(LOGIN_WINDOW_LABEL) {
+                    let _ = active.close();
+                }
+                return;
+            }
+        }
+    });
+
+    WebnovelLoginResponse {
+        host: Some(host),
+        error: None,
+    }
+}
+
+#[derive(Serialize)]
+struct WebnovelLoginStatusResponse {
+    logged_in: bool,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
+fn build_webnovel_login_status_response(query: Option<&str>) -> WebnovelLoginStatusResponse {
+    let host = query
+        .and_then(|q| extract_query_value(q, "host"))
+        .map(|h| host_of(&h).unwrap_or(h).to_lowercase())
+        .unwrap_or_default();
+    let raw = LOGIN_STATES
+        .lock()
+        .ok()
+        .and_then(|states| states.get(&host).cloned())
+        .unwrap_or_else(|| "unknown".to_string());
+    // A persisted session for the host means "logged in" across restarts.
+    let logged_in = load_stored_sessions().iter().any(|entry| entry.host == host);
+    match raw.strip_prefix("failed:") {
+        Some(message) => WebnovelLoginStatusResponse {
+            logged_in,
+            state: "failed".to_string(),
+            message: Some(message.to_string()),
+        },
+        None => WebnovelLoginStatusResponse {
+            logged_in,
+            state: raw,
+            message: None,
+        },
+    }
+}
+
+fn build_webnovel_logout_response(body: &[u8]) -> WebnovelSimpleResponse {
+    let req: WebnovelLoginRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return WebnovelSimpleResponse::error(format!("Invalid request: {error}")),
+    };
+    let host = host_of(&req.host).unwrap_or_else(|| req.host.trim().to_lowercase());
+    drop_session(&host);
+    set_login_state(&host, "unknown");
+    debug_log(&format!("logout: {host} — Sitzung entfernt"));
+    WebnovelSimpleResponse::ok()
+}
+
 // ---------------------------------------------------------------------------
 // Embedded-browser fetch engine (whitelisted, manual-only)
 // ---------------------------------------------------------------------------

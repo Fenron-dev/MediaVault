@@ -2479,6 +2479,18 @@ h3 {
   min-width: 260px;
 }
 
+.webnovel-login-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-top: 0.6rem;
+}
+
+.webnovel-login-row .field-hint {
+  margin: 0;
+}
+
 .webnovel-library {
   margin-top: 1rem;
 }

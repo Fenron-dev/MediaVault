@@ -197,6 +197,13 @@ pub fn browser_session_for(url: &str) -> Option<BrowserSession> {
     BROWSER_SESSIONS.lock().ok()?.get(&host).cloned()
 }
 
+/// Removes any stored session for a host (used on logout).
+pub fn clear_browser_session(host: &str) {
+    if let Ok(mut sessions) = BROWSER_SESSIONS.lock() {
+        sessions.remove(&host.to_lowercase());
+    }
+}
+
 /// Blocking HTTP client with per-host rate limiting and bounded retries.
 ///
 /// All webnovel network traffic goes through this client so politeness rules
