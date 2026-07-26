@@ -170,12 +170,15 @@ fn absolutize_novelarrow(href: &str) -> String {
 fn meta_content(html: &Html, name: &str) -> Option<String> {
     for attr in ["name", "property"] {
         let sel = format!("meta[{attr}='{name}']");
-        if let Ok(selector) = Selector::parse(&sel) {
-            if let Some(el) = html.select(&selector).next() {
-                if let Some(content) = el.value().attr("content") {
-                    if !content.trim().is_empty() {
-                        return Some(content.trim().to_string());
-                    }
+        // `let-else` drops the borrowing `SelectorErrorKind` immediately;
+        // an `if let Ok(..)` would keep `sel` borrowed past its scope.
+        let Ok(selector) = Selector::parse(&sel) else {
+            continue;
+        };
+        if let Some(el) = html.select(&selector).next() {
+            if let Some(content) = el.value().attr("content") {
+                if !content.trim().is_empty() {
+                    return Some(content.trim().to_string());
                 }
             }
         }
