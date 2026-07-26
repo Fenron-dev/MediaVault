@@ -531,7 +531,10 @@ mod tests {
             chapters[0].url,
             "https://novelarrow.com/chapter/god-crafter/1"
         );
-        assert_eq!(chapters[2].url, "https://novelarrow.com/chapter/god-crafter/10");
+        assert_eq!(
+            chapters[2].url,
+            "https://novelarrow.com/chapter/god-crafter/10"
+        );
     }
 
     #[test]
@@ -547,7 +550,10 @@ mod tests {
     #[test]
     fn chapter_number_parsing() {
         let prefix = "/chapter/x/";
-        assert_eq!(chapter_number_for("/chapter/x/chapter-780-final", prefix), Some(780));
+        assert_eq!(
+            chapter_number_for("/chapter/x/chapter-780-final", prefix),
+            Some(780)
+        );
         assert_eq!(chapter_number_for("/chapter/x/chapter-1-a", prefix), Some(1));
         assert_eq!(chapter_number_for("/chapter/x/53", prefix), Some(53));
         assert_eq!(chapter_number_for("/chapter/x/7?restore=1", prefix), Some(7));
@@ -565,7 +571,10 @@ mod tests {
         );
         let chapters = parse_rsc_chapters(raw, "god-crafter");
         assert_eq!(chapters.len(), 2);
-        assert_eq!(chapters[0].url, "https://novelarrow.com/chapter/god-crafter/1");
+        assert_eq!(
+            chapters[0].url,
+            "https://novelarrow.com/chapter/god-crafter/1"
+        );
         assert_eq!(chapters[0].title, "Prologue");
         assert_eq!(chapters[1].title, "Chapter 2: Start");
     }
