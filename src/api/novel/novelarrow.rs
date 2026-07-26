@@ -19,8 +19,7 @@
 use scraper::{Html, Selector};
 
 use super::{
-    generic::extract_best_content, ChapterContent, ChapterRef, NovelInfo, NovelSource,
-    PoliteClient,
+    generic::extract_best_content, ChapterContent, ChapterRef, NovelInfo, NovelSource, PoliteClient,
 };
 use crate::error::{Result, VaultError};
 
