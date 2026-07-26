@@ -9027,3 +9027,51 @@ document.getElementById("trash-empty")?.addEventListener("click", async () => {
     vaultTrashAction("purge", [], true);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Webnovel debug log
+// ---------------------------------------------------------------------------
+
+async function loadWebnovelDebugLog() {
+  const contentEl = document.getElementById("webnovel-debug-content");
+  const pathEl = document.getElementById("webnovel-debug-path");
+  if (!contentEl) return;
+  try {
+    const payload = await webnovelApi(`/api/webnovel/debug-log?_=${Date.now()}`);
+    contentEl.textContent = payload.content || "(Log ist leer)";
+    if (pathEl) pathEl.textContent = payload.path ? `Datei: ${payload.path}` : "";
+  } catch (error) {
+    contentEl.textContent = `Log konnte nicht geladen werden: ${error.message}`;
+  }
+}
+
+document.getElementById("webnovel-debug-btn")?.addEventListener("click", async () => {
+  const modal = document.getElementById("webnovel-debug-modal");
+  if (modal) modal.hidden = false;
+  await loadWebnovelDebugLog();
+});
+document.getElementById("webnovel-debug-refresh")?.addEventListener("click", loadWebnovelDebugLog);
+document.getElementById("webnovel-debug-close")?.addEventListener("click", () => {
+  const modal = document.getElementById("webnovel-debug-modal");
+  if (modal) modal.hidden = true;
+});
+document.getElementById("webnovel-debug-modal")?.addEventListener("click", (event) => {
+  if (event.target.id === "webnovel-debug-modal") {
+    event.target.hidden = true;
+  }
+});
+document.getElementById("webnovel-debug-copy")?.addEventListener("click", async () => {
+  const contentEl = document.getElementById("webnovel-debug-content");
+  if (!contentEl) return;
+  try {
+    await navigator.clipboard.writeText(contentEl.textContent || "");
+    if (statusStrip) statusStrip.textContent = "Debug-Log in die Zwischenablage kopiert.";
+  } catch {
+    // Fallback: select the text for manual copy.
+    const range = document.createRange();
+    range.selectNodeContents(contentEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+});

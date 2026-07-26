@@ -430,6 +430,7 @@
               />
               <button class="action-button primary" id="webnovel-subscribe-btn">Abonnieren</button>
               <button class="action-button" id="webnovel-check-all-btn">Jetzt alle prüfen</button>
+              <button class="action-button" id="webnovel-debug-btn">Debug-Log</button>
             </div>
             <p class="field-hint" id="webnovel-feedback"></p>
             <div class="webnovel-progress" id="webnovel-job-progress" hidden>
@@ -492,6 +493,20 @@
                   <div class="webnovel-card-actions" id="webnovel-detail-actions"></div>
                 </div>
               </div>
+            </div>
+          </section>
+
+          <section class="workspace-modal" id="webnovel-debug-modal" hidden>
+            <div class="workspace-modal-card">
+              <button class="action-button workspace-modal-close" id="webnovel-debug-close">✕ Schließen</button>
+              <p class="panel-label">Debug-Log</p>
+              <h3>Webnovel-Diagnose</h3>
+              <p class="field-hint" id="webnovel-debug-path"></p>
+              <div class="toolbar">
+                <button class="action-button" id="webnovel-debug-copy">In Zwischenablage kopieren</button>
+                <button class="action-button" id="webnovel-debug-refresh">Aktualisieren</button>
+              </div>
+              <pre class="debug-log-pre" id="webnovel-debug-content"></pre>
             </div>
           </section>
         </section>

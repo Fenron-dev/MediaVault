@@ -274,6 +274,9 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/trash/purge" => {
             json_response(StatusCode::OK, &build_trash_purge_response(request.body()))
         }
+        "/api/webnovel/debug-log" => {
+            json_response(StatusCode::OK, &build_webnovel_debug_log_response())
+        }
         "/api/webnovel/list" => json_response(
             StatusCode::OK,
             &build_webnovel_list_response(request.uri().query()),
@@ -5689,9 +5692,17 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
         client = client.with_renderer(std::sync::Arc::new(|url: &str| render_page_via_window(url)));
     }
     let source = detect_source(&url);
+    debug_log(&format!(
+        "subscribe: {url} routed={uses_window} source={}",
+        source.id()
+    ));
     let info = match source.fetch_novel_info(&client, &url) {
-        Ok(info) => info,
+        Ok(info) => {
+            debug_log(&format!("subscribe: OK — {} Kapitel", info.chapters.len()));
+            info
+        }
         Err(error) => {
+            debug_log(&format!("subscribe: FEHLER: {error}"));
             if uses_window {
                 close_browser_window();
             }
@@ -6257,7 +6268,25 @@ fn check_one_subscription(
         return Err(VaultError::ExternalApi(reason));
     }
     let source = detect_source(&subscription.url);
-    let info = source.fetch_novel_info(client, &subscription.url)?;
+    debug_log(&format!(
+        "check: '{}' host-routed={} source={}",
+        subscription.title,
+        is_webview_routed(&subscription.url),
+        source.id()
+    ));
+    let info = match source.fetch_novel_info(client, &subscription.url) {
+        Ok(info) => {
+            debug_log(&format!(
+                "check: fetch_novel_info OK — {} Kapitel",
+                info.chapters.len()
+            ));
+            info
+        }
+        Err(error) => {
+            debug_log(&format!("check: fetch_novel_info FEHLER: {error}"));
+            return Err(error);
+        }
+    };
 
     // Fill metadata gaps and pick up a "finished" flag from the source.
     if subscription.author.is_none() {
@@ -7059,6 +7088,54 @@ fn build_webnovel_solve_status_response(query: Option<&str>) -> WebnovelSolveSta
 // eval-ing "set title to chunk i" and reading the title. The window has no
 // IPC / app access whatsoever.
 
+#[derive(Serialize)]
+struct WebnovelDebugLogResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    content: String,
+}
+
+/// Returns the debug-log path and its (tail) content for the UI.
+fn build_webnovel_debug_log_response() -> WebnovelDebugLogResponse {
+    let path = debug_log_path();
+    let content = path
+        .as_ref()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    // Only the last ~400 lines are useful and keep the payload small.
+    let tail: Vec<&str> = content.lines().rev().take(400).collect();
+    let content = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+    WebnovelDebugLogResponse {
+        path: path.map(|p| p.to_string_lossy().to_string()),
+        content,
+    }
+}
+
+/// Debug-log path (`~/.mediavault/webnovel_debug.log`).
+fn debug_log_path() -> Option<PathBuf> {
+    let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".mediavault")
+            .join("webnovel_debug.log"),
+    )
+}
+
+/// Appends a timestamped line to the webnovel debug log (best effort).
+fn debug_log(message: &str) {
+    let Some(path) = debug_log_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let line = format!("[{}] {message}\n", unix_now());
+    use std::io::Write;
+    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// Label of the persistent fetch/browser window.
 const BROWSER_WINDOW_LABEL: &str = "mv-browser";
 /// Hard cap for rendering a single page (excluding manual challenge time).
@@ -7284,11 +7361,13 @@ fn render_page_via_window(url: &str) -> Result<String> {
         .parse::<tauri::Url>()
         .map_err(|_| VaultError::ExternalApi(format!("URL ungültig: {url}")))?;
 
+    debug_log(&format!("render: navigate → {url}"));
     let nav_url = target.clone();
     let _ = on_main_thread(&handle, move |h| navigate_browser_window(h, &nav_url));
 
     let start = std::time::Instant::now();
     let mut challenge_seen = false;
+    let mut last_meta = String::new();
 
     loop {
         std::thread::sleep(std::time::Duration::from_millis(800));
@@ -7298,18 +7377,24 @@ fn render_page_via_window(url: &str) -> Result<String> {
             if start.elapsed() < std::time::Duration::from_secs(8) {
                 continue;
             }
+            debug_log("render: FAIL Fenster nicht vorhanden");
             return Err(VaultError::ExternalApi(
                 "Browserfenster wurde geschlossen.".to_string(),
             ));
         }
 
-        let meta = pull_from_title(&handle, "meta", 0).unwrap_or_default();
+        let meta = pull_from_title(&handle, "meta", 0).unwrap_or_else(|| "<none>".to_string());
+        if meta != last_meta {
+            debug_log(&format!("render: meta='{meta}' (t={}s)", start.elapsed().as_secs()));
+            last_meta = meta.clone();
+        }
         if meta == "CH" {
             challenge_seen = true;
             note_browser_status(
                 "Bitte die Sicherheitsprüfung im Browserfenster bestätigen (Fenster offen lassen) …",
             );
             if start.elapsed() >= std::time::Duration::from_secs(CHALLENGE_WAIT_SECS) {
+                debug_log("render: FAIL Challenge-Timeout");
                 return Err(VaultError::ExternalApi(
                     "Zeitüberschreitung bei der Sicherheitsprüfung im Fenster.".to_string(),
                 ));
@@ -7328,20 +7413,32 @@ fn render_page_via_window(url: &str) -> Result<String> {
             note_browser_status("");
             // Pull the hex payload chunk by chunk over the title.
             let chunk_count = total.div_ceil(TITLE_CHUNK_LEN);
+            debug_log(&format!(
+                "render: READY total={total} mode={mode} chunks={chunk_count}"
+            ));
             let mut hex = String::with_capacity(total);
             let mut ok = true;
             for i in 0..chunk_count {
                 match pull_from_title(&handle, "chunk", i) {
                     Some(chunk) if chunk != "ERR" && chunk != "WAIT" => hex.push_str(&chunk),
-                    _ => {
+                    other => {
+                        debug_log(&format!(
+                            "render: chunk {i}/{chunk_count} fehlgeschlagen (got={:?})",
+                            other.as_deref().unwrap_or("<none>")
+                        ));
                         ok = false;
                         break;
                     }
                 }
             }
             if !ok || hex.len() != total {
+                debug_log(&format!(
+                    "render: unvollständig ok={ok} hex.len={} erwartet={total} → retry",
+                    hex.len()
+                ));
                 // Content changed mid-pull (SPA still rendering) — retry.
                 if start.elapsed() >= std::time::Duration::from_secs(RENDER_TIMEOUT_SECS) {
+                    debug_log("render: FAIL unvollständig nach Timeout");
                     return Err(VaultError::ExternalApi(
                         "Seite konnte nicht vollständig gelesen werden.".to_string(),
                     ));
@@ -7349,6 +7446,7 @@ fn render_page_via_window(url: &str) -> Result<String> {
                 continue;
             }
             let bytes = hex_decode(&hex).ok_or_else(|| {
+                debug_log("render: FAIL hex-decode");
                 VaultError::ExternalApi("Ungültige Daten aus dem Browserfenster.".to_string())
             })?;
             let html = if mode == "gz" {
@@ -7356,6 +7454,7 @@ fn render_page_via_window(url: &str) -> Result<String> {
                 let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
                 let mut text = String::new();
                 decoder.read_to_string(&mut text).map_err(|e| {
+                    debug_log(&format!("render: FAIL gunzip: {e}"));
                     VaultError::ExternalApi(format!("Dekomprimierung fehlgeschlagen: {e}"))
                 })?;
                 text
@@ -7363,6 +7462,7 @@ fn render_page_via_window(url: &str) -> Result<String> {
                 String::from_utf8(bytes)
                     .map_err(|e| VaultError::ExternalApi(format!("Ungültiges UTF-8: {e}")))?
             };
+            debug_log(&format!("render: OK html.len={}", html.len()));
             return Ok(html);
         }
 
@@ -7373,6 +7473,7 @@ fn render_page_via_window(url: &str) -> Result<String> {
             RENDER_TIMEOUT_SECS
         };
         if start.elapsed() >= std::time::Duration::from_secs(budget) {
+            debug_log(&format!("render: FAIL Timeout (letztes meta='{meta}')"));
             return Err(VaultError::ExternalApi(
                 "Seite konnte im Browserfenster nicht gerendert werden (Timeout).".to_string(),
             ));
