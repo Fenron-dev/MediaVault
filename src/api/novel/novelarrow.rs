@@ -20,8 +20,7 @@
 use scraper::{Html, Selector};
 
 use super::{
-    generic::extract_best_content, sanitize_to_xhtml, ChapterContent, ChapterRef, NovelInfo,
-    NovelSource, PoliteClient,
+    sanitize_to_xhtml, ChapterContent, ChapterRef, NovelInfo, NovelSource, PoliteClient,
 };
 use crate::error::{Result, VaultError};
 
@@ -93,32 +92,22 @@ impl NovelSource for NovelArrowSource {
 
     fn fetch_chapter(&self, client: &PoliteClient, chapter: &ChapterRef) -> Result<ChapterContent> {
         // NovelArrow server-renders the chapter body into its Flight (RSC)
-        // payload — a `<id>:T<hexlen>,<html>` text chunk that
-        // `chapterInfo.chapter_content` references as `$<id>`. Reading it from
-        // a plain fetch is timing-independent (no waiting for a client render)
-        // and reliable, so it is tried first.
-        if let Ok(bytes) = client.get_bytes(&chapter.url) {
-            let raw = String::from_utf8_lossy(&bytes);
-            if let Some(html) = extract_flight_chapter(&raw) {
-                return Ok(ChapterContent {
-                    title: chapter.title.clone(),
-                    xhtml: sanitize_to_xhtml(&html),
-                });
-            }
-        }
-
-        // Fallback: the fully rendered window HTML + the generic heuristic.
-        let (_final_url, body) = client.get_text(&chapter.url)?;
-        let content = extract_best_content(&body).ok_or_else(|| {
+        // payload, so a plain fetch is timing-independent and authoritative —
+        // no browser window needed (the window is closed during a download run
+        // anyway, which made a fallback there fail). A chapter with no body in
+        // the payload is genuinely unavailable (e.g. locked with no preview).
+        let bytes = client.get_bytes(&chapter.url)?;
+        let raw = String::from_utf8_lossy(&bytes);
+        let html = extract_flight_chapter(&raw).ok_or_else(|| {
             VaultError::ExternalApi(format!(
-                "Kapitelinhalt nicht erkannt: {} | Struktur: {}",
-                chapter.url,
-                content_outline(&body)
+                "Kapitelinhalt nicht im Seiten-Payload gefunden \
+                 (evtl. gesperrtes Premium-Kapitel): {}",
+                chapter.url
             ))
         })?;
         Ok(ChapterContent {
             title: chapter.title.clone(),
-            xhtml: content,
+            xhtml: sanitize_to_xhtml(&html),
         })
     }
 }
@@ -127,12 +116,19 @@ impl NovelSource for NovelArrowSource {
 /// (RSC) payload. Returns `None` if no paragraph-bearing chunk is found.
 fn extract_flight_chapter(raw: &str) -> Option<String> {
     let flight = collect_flight(raw);
-    // Precise path: `chapterInfo.chapter_content` references the body chunk via
-    // `$<id>`. Since this is *the* body, accept it even when short (some
-    // chapters are author notes / "not a chapter" fillers with one paragraph).
-    if let Some(html) = chapter_content_id(&flight).and_then(|id| flight_chunk(&flight, &id)) {
-        if has_prose(&html) {
-            return Some(html);
+    // `chapterInfo.chapter_content` is either a `$<id>` reference to a Flight
+    // text chunk (full chapters) or inline HTML (premium chapters ship their
+    // available text — usually a real excerpt — directly in the field). Accept
+    // short bodies (author-note fillers are a single paragraph).
+    if let Some(value) = chapter_content_value(&flight) {
+        if let Some(id) = value.strip_prefix('$') {
+            if let Some(html) = flight_chunk(&flight, id) {
+                if has_prose(&html) {
+                    return Some(html);
+                }
+            }
+        } else if has_prose(&value) {
+            return Some(value);
         }
     }
     // Heuristic fallback: the chunk with the most `<p>` tags. This is a guess,
@@ -180,15 +176,28 @@ fn collect_flight(raw: &str) -> String {
     out
 }
 
-/// Reads the `$<id>` chunk id from `chapterInfo.chapter_content`.
-fn chapter_content_id(flight: &str) -> Option<String> {
-    const KEY: &str = "\"chapter_content\":\"$";
-    let pos = flight.find(KEY)? + KEY.len();
-    let id: String = flight[pos..]
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric())
-        .collect();
-    (!id.is_empty()).then_some(id)
+/// Reads the `chapterInfo.chapter_content` value, JSON-unescaping it. The field
+/// is a JSON string inside the Flight stream, so inline HTML keeps its `\"`
+/// escapes — reading it naively would truncate at the first attribute quote.
+/// Returns either a `$<id>` chunk reference or inline HTML.
+fn chapter_content_value(flight: &str) -> Option<String> {
+    const KEY: &str = "\"chapter_content\":\"";
+    // Position at the value's opening quote.
+    let open = flight.find(KEY)? + KEY.len() - 1;
+    let bytes = flight.as_bytes();
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b'"' => break,
+            _ => i += 1,
+        }
+    }
+    if i >= bytes.len() {
+        return None;
+    }
+    // `open` and `i` sit on ASCII quotes → valid slice boundaries.
+    serde_json::from_str::<String>(&flight[open..=i]).ok()
 }
 
 /// Reads a `<id>:T<hexlen>,<payload>` Flight text chunk by its declared length.
@@ -251,45 +260,6 @@ fn largest_paragraph_chunk(flight: &str) -> Option<String> {
         }
     }
     best
-}
-
-/// Builds a compact outline of the DOM's most text-heavy elements for
-/// diagnostics: the top blocks by visible-text length as `tag#id.class(len)`.
-fn content_outline(body: &str) -> String {
-    let html = Html::parse_document(body);
-    let Ok(selector) = Selector::parse("div, section, article, main, p") else {
-        return "<selector-fehler>".to_string();
-    };
-    let mut blocks: Vec<(usize, String)> = Vec::new();
-    for el in html.select(&selector) {
-        let text_len: usize = el.text().map(|t| t.trim().len()).sum();
-        if text_len < 40 {
-            continue;
-        }
-        let v = el.value();
-        let mut label = v.name().to_string();
-        if let Some(id) = v.attr("id") {
-            label.push('#');
-            label.push_str(id);
-        }
-        if let Some(class) = v.attr("class") {
-            // Keep the label short — first two class tokens are enough.
-            let short: Vec<&str> = class.split_whitespace().take(2).collect();
-            if !short.is_empty() {
-                label.push('.');
-                label.push_str(&short.join("."));
-            }
-        }
-        blocks.push((text_len, format!("{label}({text_len})")));
-    }
-    blocks.sort_by(|a, b| b.0.cmp(&a.0));
-    blocks.dedup_by(|a, b| a.1 == b.1);
-    blocks
-        .into_iter()
-        .take(6)
-        .map(|(_, label)| label)
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// Extracts the novel slug from a `/novel/<slug>` URL.
@@ -644,5 +614,19 @@ mod tests {
     fn rejects_flight_without_prose() {
         let raw = "<script>self.__next_f.push([1,\"3:{\\\"x\\\":1}\"])</script>";
         assert!(extract_flight_chapter(raw).is_none());
+    }
+
+    #[test]
+    fn extracts_inline_premium_chapter_body() {
+        // Premium chapters carry their (excerpt) HTML inline in
+        // `chapter_content` instead of a `$<id>` chunk reference.
+        let raw = concat!(
+            "<script>self.__next_f.push([1,\"9:{\\\"premium_content\\\":true,",
+            "\\\"chapter_content\\\":\\\"<p><strong>Chapter 31</strong></p>",
+            "<p>He tapped the treasure icon.</p>\\\"}\"])</script>"
+        );
+        let html = extract_flight_chapter(raw).expect("inline body should parse");
+        assert!(html.contains("<p><strong>Chapter 31</strong></p>"));
+        assert!(html.contains("tapped the treasure icon"));
     }
 }
