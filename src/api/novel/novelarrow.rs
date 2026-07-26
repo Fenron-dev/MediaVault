@@ -121,16 +121,23 @@ impl NovelSource for NovelArrowSource {
 /// (RSC) payload. Returns `None` if no paragraph-bearing chunk is found.
 fn extract_flight_chapter(raw: &str) -> Option<String> {
     let flight = collect_flight(raw);
-    // `chapterInfo.chapter_content` points at the body chunk via `$<id>`.
-    let html = chapter_content_id(&flight)
-        .and_then(|id| flight_chunk(&flight, &id))
-        .or_else(|| largest_paragraph_chunk(&flight))?;
-    // Guard against picking a non-prose chunk (e.g. a metadata blob).
-    if html.matches("<p").count() >= 2 {
-        Some(html)
-    } else {
-        None
+    // Precise path: `chapterInfo.chapter_content` references the body chunk via
+    // `$<id>`. Since this is *the* body, accept it even when short (some
+    // chapters are author notes / "not a chapter" fillers with one paragraph).
+    if let Some(html) = chapter_content_id(&flight).and_then(|id| flight_chunk(&flight, &id)) {
+        if has_prose(&html) {
+            return Some(html);
+        }
     }
+    // Heuristic fallback: the chunk with the most `<p>` tags. This is a guess,
+    // so keep the stricter guard to avoid grabbing a metadata blob.
+    largest_paragraph_chunk(&flight).filter(|html| html.matches("<p").count() >= 2)
+}
+
+/// Whether a Flight chunk carries real chapter prose (a paragraph or a
+/// meaningful run of visible text).
+fn has_prose(html: &str) -> bool {
+    html.contains("<p") || html.chars().filter(|c| !c.is_whitespace()).count() >= 20
 }
 
 /// Concatenates and JSON-unescapes every `self.__next_f.push([1,"…"])` string
@@ -333,11 +340,10 @@ fn clean_chapter_title(text: &str, number: u32) -> String {
     if collapsed.is_empty() {
         return format!("Chapter {number}");
     }
-    if let Some(pos) = collapsed.find("Chapter ") {
-        let tail = collapsed[pos..].trim();
-        if !tail.is_empty() {
-            return tail.to_string();
-        }
+    // Prefer the exact "Chapter <number>: …" label; this drops a leading short
+    // label ("C1: …" or a bare "Chapter") that the anchor prepends.
+    if let Some(pos) = collapsed.find(&format!("Chapter {number}")) {
+        return collapsed[pos..].trim().to_string();
     }
     collapsed
 }
@@ -474,8 +480,26 @@ mod tests {
             clean_chapter_title("C1: Awakening Chapter 1: Awakening", 1),
             "Chapter 1: Awakening"
         );
+        // A bare "Chapter" prefix on filler entries must not double up.
+        assert_eq!(
+            clean_chapter_title("Chapter Chapter 74: Not a Chapter", 74),
+            "Chapter 74: Not a Chapter"
+        );
         assert_eq!(clean_chapter_title("", 5), "Chapter 5");
         assert_eq!(clean_chapter_title("Prologue", 0), "Prologue");
+    }
+
+    #[test]
+    fn accepts_single_paragraph_flight_body() {
+        // Author-note chapters have one short paragraph — still valid content.
+        let raw = concat!(
+            "<script>self.__next_f.push([1,\"1:{\\\"chapterInfo\\\":",
+            "{\\\"chapter_content\\\":\\\"$7\\\"}}\\n\"])</script>",
+            "<script>self.__next_f.push([1,\"7:T15,",
+            "<p>Not a chapter.</p>\\n8:x\"])</script>"
+        );
+        let html = extract_flight_chapter(raw).expect("single paragraph is valid");
+        assert_eq!(html, "<p>Not a chapter.</p>");
     }
 
     // Two `__next_f` pushes: chapter metadata pointing at chunk `11` via

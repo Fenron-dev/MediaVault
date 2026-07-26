@@ -14,7 +14,7 @@ use crate::api::audiobookshelf::AbsClient;
 use crate::api::goodreads::GoodreadsClient;
 use crate::api::novel::{
     detect_image_media_type, detect_source, host_of, is_webview_routed, sanitize_to_xhtml,
-    set_browser_session, BrowserSession, ChapterRef, PoliteClient,
+    set_browser_session, BrowserSession, ChapterContent, ChapterRef, PoliteClient,
 };
 use crate::core::duplicate::compute_fingerprint;
 use crate::core::duplicate::compute_fingerprint_for_file;
@@ -6362,6 +6362,8 @@ fn check_one_subscription(
 
     let mut downloaded_indices: Vec<u32> = Vec::new();
     let mut fetch_error: Option<VaultError> = None;
+    let mut consecutive_failures = 0usize;
+    let mut skipped_chapters = 0usize;
     for (position, chapter_position) in pending.iter().enumerate() {
         update_webnovel_job(job_id, |status| {
             status.current_chapter = position + 1;
@@ -6376,6 +6378,7 @@ fn check_one_subscription(
         };
         let content = match source.fetch_chapter(client, &chapter_ref) {
             Ok(content) => {
+                consecutive_failures = 0;
                 debug_log(&format!(
                     "chapter {}/{}: OK '{}' ({} Zeichen) {}",
                     position + 1,
@@ -6387,8 +6390,7 @@ fn check_one_subscription(
                 content
             }
             Err(error) => {
-                // Abort the download loop but keep everything fetched so far;
-                // the next run resumes exactly here.
+                consecutive_failures += 1;
                 debug_log(&format!(
                     "chapter {}/{}: FEHLER '{}' — {error} — {}",
                     position + 1,
@@ -6396,8 +6398,32 @@ fn check_one_subscription(
                     chapter_ref.title,
                     chapter_ref.url
                 ));
-                fetch_error = Some(error);
-                break;
+                // Many failures in a row → likely the site is down or blocking;
+                // stop and keep everything fetched so far so the next run
+                // resumes exactly here.
+                if consecutive_failures >= MAX_CONSECUTIVE_CHAPTER_FAILURES {
+                    fetch_error = Some(error);
+                    break;
+                }
+                // A single unparseable chapter (e.g. an author-note "not a
+                // chapter" filler) must not block the rest of the novel: store
+                // a placeholder so the run continues and it is not retried
+                // forever.
+                skipped_chapters += 1;
+                debug_log(&format!(
+                    "chapter {}/{}: übersprungen (Platzhalter) '{}'",
+                    position + 1,
+                    pending.len(),
+                    chapter_ref.title
+                ));
+                ChapterContent {
+                    title: chapter_ref.title.clone(),
+                    xhtml: format!(
+                        "<p><em>[Dieses Kapitel konnte nicht automatisch geladen \
+                         werden. Bitte im Browser öffnen: {}]</em></p>",
+                        chapter_ref.url
+                    ),
+                }
             }
         };
 
@@ -6441,11 +6467,23 @@ fn check_one_subscription(
         write_webnovel_sidecar(vault, subscription, &complete_file, &subscription.id, None)?;
     }
 
+    if skipped_chapters > 0 {
+        debug_log(&format!(
+            "check: '{}' — {skipped_chapters} Kapitel als Platzhalter übersprungen",
+            subscription.title
+        ));
+    }
+
     if let Some(error) = fetch_error {
         return Err(error);
     }
     Ok(downloaded_indices.len())
 }
+
+/// How many chapters may fail back to back before the run aborts (and resumes
+/// on the next check). Below this, a single failing chapter is skipped with a
+/// placeholder so one bad entry cannot block an entire novel.
+const MAX_CONSECUTIVE_CHAPTER_FAILURES: usize = 5;
 
 /// Cover file names probed inside a novel folder, in preference order.
 const WEBNOVEL_COVER_NAMES: [&str; 3] = ["cover.jpg", "cover.png", "cover.webp"];
