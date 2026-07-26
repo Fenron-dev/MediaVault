@@ -87,13 +87,59 @@ impl NovelSource for NovelArrowSource {
     fn fetch_chapter(&self, client: &PoliteClient, chapter: &ChapterRef) -> Result<ChapterContent> {
         let (_final_url, body) = client.get_text(&chapter.url)?;
         let content = extract_best_content(&body).ok_or_else(|| {
-            VaultError::ExternalApi(format!("Kapitelinhalt nicht erkannt: {}", chapter.url))
+            // Attach a structural outline of the largest text blocks so the
+            // debug log reveals the real content container (the chapter body
+            // is client-rendered and its wrapper is not known up front).
+            VaultError::ExternalApi(format!(
+                "Kapitelinhalt nicht erkannt: {} | Struktur: {}",
+                chapter.url,
+                content_outline(&body)
+            ))
         })?;
         Ok(ChapterContent {
             title: chapter.title.clone(),
             xhtml: content,
         })
     }
+}
+
+/// Builds a compact outline of the DOM's most text-heavy elements for
+/// diagnostics: the top blocks by visible-text length as `tag#id.class(len)`.
+fn content_outline(body: &str) -> String {
+    let html = Html::parse_document(body);
+    let Ok(selector) = Selector::parse("div, section, article, main, p") else {
+        return "<selector-fehler>".to_string();
+    };
+    let mut blocks: Vec<(usize, String)> = Vec::new();
+    for el in html.select(&selector) {
+        let text_len: usize = el.text().map(|t| t.trim().len()).sum();
+        if text_len < 40 {
+            continue;
+        }
+        let v = el.value();
+        let mut label = v.name().to_string();
+        if let Some(id) = v.attr("id") {
+            label.push('#');
+            label.push_str(id);
+        }
+        if let Some(class) = v.attr("class") {
+            // Keep the label short — first two class tokens are enough.
+            let short: Vec<&str> = class.split_whitespace().take(2).collect();
+            if !short.is_empty() {
+                label.push('.');
+                label.push_str(&short.join("."));
+            }
+        }
+        blocks.push((text_len, format!("{label}({text_len})")));
+    }
+    blocks.sort_by(|a, b| b.0.cmp(&a.0));
+    blocks.dedup_by(|a, b| a.1 == b.1);
+    blocks
+        .into_iter()
+        .take(6)
+        .map(|(_, label)| label)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Extracts the novel slug from a `/novel/<slug>` URL.

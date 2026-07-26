@@ -277,6 +277,9 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         "/api/webnovel/debug-log" => {
             json_response(StatusCode::OK, &build_webnovel_debug_log_response())
         }
+        "/api/webnovel/open-debug-log" => {
+            json_response(StatusCode::OK, &build_open_debug_log_response())
+        }
         "/api/webnovel/list" => json_response(
             StatusCode::OK,
             &build_webnovel_list_response(request.uri().query()),
@@ -7128,6 +7131,32 @@ fn build_webnovel_debug_log_response() -> WebnovelDebugLogResponse {
     }
 }
 
+/// Opens the debug-log file in the OS default application.
+fn build_open_debug_log_response() -> WebnovelSimpleResponse {
+    let Some(path) = debug_log_path() else {
+        return WebnovelSimpleResponse::error("Log-Pfad nicht ermittelbar.");
+    };
+    // Make sure the file exists so the OS has something to open.
+    if !path.exists() {
+        debug_log("open-debug-log: Datei angelegt (war leer)");
+    }
+    let path_str = path.to_string_lossy().to_string();
+
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&path_str).spawn();
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &path_str])
+        .spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let result = std::process::Command::new("xdg-open").arg(&path_str).spawn();
+
+    match result {
+        Ok(_) => WebnovelSimpleResponse::ok(),
+        Err(error) => WebnovelSimpleResponse::error(format!("Öffnen fehlgeschlagen: {error}")),
+    }
+}
+
 /// Debug-log path (`~/.mediavault/webnovel_debug.log`).
 fn debug_log_path() -> Option<PathBuf> {
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
@@ -7188,6 +7217,7 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
   window.__mvInstalled = true;
   window.__mvData = null;
   window.__mvMode = 'gz';
+  window.__mvPath = '';
   function isChallenge(){
     var t=(document.title||'').toLowerCase();
     if(t.indexOf('just a moment')>=0) return true;
@@ -7199,13 +7229,13 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
     try {
       if (isChallenge()) { return 'CH'; }
       if (window.__mvData === null) { return 'WAIT'; }
-      if (kind === 'meta') { return 'READY:' + window.__mvData.length + ':' + window.__mvMode; }
+      if (kind === 'meta') { return 'READY:' + window.__mvData.length + ':' + window.__mvMode + ':' + (window.__mvPath||''); }
       return window.__mvData.substr(i * 4000, 4000);
     } catch(e) { return 'ERR'; }
   };
   async function build(){
     try{
-      if (isChallenge()) { return; }
+      if (isChallenge()) { done=false; return; }
       var html=document.documentElement.outerHTML;
       html=html.replace(/<script[\s\S]*?<\/script>/gi,'');
       html=html.replace(/<style[\s\S]*?<\/style>/gi,'');
@@ -7223,12 +7253,29 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
       }
       var d='0123456789abcdef'; var hex='';
       for(var i=0;i<bytes.length;i++){ hex+=d[(bytes[i]>>>4)&15]+d[bytes[i]&15]; }
-      window.__mvData=hex; window.__mvMode=mode;
+      window.__mvData=hex; window.__mvMode=mode; window.__mvPath=location.pathname;
     }catch(e){ window.__mvData=''; window.__mvMode='err'; }
   }
-  function schedule(){ setTimeout(build,1500); setTimeout(build,4000); setTimeout(build,9000); }
-  if(document.readyState==='complete'){ schedule(); }
-  else { window.addEventListener('load', schedule); }
+  // Capture only once the DOM has stopped mutating for a beat, so client-side
+  // rendered/lazy-loaded content (Next.js chapter bodies etc.) is present. A
+  // hard cap guarantees delivery even on pages that never fully quiesce.
+  var done=false, settleTimer=null;
+  function fire(){
+    if(done) return;
+    if(isChallenge()){ setTimeout(bump, 1000); return; }
+    done=true; build();
+  }
+  function bump(){ if(done) return; if(settleTimer){ clearTimeout(settleTimer); } settleTimer=setTimeout(fire, 900); }
+  function start(){
+    try{
+      var obs=new MutationObserver(bump);
+      obs.observe(document.documentElement,{childList:true,subtree:true,characterData:true});
+    }catch(e){}
+    bump();
+    setTimeout(function(){ if(!done) fire(); }, 12000);
+  }
+  if(document.readyState==='complete'){ start(); }
+  else { window.addEventListener('load', start); }
 })();
 "#;
 
@@ -7282,7 +7329,11 @@ fn navigate_browser_window(handle: &tauri::AppHandle, url: &tauri::Url) {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
     if let Some(window) = handle.get_webview_window(BROWSER_WINDOW_LABEL) {
         let target = serde_json::to_string(url.as_str()).unwrap_or_else(|_| "\"\"".to_string());
-        let _ = window.eval(&format!("window.location.href = {target};"));
+        // Invalidate the current page's payload before navigating so a poll
+        // that races the navigation reads WAIT, never the previous page.
+        let _ = window.eval(&format!(
+            "try{{window.__mvData=null;window.__mvPath='';}}catch(e){{}}window.location.href = {target};"
+        ));
     } else {
         let _ = WebviewWindowBuilder::new(
             handle,
@@ -7425,8 +7476,24 @@ fn render_page_via_window(url: &str) -> Result<String> {
             let mut parts = ready.split(':');
             let total: usize = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
             let mode = parts.next().unwrap_or("gz").to_string();
+            let page_path = parts.next().unwrap_or("").to_string();
             if total == 0 {
                 continue;
+            }
+            // Reject a capture that belongs to the previously loaded page: the
+            // relay reports its own `location.pathname`, which must match the
+            // page we navigated to. Guards against reading stale content while
+            // an SPA navigation is still in flight.
+            if !page_path.is_empty() {
+                let want = target.path().trim_end_matches('/');
+                let got = page_path.trim_end_matches('/');
+                if want != got {
+                    debug_log(&format!(
+                        "render: stale Seite path='{page_path}' erwartet='{}' → warte",
+                        target.path()
+                    ));
+                    continue;
+                }
             }
             // Content is ready — drop any lingering challenge hint so the
             // normal progress line shows again.

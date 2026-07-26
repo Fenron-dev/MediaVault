@@ -9051,6 +9051,14 @@ document.getElementById("webnovel-debug-btn")?.addEventListener("click", async (
   await loadWebnovelDebugLog();
 });
 document.getElementById("webnovel-debug-refresh")?.addEventListener("click", loadWebnovelDebugLog);
+document.getElementById("webnovel-debug-open")?.addEventListener("click", async () => {
+  try {
+    await webnovelApi(`/api/webnovel/open-debug-log?_=${Date.now()}`);
+    if (statusStrip) statusStrip.textContent = "Log-Datei im Standardprogramm geöffnet.";
+  } catch (error) {
+    if (statusStrip) statusStrip.textContent = `Log-Datei konnte nicht geöffnet werden: ${error}`;
+  }
+});
 document.getElementById("webnovel-debug-close")?.addEventListener("click", () => {
   const modal = document.getElementById("webnovel-debug-modal");
   if (modal) modal.hidden = true;
