@@ -7258,23 +7258,39 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
       window.__mvData=hex; window.__mvMode=mode; window.__mvPath=location.pathname;
     }catch(e){ window.__mvData=''; window.__mvMode='err'; }
   }
-  // Capture only once the DOM has stopped mutating for a beat, so client-side
-  // rendered/lazy-loaded content (Next.js chapter bodies etc.) is present. A
-  // hard cap guarantees delivery even on pages that never fully quiesce.
+  // Capture once the DOM has quiesced AND carries enough text: SPA chapter
+  // bodies (Next.js) arrive via an async fetch that resolves after the initial
+  // render settles, so waiting for mere DOM-stillness fires too early on a
+  // near-empty skeleton. Gate on visible-text volume; a hard cap still
+  // guarantees delivery (short chapters, pages that never fill).
   var done=false, settleTimer=null;
+  function textLen(){
+    try { return ((document.body && document.body.innerText) || '').replace(/\s+/g,'').length; }
+    catch(e){ return 999999; }
+  }
   function fire(){
     if(done) return;
     if(isChallenge()){ setTimeout(bump, 1000); return; }
     done=true; build();
   }
-  function bump(){ if(done) return; if(settleTimer){ clearTimeout(settleTimer); } settleTimer=setTimeout(fire, 900); }
+  function bump(){
+    if(done) return;
+    if(settleTimer){ clearTimeout(settleTimer); }
+    settleTimer=setTimeout(function(){
+      if(done) return;
+      if(isChallenge()){ setTimeout(bump, 1000); return; }
+      // Enough text → capture; otherwise keep polling for the lazy body.
+      if(textLen() >= 1500){ fire(); } else { bump(); }
+    }, 900);
+  }
   function start(){
     try{
       var obs=new MutationObserver(bump);
       obs.observe(document.documentElement,{childList:true,subtree:true,characterData:true});
     }catch(e){}
     bump();
-    setTimeout(function(){ if(!done) fire(); }, 12000);
+    // Hard cap: deliver whatever is present so extraction/diagnostics can run.
+    setTimeout(function(){ if(!done){ done=true; build(); } }, 15000);
   }
   if(document.readyState==='complete'){ start(); }
   else { window.addEventListener('load', start); }
