@@ -2,17 +2,13 @@
 
 mod desktop;
 
-pub mod ai;
 pub mod api;
-pub mod app;
 pub mod core;
 pub mod error;
 pub mod media;
 
-pub use ai::{AnalysisProfile, LmStudioConfig};
 pub use api::anilist::AniListClient;
 pub use api::novel::{detect_source, ChapterRef, NovelInfo, NovelSource, PoliteClient};
-pub use app::AppConfig;
 pub use core::covers::{CoverCandidate, CoverFallbackChain, CoverSource};
 pub use core::duplicate::{compute_fingerprint, compute_fingerprint_for_file, FileFingerprint};
 pub use core::epub::{write_epub, EpubChapter, EpubMeta};
