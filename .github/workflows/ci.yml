@@ -36,7 +36,12 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Compile check
-        run: cargo check --all-targets
+        # `--locked` fails the build if Cargo.lock would have to change, so a
+        # release is always built from the exact dependency set in the repo.
+        run: cargo check --locked --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --all-targets
@@ -86,6 +91,12 @@ jobs:
   app-build:
     runs-on: macos-latest
 
+    # Job-level env so the signing step's `if:` can actually see the secret.
+    # Evaluated in the job context, a step-level `env:` is always empty there,
+    # which silently skipped the certificate import on every run.
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,7 +113,6 @@ jobs:
       - name: Import Apple certificate
         if: ${{ env.APPLE_CERTIFICATE != '' }}
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
@@ -117,12 +127,17 @@ jobs:
           rm certificate.p12
 
       - name: Build macOS app bundle
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         run: cargo tauri build --bundles app
 
       - name: Ad-hoc sign app bundle
+        # Only when no Developer ID was imported — otherwise this would replace
+        # the real signature with an ad-hoc one.
         # Ad-hoc signing ("-") prevents the "app is damaged" Gatekeeper error.
         # Without a Developer ID, macOS will show "unidentified developer" instead,
         # which users can bypass with right-click → Open (or xattr -cr).
+        if: ${{ env.APPLE_CERTIFICATE == '' }}
         run: |
           codesign --force --deep --sign - \
             target/release/bundle/macos/MediaVault.app
