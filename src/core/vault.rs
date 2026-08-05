@@ -188,9 +188,47 @@ impl Vault {
     }
 
     /// Resolves a vault-relative path back to an absolute path.
+    ///
+    /// This performs the *lexical* check only ([`RelativePath`] rejects `..`
+    /// and absolute paths). Callers that go on to read, write or delete the
+    /// result must use [`Self::resolve_existing`] instead, which additionally
+    /// resolves symlinks.
     pub fn resolve<P: AsRef<Path>>(&self, relative: P) -> Result<PathBuf> {
         let relative = RelativePath::new(relative)?;
         Ok(self.root.join(relative.as_path()))
+    }
+
+    /// Resolves an existing vault-relative path and verifies it really lives
+    /// inside the vault after symlinks are followed.
+    ///
+    /// `RelativePath` alone cannot guarantee containment: a symlink *inside*
+    /// the vault (e.g. from an unpacked archive) points anywhere, and every
+    /// caller that opens or deletes the result would follow it out of the
+    /// vault.
+    ///
+    /// # Errors
+    /// - `VaultError::InvalidRelativePath` if the path escapes the vault
+    /// - `VaultError::Io` if the path cannot be canonicalized (e.g. missing)
+    pub fn resolve_existing<P: AsRef<Path>>(&self, relative: P) -> Result<PathBuf> {
+        let candidate = self.resolve(relative)?;
+        let canonical = std::fs::canonicalize(&candidate)?;
+        self.ensure_inside(&canonical)?;
+        Ok(canonical)
+    }
+
+    /// Returns an error unless `absolute` lies inside the vault root.
+    ///
+    /// The root is canonicalized first so a vault opened through a symlinked
+    /// path still compares equal.
+    pub fn ensure_inside(&self, absolute: &Path) -> Result<()> {
+        let root = std::fs::canonicalize(&self.root).unwrap_or_else(|_| self.root.clone());
+        if absolute.starts_with(&root) {
+            return Ok(());
+        }
+        Err(VaultError::InvalidRelativePath(format!(
+            "path leaves the vault: {}",
+            absolute.display()
+        )))
     }
 }
 
@@ -224,6 +262,41 @@ mod tests {
         let relative =
             RelativePath::new("Inbox/./movie.mkv").expect("relative path should be valid");
         assert_eq!(relative.to_string(), "Inbox/movie.mkv");
+    }
+
+    #[test]
+    fn ensure_inside_rejects_outside_paths() {
+        let vault = Vault::new("/vault").expect("vault root should be valid");
+        assert!(vault.ensure_inside(Path::new("/vault/Filme/a.mkv")).is_ok());
+        let error = vault
+            .ensure_inside(Path::new("/etc/passwd"))
+            .expect_err("outside paths must be rejected");
+        assert!(matches!(error, VaultError::InvalidRelativePath(_)));
+    }
+
+    #[test]
+    fn resolve_existing_rejects_symlink_escape() {
+        let base = std::env::temp_dir().join(format!("mediavault-symlink-{}", std::process::id()));
+        let root = base.join("vault");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).expect("vault dir should be creatable");
+        std::fs::create_dir_all(&outside).expect("outside dir should be creatable");
+        let secret = outside.join("secret.txt");
+        std::fs::write(&secret, "secret").expect("file should be writable");
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&secret, root.join("link.txt")).expect("symlink should be made");
+
+        #[cfg(unix)]
+        {
+            let vault = Vault::new(&root).expect("vault root should be valid");
+            let error = vault
+                .resolve_existing("link.txt")
+                .expect_err("symlink out of the vault must be rejected");
+            assert!(matches!(error, VaultError::InvalidRelativePath(_)));
+        }
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

@@ -240,7 +240,7 @@ pub fn list_in_progress(progress_dir: &std::path::Path) -> Result<Vec<ProgressRe
         })
         .collect();
 
-    records.sort_by(|a, b| b.last_accessed.cmp(&a.last_accessed));
+    records.sort_by_key(|record| std::cmp::Reverse(record.last_accessed));
     Ok(records)
 }
 

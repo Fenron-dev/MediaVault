@@ -276,6 +276,8 @@ pub struct MediaProperties {
     pub title_de: Option<String>,
     /// Original-language title.
     pub title_original: Option<String>,
+    /// Author or creator name (books, webnovels, audiobooks).
+    pub author: Option<String>,
     /// Main description text.
     pub description: Option<String>,
     /// German description text.
@@ -342,6 +344,7 @@ impl Default for MediaProperties {
             title: None,
             title_de: None,
             title_original: None,
+            author: None,
             description: None,
             description_de: None,
             description_original: None,

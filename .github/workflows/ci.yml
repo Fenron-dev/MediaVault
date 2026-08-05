@@ -36,13 +36,66 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Compile check
-        run: cargo check --all-targets
+        # `--locked` fails the build if Cargo.lock would have to change, so a
+        # release is always built from the exact dependency set in the repo.
+        run: cargo check --locked --all-targets
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --all-targets
 
+  app-build-linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            librsvg2-dev \
+            wget
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
+
+      - name: Generate bundle icons
+        run: cargo tauri icon icons/icon.png
+
+      - name: Build Linux bundles (deb + AppImage)
+        run: cargo tauri build --bundles deb,appimage
+
+      - name: Upload Linux bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: mediavault-linux
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          if-no-files-found: error
+
   app-build:
     runs-on: macos-latest
+
+    # Job-level env so the signing step's `if:` can actually see the secret.
+    # Evaluated in the job context, a step-level `env:` is always empty there,
+    # which silently skipped the certificate import on every run.
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
     steps:
       - name: Checkout
@@ -60,7 +113,6 @@ jobs:
       - name: Import Apple certificate
         if: ${{ env.APPLE_CERTIFICATE != '' }}
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
@@ -75,12 +127,25 @@ jobs:
           rm certificate.p12
 
       - name: Build macOS app bundle
-        run: cargo tauri build --bundles app
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        # An *empty* APPLE_SIGNING_IDENTITY is worse than none: Tauri sees the
+        # variable, tries to sign with identity "" and fails with "no identity
+        # found". Unset it when the secret is absent so the build stays
+        # unsigned and the ad-hoc step below takes over.
+        run: |
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            unset APPLE_SIGNING_IDENTITY
+          fi
+          cargo tauri build --bundles app
 
       - name: Ad-hoc sign app bundle
+        # Only when no Developer ID was imported — otherwise this would replace
+        # the real signature with an ad-hoc one.
         # Ad-hoc signing ("-") prevents the "app is damaged" Gatekeeper error.
         # Without a Developer ID, macOS will show "unidentified developer" instead,
         # which users can bypass with right-click → Open (or xattr -cr).
+        if: ${{ env.APPLE_CERTIFICATE == '' }}
         run: |
           codesign --force --deep --sign - \
             target/release/bundle/macos/MediaVault.app

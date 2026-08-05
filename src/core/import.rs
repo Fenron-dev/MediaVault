@@ -263,8 +263,11 @@ impl ImportPlanner {
         }
 
         if let Some(fingerprint) = file.fingerprint.as_ref() {
+            // Key on hash *and* size: the hash is a 64-bit non-cryptographic
+            // fold, so the length is what keeps an accidental collision from
+            // marking two unrelated files as the same content.
             steps.push(PlannedImportStep::RegisterDuplicate {
-                fingerprint: fingerprint.hash.clone(),
+                fingerprint: format!("{}:{}", fingerprint.hash, fingerprint.byte_len),
             });
         }
 
