@@ -31,7 +31,9 @@ use crate::core::playlist::{
 use crate::core::progress::{
     delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
 };
-use crate::core::properties::{render_sidecar_yaml, sidecar_path_for};
+use crate::core::properties::{
+    legacy_sidecar_path_for, render_sidecar_yaml, sidecar_path_for, SIDECAR_SUFFIX,
+};
 use crate::core::vault::{RelativePath, Vault};
 use crate::core::webnovel::{
     blocked_reason, list_subscriptions, list_trashed_subscriptions, load_blocklist_entries,
@@ -70,6 +72,59 @@ const INBOX_SUBFOLDERS: &[&str] = &[
 
 type AniListCacheMap = HashMap<String, AniListAnimeMetadata>;
 
+/// Permission bits for files that hold credentials or browsing history:
+/// readable and writable by the owner only.
+#[cfg(unix)]
+const PRIVATE_FILE_MODE: u32 = 0o600;
+/// Same idea for the app's state directory.
+#[cfg(unix)]
+const PRIVATE_DIR_MODE: u32 = 0o700;
+
+/// Restricts a path to the owner (no-op on non-Unix platforms).
+///
+/// Applied to everything under `~/.mediavault` that is sensitive: captured
+/// login sessions and the debug log (which records every visited URL). Best
+/// effort — a failure here must never break the operation that wrote the file.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path, is_dir: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if is_dir {
+        PRIVATE_DIR_MODE
+    } else {
+        PRIVATE_FILE_MODE
+    };
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(mode));
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path, _is_dir: bool) {}
+
+/// Creates `~/.mediavault` (if needed) with owner-only permissions.
+fn ensure_private_dir(dir: &Path) {
+    let _ = fs::create_dir_all(dir);
+    restrict_to_owner(dir, true);
+}
+
+/// Writes `contents` to `path` so that only the owner can read it.
+///
+/// The permissions are applied to a freshly created file **before** the
+/// contents are written, so the secret is never briefly world-readable.
+fn write_private_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        ensure_private_dir(parent);
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)?;
+    restrict_to_owner(path, false);
+    file.write_all(contents.as_bytes())
+}
+
 fn anilist_cache_path() -> Option<PathBuf> {
     let home = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE"))?;
     Some(
@@ -96,7 +151,7 @@ fn save_anilist_cache(cache: &AniListCacheMap) {
         return;
     };
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        ensure_private_dir(parent);
     }
     if let Ok(body) = serde_json::to_string(cache) {
         let _ = fs::write(path, body);
@@ -236,17 +291,14 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
             StatusCode::OK,
             &build_load_cursor_response(request.uri().query()),
         ),
-        "/api/abs/test" => json_response(
-            StatusCode::OK,
-            &build_abs_test_response(request.uri().query()),
-        ),
+        "/api/abs/test" => json_response(StatusCode::OK, &build_abs_test_response(request.body())),
         "/api/abs/libraries" => json_response(
             StatusCode::OK,
-            &build_abs_libraries_response(request.uri().query()),
+            &build_abs_libraries_response(request.body()),
         ),
         "/api/abs/library-items" => json_response(
             StatusCode::OK,
-            &build_abs_library_items_response(request.uri().query()),
+            &build_abs_library_items_response(request.body()),
         ),
         "/api/abs/sync-progress" => json_response(
             StatusCode::OK,
@@ -480,11 +532,19 @@ fn build_create_vault_response(query: Option<&str>) -> CreateVaultResponse {
     };
 
     match create_vault_at(&parent, &name) {
-        Ok(path) => CreateVaultResponse {
-            path: Some(path.display().to_string()),
-            created: true,
-            error: None,
-        },
+        Ok(path) => {
+            // Creating a vault authorizes it, just like opening one does.
+            let mut state = load_app_state().unwrap_or_default();
+            let resolved = resolve_existing_root(path.clone()).unwrap_or_else(|_| path.clone());
+            register_known_root(&mut state, &resolved);
+            let _ = save_app_state(&state);
+
+            CreateVaultResponse {
+                path: Some(path.display().to_string()),
+                created: true,
+                error: None,
+            }
+        }
         Err(error) => CreateVaultResponse::error(error.to_string()),
     }
 }
@@ -500,6 +560,9 @@ fn build_vault_root_response(query: Option<&str>) -> VaultRootResponse {
             } else {
                 match resolve_existing_root(PathBuf::from(normalized)) {
                     Ok(resolved) => {
+                        // Opening a vault is the explicit user action that
+                        // authorizes it for later `root=` overrides.
+                        register_known_root(&mut state, &resolved);
                         state.vault_root = Some(resolved.display().to_string());
                     }
                     Err(error) => {
@@ -586,7 +649,9 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
         }
     };
 
-    let absolute = match vault.resolve(relative.as_path()) {
+    // `resolve_existing` also follows symlinks and rejects anything that ends
+    // up outside the vault.
+    let absolute = match vault.resolve_existing(relative.as_path()) {
         Ok(path) => path,
         Err(error) => {
             return response(
@@ -622,6 +687,9 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
                 .expect("range error response should build");
         }
 
+        // Serve at most one window per request; the browser keeps asking for
+        // the next one, so a `bytes=0-` on a 40 GB file stays cheap.
+        let end = end.min(start.saturating_add(MAX_RANGE_LENGTH_BYTES - 1));
         let length = end - start + 1;
 
         let body = match read_file_range(&absolute, start, length) {
@@ -645,8 +713,30 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
             .expect("partial content response should build");
     }
 
-    // No Range header — serve the full file, but advertise range support so the
-    // browser knows it can seek without a full reload.
+    // No Range header. Small files go out whole; for anything larger only the
+    // first window is sent as `206 Partial Content` — the browser then asks
+    // for the rest by range instead of us holding a multi-GB file in memory.
+    if file_size > FULL_RESPONSE_LIMIT_BYTES {
+        let end = FULL_RESPONSE_LIMIT_BYTES.min(file_size) - 1;
+        let length = end + 1;
+
+        return match read_file_range(&absolute, 0, length) {
+            Ok(body) => Response::builder()
+                .status(StatusCode::PARTIAL_CONTENT)
+                .header(CONTENT_TYPE, content_type)
+                .header("Content-Range", format!("bytes 0-{end}/{file_size}"))
+                .header("Content-Length", length.to_string())
+                .header("Accept-Ranges", "bytes")
+                .body(body)
+                .expect("partial content response should build"),
+            Err(error) => response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "text/plain; charset=utf-8",
+                &error.to_string(),
+            ),
+        };
+    }
+
     match fs::read(&absolute) {
         Ok(body) => Response::builder()
             .status(StatusCode::OK)
@@ -662,6 +752,14 @@ fn build_media_file_response(query: Option<&str>, range: Option<&str>) -> Respon
         ),
     }
 }
+
+/// Largest file served in one piece when the client sends no `Range` header.
+/// Anything bigger is answered with a first window plus `Accept-Ranges`.
+const FULL_RESPONSE_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Largest single range served, so a `bytes=0-` request on a huge file cannot
+/// force a multi-GB allocation.
+const MAX_RANGE_LENGTH_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Parses a `bytes=start-end` range spec and clamps both ends to `[0, file_size - 1]`.
 fn parse_byte_range(range_str: &str, file_size: u64) -> (u64, u64) {
@@ -892,23 +990,32 @@ fn build_delete_files_response(body: &[u8]) -> DeleteFilesResponse {
 /// `.mediavault.yaml` sidecar, if present, is removed alongside.
 fn delete_vault_file(vault: &Vault, path: &str, permanent: bool) -> Result<()> {
     let relative = RelativePath::new(path)?;
-    let absolute = vault.resolve(relative.as_path())?;
 
-    if !absolute.exists() {
+    if !vault.resolve(relative.as_path())?.exists() {
         return Err(VaultError::InvalidVaultPath(format!(
             "Datei nicht gefunden: {relative}"
         )));
     }
 
-    let sidecar_relative = sidecar_path_for(&relative).ok();
-    let sidecar_absolute = sidecar_relative
-        .as_ref()
-        .and_then(|rel| vault.resolve(rel.as_path()).ok());
+    // Deleting is destructive, so the symlink-aware form decides what is
+    // actually touched — a link inside the vault must never delete its target
+    // outside of it.
+    let absolute = vault.resolve_existing(relative.as_path())?;
+
+    // Every naming scheme is considered: a vault can still hold sidecars
+    // written by an older version.
+    let sidecars: Vec<(RelativePath, PathBuf)> = sidecar_candidates(&relative)?
+        .into_iter()
+        .filter_map(|rel| {
+            let absolute = vault.resolve(rel.as_path()).ok()?;
+            absolute.exists().then_some((rel, absolute))
+        })
+        .collect();
 
     if permanent {
         fs::remove_file(&absolute).map_err(VaultError::from)?;
-        // Remove the sidecar too (best effort — never fail the delete).
-        if let Some(sidecar) = &sidecar_absolute {
+        // Remove the sidecars too (best effort — never fail the delete).
+        for (_, sidecar) in &sidecars {
             let _ = fs::remove_file(sidecar);
         }
     } else {
@@ -919,16 +1026,14 @@ fn delete_vault_file(vault: &Vault, path: &str, permanent: bool) -> Result<()> {
             fs::create_dir_all(parent).map_err(VaultError::from)?;
         }
         move_file_with_fallback(&absolute, &trash_target)?;
-        // Move the sidecar ALONGSIDE the file (not delete it) so a restore
+        // Move the sidecars ALONGSIDE the file (not delete them) so a restore
         // brings the metadata back.
-        if let (Some(sidecar_rel), Some(sidecar_abs)) = (&sidecar_relative, &sidecar_absolute) {
-            if sidecar_abs.exists() {
-                let sidecar_trash = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
-                if let Some(parent) = sidecar_trash.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = move_file_with_fallback(sidecar_abs, &sidecar_trash);
+        for (sidecar_rel, sidecar_abs) in &sidecars {
+            let sidecar_trash = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
+            if let Some(parent) = sidecar_trash.parent() {
+                let _ = fs::create_dir_all(parent);
             }
+            let _ = move_file_with_fallback(sidecar_abs, &sidecar_trash);
         }
     }
 
@@ -961,7 +1066,7 @@ struct TrashListResponse {
 /// Returns whether a file name is a sidecar (skipped in the trash listing —
 /// sidecars ride along with their media file).
 fn is_sidecar_name(name: &str) -> bool {
-    name.ends_with(".mediavault.yaml") || name.ends_with(LEGACY_SIDECAR_SUFFIX)
+    name.ends_with(SIDECAR_SUFFIX) || name.ends_with(LEGACY_SIDECAR_SUFFIX)
 }
 
 /// Recursively collects trashed media files (skips sidecars).
@@ -1098,16 +1203,19 @@ fn restore_trashed_file(vault: &Vault, relative_path: &str) -> Result<()> {
     }
     move_file_with_fallback(&trash_source, &target)?;
 
-    // Bring the sidecar back too, if it was trashed alongside.
-    if let Ok(sidecar_rel) = sidecar_path_for(&relative) {
+    // Bring the sidecar back too, if it was trashed alongside. Files deleted
+    // by an older version carry an older sidecar name, so every known shape is
+    // considered.
+    for sidecar_rel in sidecar_candidates(&relative)? {
         let sidecar_source = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
-        if sidecar_source.exists() {
-            if let Ok(sidecar_target) = vault.resolve(sidecar_rel.as_path()) {
-                if let Some(parent) = sidecar_target.parent() {
-                    let _ = fs::create_dir_all(parent);
-                }
-                let _ = move_file_with_fallback(&sidecar_source, &sidecar_target);
+        if !sidecar_source.exists() {
+            continue;
+        }
+        if let Ok(sidecar_target) = vault.resolve(sidecar_rel.as_path()) {
+            if let Some(parent) = sidecar_target.parent() {
+                let _ = fs::create_dir_all(parent);
             }
+            let _ = move_file_with_fallback(&sidecar_source, &sidecar_target);
         }
     }
     Ok(())
@@ -1164,7 +1272,7 @@ fn purge_trashed_file(vault: &Vault, relative_path: &str) -> Result<()> {
     if trash_source.exists() {
         fs::remove_file(&trash_source).map_err(VaultError::from)?;
     }
-    if let Ok(sidecar_rel) = sidecar_path_for(&relative) {
+    for sidecar_rel in sidecar_candidates(&relative)? {
         let sidecar_source = vault.root().join(TRASH_DIR).join(sidecar_rel.as_path());
         if sidecar_source.exists() {
             let _ = fs::remove_file(&sidecar_source);
@@ -1243,6 +1351,31 @@ fn run_vault_cleanup(vault: &Vault) -> Result<CleanupVaultResponse> {
     })
 }
 
+/// Whether `directory` holds a non-sidecar file whose stem is `stem`.
+///
+/// Used to tell a genuinely orphaned legacy sidecar apart from one that simply
+/// predates the current naming scheme.
+fn has_sibling_with_stem(directory: &Path, stem: &str) -> bool {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            return false;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if is_sidecar_name(name) {
+            return false;
+        }
+        path.file_stem()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| value == stem)
+    })
+}
+
 fn find_orphaned_sidecars(
     vault: &Vault,
     directory: &Path,
@@ -1265,14 +1398,18 @@ fn find_orphaned_sidecars(
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if name.ends_with(".mediavault.yaml") || name.ends_with(LEGACY_SIDECAR_SUFFIX) {
+        if name.ends_with(SIDECAR_SUFFIX) || name.ends_with(LEGACY_SIDECAR_SUFFIX) {
             // Derive the expected media filename by stripping the sidecar suffix.
-            let media_path = if name.ends_with(".mediavault.yaml") {
-                path.with_file_name(name.trim_end_matches(".mediavault.yaml"))
+            let stripped = if name.ends_with(SIDECAR_SUFFIX) {
+                name.trim_end_matches(SIDECAR_SUFFIX)
             } else {
-                path.with_file_name(name.trim_end_matches(LEGACY_SIDECAR_SUFFIX))
+                name.trim_end_matches(LEGACY_SIDECAR_SUFFIX)
             };
-            if !media_path.exists() {
+            let media_path = path.with_file_name(stripped);
+            // Sidecars written before the suffix was appended carry the media
+            // file's *stem* only (`Film.mediavault.yaml` for `Film.mkv`), so a
+            // missing exact match does not yet mean the sidecar is orphaned.
+            if !media_path.exists() && !has_sibling_with_stem(directory, stripped) {
                 issues.push(CleanupIssue {
                     kind: "orphaned_sidecar".to_string(),
                     path: path.display().to_string(),
@@ -1690,19 +1827,18 @@ fn build_error_plan(note: String, vault_root: Option<String>) -> DemoPlanRespons
 }
 
 fn summarize_demo_plan(plan: &ImportPlan) -> DemoSummary {
-    let mut summary = DemoSummary::default();
-    summary.total_files = plan.items.len();
-    summary.items_needing_review = plan
+    let total_files = plan.items.len();
+    let items_needing_review = plan
         .items
         .iter()
         .filter(|item| requires_review(item))
         .count();
-    summary.duplicates = plan
+    let duplicates = plan
         .items
         .iter()
         .filter(|item| item.duplicate_of.is_some())
         .count();
-    summary.planned_moves = plan
+    let planned_moves = plan
         .items
         .iter()
         .filter(|item| {
@@ -1711,7 +1847,7 @@ fn summarize_demo_plan(plan: &ImportPlan) -> DemoSummary {
                 .any(|step| matches!(step, PlannedImportStep::MoveFile { .. }))
         })
         .count();
-    summary.planned_sidecars = plan
+    let planned_sidecars = plan
         .items
         .iter()
         .filter(|item| {
@@ -1720,7 +1856,7 @@ fn summarize_demo_plan(plan: &ImportPlan) -> DemoSummary {
                 .any(|step| matches!(step, PlannedImportStep::WriteSidecar { .. }))
         })
         .count();
-    summary.planned_api_fetches = plan
+    let planned_api_fetches = plan
         .items
         .iter()
         .map(|item| {
@@ -1730,9 +1866,21 @@ fn summarize_demo_plan(plan: &ImportPlan) -> DemoSummary {
                 .count()
         })
         .sum();
-    summary.smart_collections = 3;
-    summary
+
+    DemoSummary {
+        total_files,
+        items_needing_review,
+        duplicates,
+        planned_moves,
+        planned_sidecars,
+        planned_api_fetches,
+        // Placeholder until smart collections are computed from the index.
+        smart_collections: DEFAULT_SMART_COLLECTIONS,
+    }
 }
+
+/// Number of built-in smart collections reported by the plan summary.
+const DEFAULT_SMART_COLLECTIONS: usize = 3;
 
 #[derive(Debug, Clone, Serialize)]
 struct DemoPlanResponse {
@@ -2327,7 +2475,7 @@ fn build_collection_path(
     match media_type {
         MediaType::Anime | MediaType::HentaiAnime => {
             if is_anilist_movie(anilist) {
-                let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+                let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
                 let y =
                     year_suffix(year.or_else(|| anilist.and_then(|a| a.start_date.as_ref()?.year)));
                 return format!("Anime/Filme/{t}{y}");
@@ -2342,7 +2490,7 @@ fn build_collection_path(
                 .unwrap_or(1);
             format!(
                 "Anime/Serien/{}/Staffel {}",
-                sanitize_path_segment(series),
+                safe_folder_segment(series, "Unbenannt"),
                 season_number
             )
         }
@@ -2356,37 +2504,37 @@ fn build_collection_path(
                 .unwrap_or(1);
             format!(
                 "Serien/{}/Staffel {}",
-                sanitize_path_segment(series),
+                safe_folder_segment(series, "Unbekannte Serie"),
                 season_number
             )
         }
         MediaType::Film => {
-            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("Filme/{t}{y}")
         }
         // Books and Ebooks: Bücher/<Title (Year)>/  — Author subfolder added once OpenLibrary
         // metadata is available.
         MediaType::Book | MediaType::Ebook => {
-            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("Bücher/{t}{y}")
         }
         MediaType::Audiobook => {
-            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("Hörbücher/{t}{y}")
         }
         // Music: Musik/<Title (Year)>/  — Artist subfolder added once MusicBrainz metadata is
         // available.
         MediaType::MusicAlbum | MediaType::MusicTrack => {
-            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("Musik/{t}{y}")
         }
         _ => {
             let folder = media_type.folder_segment();
-            let t = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+            let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("{folder}/{t}{y}")
         }
@@ -2409,7 +2557,7 @@ fn build_target_path_preview(
     }
 
     if is_anime && is_anilist_movie(anilist) {
-        let movie_title = sanitize_path_segment(title.unwrap_or("Unbenannt"));
+        let movie_title = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
         let year = file
             .metadata
             .as_ref()
@@ -2440,7 +2588,7 @@ fn build_target_path_preview(
         .and_then(|context| context.season_number)
         .unwrap_or(1);
     let episode_label = anime_context
-        .and_then(|context| format_episode_label(context))
+        .and_then(format_episode_label)
         .unwrap_or_else(|| {
             file.source_path
                 .file_stem()
@@ -2460,13 +2608,12 @@ fn build_target_path_preview(
     } else {
         PathBuf::from("Serien")
     };
-    path.push(sanitize_path_segment(series_title));
+    path.push(safe_folder_segment(series_title, "Unbenannt"));
     path.push(format!("Staffel {season_number}"));
+    let safe_label = safe_folder_segment(&episode_label, "Unbenannt");
     let file_name = match extension {
-        Some(extension) if !extension.is_empty() => {
-            format!("{}.{}", sanitize_path_segment(&episode_label), extension)
-        }
-        _ => sanitize_path_segment(&episode_label),
+        Some(extension) if !extension.is_empty() => format!("{safe_label}.{extension}"),
+        _ => safe_label,
     };
     path.push(file_name);
     Some(path.display().to_string())
@@ -2834,6 +2981,25 @@ fn trailing_number(value: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
+/// Longest path segment we generate. Well below the 255-byte limit of APFS,
+/// ext4 and NTFS even after multi-byte characters are counted.
+const MAX_PATH_SEGMENT_CHARS: usize = 120;
+
+/// Names Windows refuses to use for a file or directory, with or without an
+/// extension. Checked case-insensitively so vaults stay portable.
+const RESERVED_SEGMENT_NAMES: &[&str] = &[
+    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+];
+
+/// Turns arbitrary text into a single, safe path segment.
+///
+/// Besides replacing separators and control characters this guarantees the
+/// result can never act as a path operator: leading dots are stripped (so
+/// neither `.`/`..` nor hidden folders can be produced) and the length is
+/// capped. An input that carries no usable characters yields an **empty**
+/// string — callers that build real paths must treat that as "no name" and
+/// substitute their own fallback (see [`safe_folder_segment`]).
 fn sanitize_path_segment(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
 
@@ -2846,11 +3012,50 @@ fn sanitize_path_segment(value: &str) -> String {
         sanitized.push(replacement);
     }
 
-    sanitized
+    // Separators became spaces above, so a path like "../../etc" now reads
+    // ".. .. etc" — drop the dot-only remnants instead of carrying them into
+    // the name.
+    let collapsed = sanitized
         .split_whitespace()
-        .filter(|part| !part.is_empty())
+        .filter(|part| !part.is_empty() && !part.chars().all(|character| character == '.'))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+
+    // Leading dots are what turn a title into a path operator (`..`) or into a
+    // hidden entry; trailing dots/spaces are rejected by Windows.
+    let trimmed = collapsed
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim();
+
+    // Truncate on a character boundary, then re-trim in case the cut exposed
+    // trailing dots or spaces.
+    let capped: String = trimmed.chars().take(MAX_PATH_SEGMENT_CHARS).collect();
+    let capped = capped.trim_end_matches(['.', ' ']).to_string();
+
+    if RESERVED_SEGMENT_NAMES
+        .iter()
+        .any(|reserved| capped.eq_ignore_ascii_case(reserved))
+    {
+        return format!("{capped}_");
+    }
+
+    capped
+}
+
+/// Returns a safe folder segment for `value`, falling back to `fallback` when
+/// the sanitized name would be empty.
+///
+/// Used wherever a name derived from **remote** data (a scraped novel title)
+/// becomes a real directory: an empty segment would silently resolve to the
+/// parent directory, which turns a per-novel delete into a delete of the whole
+/// library.
+fn safe_folder_segment(value: &str, fallback: &str) -> String {
+    let sanitized = sanitize_path_segment(value);
+    if sanitized.is_empty() {
+        return fallback.to_string();
+    }
+    sanitized
 }
 
 fn classification_source_label(source: &ClassificationSource) -> String {
@@ -3022,21 +3227,54 @@ fn write_sidecar_preview(
     fs::create_dir_all(sidecar_parent).map_err(VaultError::from)?;
     fs::write(&sidecar_absolute, sidecar_preview.as_bytes()).map_err(VaultError::from)?;
 
-    let mut legacy_relative = media_relative.to_path_buf();
-    legacy_relative.set_extension("mediashelf.yaml");
-    let legacy_absolute = vault.resolve(legacy_relative)?;
-    if legacy_absolute.exists() {
-        fs::remove_file(legacy_absolute).map_err(VaultError::from)?;
+    // Drop sidecars written under an older naming scheme so a file never has
+    // two competing metadata records. Best effort: the new sidecar is already
+    // on disk, and failing to remove a stale one must not fail the save.
+    for stale in sidecar_candidates(media_relative)?
+        .into_iter()
+        .skip(1)
+        .filter_map(|candidate| vault.resolve(candidate.as_path()).ok())
+    {
+        if stale != sidecar_absolute && stale.exists() {
+            let _ = fs::remove_file(stale);
+        }
     }
 
     Ok(())
 }
 
+/// Moves a file, falling back to copy+delete across filesystem boundaries.
+///
+/// The fallback copies to a `.part` sibling first, flushes it to disk and only
+/// then renames it into place. A crash or a full disk therefore leaves either
+/// the untouched source or a complete target — never a truncated file under
+/// the final name.
 fn move_file_with_fallback(source: &Path, target: &Path) -> Result<()> {
     match fs::rename(source, target) {
         Ok(()) => Ok(()),
         Err(error) if is_cross_device_error(&error) => {
-            fs::copy(source, target).map_err(VaultError::from)?;
+            let staging = partial_copy_path(target);
+            // A leftover from an earlier aborted run must not be reused.
+            let _ = fs::remove_file(&staging);
+
+            fs::copy(source, &staging).map_err(|error| {
+                let _ = fs::remove_file(&staging);
+                VaultError::from(error)
+            })?;
+
+            // Without the flush the rename can be visible before the contents
+            // are, so a power loss would leave an empty file in the library.
+            let flushed = fs::File::open(&staging).and_then(|file| file.sync_all());
+            if let Err(error) = flushed {
+                let _ = fs::remove_file(&staging);
+                return Err(VaultError::from(error));
+            }
+
+            if let Err(error) = fs::rename(&staging, target) {
+                let _ = fs::remove_file(&staging);
+                return Err(VaultError::from(error));
+            }
+
             fs::remove_file(source).map_err(VaultError::from)?;
             Ok(())
         }
@@ -3044,17 +3282,57 @@ fn move_file_with_fallback(source: &Path, target: &Path) -> Result<()> {
     }
 }
 
-fn is_cross_device_error(error: &std::io::Error) -> bool {
-    const EXDEV_OS_ERROR: i32 = 18;
-    error.raw_os_error() == Some(EXDEV_OS_ERROR)
+/// Extension appended to the temporary file used while copying across devices.
+const PARTIAL_COPY_EXTENSION: &str = "mediavault-part";
+
+/// Returns the staging path for `target` (`<target>.mediavault-part`).
+///
+/// The suffix is appended rather than replacing the extension so that
+/// `Film.mkv` and `Film.mp4` cannot stage onto the same temporary file.
+fn partial_copy_path(target: &Path) -> PathBuf {
+    let mut staging = target.as_os_str().to_owned();
+    staging.push(".");
+    staging.push(PARTIAL_COPY_EXTENSION);
+    PathBuf::from(staging)
 }
 
+/// `EXDEV` — source and target live on different filesystems.
+#[cfg(unix)]
+const CROSS_DEVICE_OS_ERROR: i32 = 18;
+/// `ERROR_NOT_SAME_DEVICE`.
+#[cfg(windows)]
+const CROSS_DEVICE_OS_ERROR: i32 = 17;
+
+/// Whether an I/O error means "source and target are on different filesystems".
+#[cfg(any(unix, windows))]
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(CROSS_DEVICE_OS_ERROR)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_cross_device_error(_error: &std::io::Error) -> bool {
+    false
+}
+
+/// Removes now-empty directories left behind after a file moved out.
+///
+/// Walks upwards and stops at the inbox root, the vault root, or as soon as a
+/// directory is non-empty. The boundaries are compared on canonical paths:
+/// callers pass paths that went through `resolve_existing`, and on macOS a
+/// vault below a symlinked prefix (`/tmp` → `/private/tmp`) would otherwise
+/// never match the boundary and the walk would continue *above* the vault.
 fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
-    let inbox_root = vault.inbox_dir();
-    let mut current = start.map(Path::to_path_buf);
+    let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let inbox_root = canonical(&vault.inbox_dir());
+    let vault_root = canonical(vault.root());
+    let mut current = start.map(canonical);
 
     while let Some(path) = current {
-        if path == inbox_root || path == vault.root() {
+        if path == inbox_root || path == vault_root {
+            break;
+        }
+        // Never touch anything outside the vault, whatever the caller passed.
+        if !path.starts_with(&vault_root) {
             break;
         }
 
@@ -3077,7 +3355,14 @@ fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
 
 fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {
     if let Some(root) = normalized_override(root_override) {
-        return Ok(Some(resolve_existing_root(root)?));
+        let resolved = resolve_existing_root(root)?;
+        if !is_authorized_root(&resolved) {
+            return Err(VaultError::InvalidVaultPath(format!(
+                "vault root is not authorized: {}",
+                resolved.display()
+            )));
+        }
+        return Ok(Some(resolved));
     }
 
     if let Ok(root) = env::var("MEDIAVAULT_VAULT_ROOT") {
@@ -3144,7 +3429,7 @@ fn load_app_state() -> Result<AppState> {
 fn save_app_state(state: &AppState) -> Result<()> {
     let path = app_state_path()?;
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(VaultError::from)?;
+        ensure_private_dir(parent);
     }
 
     let body = serde_json::to_string_pretty(state)
@@ -3179,6 +3464,58 @@ fn looks_like_vault_root(path: &Path) -> bool {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 struct AppState {
     vault_root: Option<String>,
+    /// Vault roots the user has explicitly opened or created.
+    ///
+    /// Requests may carry a `root=` override; it is honoured only for entries
+    /// in this list, so a stray or manipulated parameter cannot point the file
+    /// endpoints at arbitrary directories.
+    #[serde(default)]
+    known_roots: Vec<String>,
+}
+
+/// How many previously opened vault roots stay authorized.
+const MAX_KNOWN_ROOTS: usize = 16;
+
+/// Records a vault root as user-approved.
+fn register_known_root(state: &mut AppState, root: &Path) {
+    let value = root.display().to_string();
+    if state.known_roots.iter().any(|known| known == &value) {
+        return;
+    }
+    state.known_roots.push(value);
+    if state.known_roots.len() > MAX_KNOWN_ROOTS {
+        let excess = state.known_roots.len() - MAX_KNOWN_ROOTS;
+        state.known_roots.drain(0..excess);
+    }
+}
+
+/// Whether `root` may be used as a `root=` override.
+///
+/// Authorized are: the currently saved vault, every root the user opened or
+/// created before, and the `MEDIAVAULT_VAULT_ROOT` environment override. When
+/// no state file can be read the check cannot be made and the root is allowed,
+/// so a missing home directory degrades to the previous behavior instead of
+/// locking the user out of their library.
+fn is_authorized_root(root: &Path) -> bool {
+    let Ok(state) = load_app_state() else {
+        return true;
+    };
+
+    let matches = |candidate: &str| {
+        resolve_existing_root(PathBuf::from(candidate))
+            .map(|resolved| resolved == root)
+            .unwrap_or(false)
+    };
+
+    if state.vault_root.as_deref().is_some_and(matches) {
+        return true;
+    }
+    if state.known_roots.iter().any(|known| matches(known)) {
+        return true;
+    }
+    env::var("MEDIAVAULT_VAULT_ROOT")
+        .ok()
+        .is_some_and(|configured| matches(&configured))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3310,7 +3647,7 @@ fn should_skip_scanned_file(path: &Path) -> bool {
 
     let lower = name.to_lowercase();
     is_hidden_system_entry(name)
-        || name.ends_with(".mediavault.yaml")
+        || name.ends_with(SIDECAR_SUFFIX)
         || name.ends_with(LEGACY_SIDECAR_SUFFIX)
         // NFO files are metadata companions, not independent media entries.
         || lower.ends_with(".nfo")
@@ -3387,7 +3724,7 @@ fn prettify_folder_title(raw: &str) -> String {
         .join(" ")
 }
 
-fn group_audiobook_folders(items: &mut Vec<DemoPlanItem>, vault_root: Option<&Path>) {
+fn group_audiobook_folders(items: &mut [DemoPlanItem], vault_root: Option<&Path>) {
     // Group item indices by parent directory, counting only Audiobook items.
     let mut dir_groups: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -3538,7 +3875,7 @@ fn parse_id3v2_tags(data: &[u8]) -> Option<AudioTagData> {
     }
     let version = data[3];
     // Only handle v2.3 and v2.4; v2.2 uses 3-byte frame IDs (rare today).
-    if version < 3 || version > 4 {
+    if !(3..=4).contains(&version) {
         return None;
     }
     let flags = data[5];
@@ -3828,20 +4165,41 @@ fn merge_nfo_into_sidecar(
     Some(result)
 }
 
+/// Finds an existing sidecar for a media file, newest naming scheme first.
+///
+/// Three shapes are recognised, in priority order:
+/// 1. `Film.mkv.mediavault.yaml` — current
+/// 2. `Film.mediavault.yaml` — pre-1.0, replaced the extension
+/// 3. `Film.mediashelf.yaml` — pre-rename
+///
+/// Older files are only read; writing always produces shape 1 (see
+/// [`write_sidecar_preview`]).
 fn find_sidecar_file(vault: &Vault, media_path: &RelativePath) -> Result<Option<PathBuf>> {
-    let current = vault.resolve(sidecar_path_for(media_path)?.as_path())?;
-    if current.exists() {
-        return Ok(Some(current));
-    }
-
-    let mut legacy_relative = media_path.to_path_buf();
-    legacy_relative.set_extension("mediashelf.yaml");
-    let legacy = vault.resolve(legacy_relative)?;
-    if legacy.exists() {
-        return Ok(Some(legacy));
+    for candidate in sidecar_candidates(media_path)? {
+        let absolute = vault.resolve(candidate.as_path())?;
+        if absolute.exists() {
+            return Ok(Some(absolute));
+        }
     }
 
     Ok(None)
+}
+
+/// All sidecar paths that may exist for a media file, current shape first.
+fn sidecar_candidates(media_path: &RelativePath) -> Result<Vec<RelativePath>> {
+    let mut candidates = vec![sidecar_path_for(media_path)?];
+
+    if let Ok(legacy) = legacy_sidecar_path_for(media_path) {
+        candidates.push(legacy);
+    }
+
+    let mut pre_rename = media_path.to_path_buf();
+    pre_rename.set_extension("mediashelf.yaml");
+    if let Ok(pre_rename) = RelativePath::new(pre_rename) {
+        candidates.push(pre_rename);
+    }
+
+    Ok(candidates)
 }
 
 fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassification> {
@@ -3854,11 +4212,11 @@ fn classification_from_sidecar(sidecar: &ParsedSidecar) -> Option<FileClassifica
 
 fn parse_sidecar_metadata(raw: &str) -> Result<ParsedSidecar> {
     let mut sidecar = ParsedSidecar::default();
-    let mut lines = raw.lines();
+    let lines = raw.lines();
     // Tracks which list ("genres"/"tags") the following "- item" lines feed.
     let mut active_list: Option<&str> = None;
 
-    while let Some(line) = lines.next() {
+    for line in lines {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed == "---" {
             active_list = None;
@@ -4421,6 +4779,31 @@ impl OpenExternalResponse {
     }
 }
 
+/// File types `/api/open-external` may hand to the operating system.
+///
+/// An allowlist rather than a denylist: the vault holds files that arrived
+/// from imports and from web downloads, and handing an arbitrary one to `open`
+/// is equivalent to double-clicking it — a `.app`, `.command`, `.pkg` or
+/// `.terminal` would execute code.
+const OPENABLE_EXTENSIONS: &[&str] = &[
+    // Video
+    "mp4", "m4v", "mkv", "avi", "mov", "webm", "mpg", "mpeg", "wmv", "flv", "ts", "m2ts",
+    // Audio
+    "mp3", "m4a", "m4b", "flac", "ogg", "opus", "wav", "aac", "wma", "aiff",
+    // Documents / books
+    "pdf", "epub", "mobi", "azw3", "cbz", "cbr", "txt", "md", "yaml", "yml", "json", "nfo", "srt",
+    "vtt", "ass", // Images
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "avif",
+];
+
+/// Whether a path carries an extension from [`OPENABLE_EXTENSIONS`].
+fn is_openable_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| OPENABLE_EXTENSIONS.contains(&extension.as_str()))
+}
+
 fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {
     let query = match query {
         Some(q) => q,
@@ -4449,10 +4832,16 @@ fn build_open_external_response(query: Option<&str>) -> OpenExternalResponse {
         Err(e) => return OpenExternalResponse::error(e.to_string()),
     };
 
-    let absolute = match vault.resolve(relative.as_path()) {
+    let absolute = match vault.resolve_existing(relative.as_path()) {
         Ok(p) => p,
         Err(e) => return OpenExternalResponse::error(e.to_string()),
     };
+
+    if !is_openable_extension(&absolute) {
+        return OpenExternalResponse::error(
+            "Dieser Dateityp wird aus Sicherheitsgründen nicht geöffnet.".to_string(),
+        );
+    }
 
     // `open` on macOS launches the file with the default app; equivalent to
     // double-clicking in Finder. This is fire-and-forget — we only care that
@@ -4633,7 +5022,7 @@ fn build_recent_items_response(query: Option<&str>) -> RecentItemsResponse {
         })
         .collect();
 
-    with_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+    with_mtime.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
     let items = with_mtime
         .into_iter()
@@ -5326,17 +5715,28 @@ impl AbsSyncProgressResponse {
     }
 }
 
-fn build_abs_test_response(query: Option<&str>) -> AbsTestResponse {
-    let query = match query {
-        Some(q) => q,
-        None => return AbsTestResponse::error("missing query"),
+/// Credentials and target for an Audiobookshelf call.
+///
+/// Sent in the request **body**, never as query parameters: the API key would
+/// otherwise sit in a URL and end up in logs and crash reports.
+#[derive(Deserialize)]
+struct AbsRequest {
+    /// Server root URL, e.g. `http://localhost:13378`.
+    url: String,
+    /// ABS API key.
+    #[serde(default)]
+    key: String,
+    /// Library id — only used by `/api/abs/library-items`.
+    #[serde(default)]
+    library: String,
+}
+
+fn build_abs_test_response(body: &[u8]) -> AbsTestResponse {
+    let req: AbsRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => return AbsTestResponse::error(format!("Invalid request: {error}")),
     };
-    let url = match extract_query_value(query, "url") {
-        Some(u) => u,
-        None => return AbsTestResponse::error("missing url"),
-    };
-    let key = extract_query_value(query, "key").unwrap_or_default();
-    match AbsClient::new(url, key) {
+    match AbsClient::new(req.url, req.key) {
         Ok(client) => match client.test_connection() {
             Ok(()) => AbsTestResponse::ok(),
             Err(e) => AbsTestResponse::error(e.to_string()),
@@ -5345,27 +5745,17 @@ fn build_abs_test_response(query: Option<&str>) -> AbsTestResponse {
     }
 }
 
-fn build_abs_libraries_response(query: Option<&str>) -> AbsLibrariesResponse {
-    let query = match query {
-        Some(q) => q,
-        None => {
+fn build_abs_libraries_response(body: &[u8]) -> AbsLibrariesResponse {
+    let req: AbsRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => {
             return AbsLibrariesResponse {
                 libraries: vec![],
-                error: Some("missing query".into()),
+                error: Some(format!("Invalid request: {error}")),
             }
         }
     };
-    let url = match extract_query_value(query, "url") {
-        Some(u) => u,
-        None => {
-            return AbsLibrariesResponse {
-                libraries: vec![],
-                error: Some("missing url".into()),
-            }
-        }
-    };
-    let key = extract_query_value(query, "key").unwrap_or_default();
-    match AbsClient::new(url, key) {
+    match AbsClient::new(req.url, req.key) {
         Ok(client) => match client.list_libraries() {
             Ok(libraries) => AbsLibrariesResponse {
                 libraries,
@@ -5383,36 +5773,24 @@ fn build_abs_libraries_response(query: Option<&str>) -> AbsLibrariesResponse {
     }
 }
 
-fn build_abs_library_items_response(query: Option<&str>) -> AbsLibraryItemsResponse {
-    let query = match query {
-        Some(q) => q,
-        None => {
+fn build_abs_library_items_response(body: &[u8]) -> AbsLibraryItemsResponse {
+    let req: AbsRequest = match serde_json::from_slice(body) {
+        Ok(req) => req,
+        Err(error) => {
             return AbsLibraryItemsResponse {
                 items: vec![],
-                error: Some("missing query".into()),
+                error: Some(format!("Invalid request: {error}")),
             }
         }
     };
-    let url = match extract_query_value(query, "url") {
-        Some(u) => u,
-        None => {
-            return AbsLibraryItemsResponse {
-                items: vec![],
-                error: Some("missing url".into()),
-            }
-        }
-    };
-    let key = extract_query_value(query, "key").unwrap_or_default();
-    let library_id = match extract_query_value(query, "library") {
-        Some(id) => id,
-        None => {
-            return AbsLibraryItemsResponse {
-                items: vec![],
-                error: Some("missing library".into()),
-            }
-        }
-    };
-    match AbsClient::new(url, key) {
+    if req.library.trim().is_empty() {
+        return AbsLibraryItemsResponse {
+            items: vec![],
+            error: Some("missing library".into()),
+        };
+    }
+    let library_id = req.library.clone();
+    match AbsClient::new(req.url, req.key) {
         Ok(client) => match client.list_library_items(&library_id) {
             Ok(items) => AbsLibraryItemsResponse { items, error: None },
             Err(e) => AbsLibraryItemsResponse {
@@ -5480,6 +5858,9 @@ struct WebnovelJobStatus {
     /// Final summary or error message once the job is terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    /// When the job reached a terminal state — drives cleanup of the registry.
+    #[serde(skip)]
+    finished_at_unix: Option<u64>,
 }
 
 impl WebnovelJobStatus {
@@ -5491,17 +5872,44 @@ impl WebnovelJobStatus {
             total_chapters: 0,
             downloaded: 0,
             message: None,
+            finished_at_unix: None,
         }
+    }
+
+    /// Whether the job has reached a terminal state.
+    fn is_terminal(&self) -> bool {
+        self.state != "running"
     }
 }
 
+/// How long a finished job stays pollable before it is dropped.
+const WEBNOVEL_JOB_RETENTION_SECS: u64 = 10 * 60;
+
 /// Applies a mutation to a job's status under the registry lock.
+///
+/// Stamps the finish time when the mutation makes the job terminal, so
+/// [`prune_webnovel_jobs`] can expire it later.
 fn update_webnovel_job(job_id: &str, apply: impl FnOnce(&mut WebnovelJobStatus)) {
     if let Ok(mut jobs) = WEBNOVEL_JOBS.lock() {
         if let Some(status) = jobs.get_mut(job_id) {
             apply(status);
+            if status.is_terminal() && status.finished_at_unix.is_none() {
+                status.finished_at_unix = Some(unix_now());
+            }
         }
     }
+}
+
+/// Drops finished jobs the frontend can no longer be waiting for.
+///
+/// Without this the registry only ever grows — every check run leaves one
+/// entry behind for the lifetime of the process.
+fn prune_webnovel_jobs(jobs: &mut HashMap<String, WebnovelJobStatus>) {
+    let now = unix_now();
+    jobs.retain(|_, status| match status.finished_at_unix {
+        Some(finished) => now.saturating_sub(finished) < WEBNOVEL_JOB_RETENTION_SECS,
+        None => true,
+    });
 }
 
 /// Clears the "check running" flag when a worker thread ends — even if the
@@ -5562,8 +5970,8 @@ impl WebnovelSubscriptionSummary {
     fn from_subscription(subscription: &Subscription, vault: &Vault) -> Self {
         // Detail views want the cover; resolve the cached file (if any) to a
         // vault-relative path the frontend can feed into /api/media-file.
-        let cover_path = load_novel_cover_path(&webnovel_folder(vault, &subscription.title))
-            .and_then(|absolute| {
+        let cover_path =
+            load_novel_cover_path(&webnovel_folder(vault, subscription)).and_then(|absolute| {
                 vault
                     .relative_from_absolute(&absolute)
                     .ok()
@@ -5734,6 +6142,10 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
     }
 
     let mut subscription = Subscription::new(url, source.id(), info.title.clone());
+    // Pin the folder now: the title may change upstream later, and two novels
+    // can sanitize to the same segment — both would otherwise end up sharing
+    // one directory (and one chapter cache).
+    subscription.folder_name = Some(unique_novel_folder_name(&vault, &subscription));
     subscription.author = info.author.clone();
     subscription.cover_url = info.cover_url.clone();
     subscription.description = info.description.clone();
@@ -5821,13 +6233,9 @@ fn build_webnovel_unsubscribe_response(body: &[u8]) -> WebnovelSimpleResponse {
     if !req.keep_files {
         // Files move into the vault .trash folder (same convention as
         // delete-files) instead of being removed — reversible via restore.
-        let novel_dir = webnovel_folder(&vault, &subscription.title);
+        let novel_dir = webnovel_folder(&vault, &subscription);
         if novel_dir.exists() {
-            let trash_target = vault
-                .root()
-                .join(".trash")
-                .join(MediaType::Webnovel.folder_segment())
-                .join(sanitize_path_segment(&subscription.title));
+            let trash_target = webnovel_trash_folder(&vault, &subscription);
             if let Some(parent) = trash_target.parent() {
                 fs::create_dir_all(parent).ok();
             }
@@ -5846,12 +6254,12 @@ fn build_webnovel_unsubscribe_response(body: &[u8]) -> WebnovelSimpleResponse {
 }
 
 /// Vault-trash location of a novel's files.
-fn webnovel_trash_folder(vault: &Vault, title: &str) -> PathBuf {
+fn webnovel_trash_folder(vault: &Vault, subscription: &Subscription) -> PathBuf {
     vault
         .root()
-        .join(".trash")
+        .join(TRASH_DIR)
         .join(MediaType::Webnovel.folder_segment())
-        .join(sanitize_path_segment(title))
+        .join(novel_folder_name(subscription))
 }
 
 #[derive(Serialize)]
@@ -5890,7 +6298,7 @@ fn build_webnovel_trash_response(query: Option<&str>) -> WebnovelTrashResponse {
                     id: subscription.id.clone(),
                     title: subscription.title.clone(),
                     trashed_at_unix: subscription.trashed_at_unix,
-                    files_in_trash: webnovel_trash_folder(&vault, &subscription.title).exists(),
+                    files_in_trash: webnovel_trash_folder(&vault, subscription).exists(),
                 })
                 .collect(),
             error: None,
@@ -5923,9 +6331,9 @@ fn build_webnovel_restore_response(body: &[u8]) -> WebnovelSimpleResponse {
         Err(error) => return WebnovelSimpleResponse::error(error.to_string()),
     };
     // Bring trashed files back, if any.
-    let trash_source = webnovel_trash_folder(&vault, &subscription.title);
+    let trash_source = webnovel_trash_folder(&vault, &subscription);
     if trash_source.exists() {
-        let target = webnovel_folder(&vault, &subscription.title);
+        let target = webnovel_folder(&vault, &subscription);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).ok();
         }
@@ -5945,20 +6353,19 @@ fn build_webnovel_purge_response(body: &[u8]) -> WebnovelSimpleResponse {
         Ok(vault) => vault,
         Err(message) => return WebnovelSimpleResponse::error(message),
     };
-    // Need the title before purging the record to find the trashed folder.
-    let title = list_trashed_subscriptions(&vault.system_dir())
+    // Need the record before purging it to find its trashed folder.
+    let trashed = list_trashed_subscriptions(&vault.system_dir())
         .ok()
         .and_then(|entries| {
             entries
                 .into_iter()
                 .find(|subscription| subscription.id == req.id)
-                .map(|subscription| subscription.title)
         });
     if let Err(error) = purge_trashed_subscription(&vault.system_dir(), &req.id) {
         return WebnovelSimpleResponse::error(error.to_string());
     }
-    if let Some(title) = title {
-        let folder = webnovel_trash_folder(&vault, &title);
+    if let Some(subscription) = trashed {
+        let folder = webnovel_trash_folder(&vault, &subscription);
         if folder.exists() {
             fs::remove_dir_all(&folder).ok();
         }
@@ -6112,6 +6519,7 @@ fn build_webnovel_check_response(body: &[u8]) -> WebnovelCheckResponse {
         WEBNOVEL_JOB_COUNTER.fetch_add(1, Ordering::SeqCst)
     );
     if let Ok(mut jobs) = WEBNOVEL_JOBS.lock() {
+        prune_webnovel_jobs(&mut jobs);
         jobs.insert(job_id.clone(), WebnovelJobStatus::running());
     }
 
@@ -6359,7 +6767,7 @@ fn check_one_subscription(
         }
     }
 
-    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let novel_dir = webnovel_folder(vault, subscription);
     let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
     fs::create_dir_all(&cache_dir).map_err(VaultError::from)?;
 
@@ -6472,7 +6880,7 @@ fn check_one_subscription(
     }
     // The complete EPUB is also rebuilt when it is missing entirely or when a
     // cover arrived after the last build (covers embed into the EPUB itself).
-    let safe_title = sanitize_path_segment(&subscription.title);
+    let safe_title = novel_folder_name(subscription);
     let complete_file = format!("{safe_title}.epub");
     let complete_missing = !novel_dir.join(&complete_file).exists();
     if options.build_complete && (!downloaded_indices.is_empty() || cover_added || complete_missing)
@@ -6624,11 +7032,53 @@ fn load_novel_cover(novel_dir: &Path) -> Option<EpubCover> {
 }
 
 /// The novel's folder inside the vault: `Webnovels/<safe title>/`.
-fn webnovel_folder(vault: &Vault, title: &str) -> PathBuf {
+/// Returns the directory name for a subscription's files.
+///
+/// Prefers the name pinned at subscribe time; records written before that
+/// field existed fall back to the title. The result is always a single, safe
+/// segment — never empty, never `.`/`..` — so joining it can only ever descend
+/// one level. Without that guarantee a novel whose scraped title sanitizes to
+/// nothing would resolve to the parent directory and a per-novel delete would
+/// take the whole library with it.
+fn novel_folder_name(subscription: &Subscription) -> String {
+    if let Some(pinned) = subscription.folder_name.as_deref() {
+        let sanitized = sanitize_path_segment(pinned);
+        if !sanitized.is_empty() {
+            return sanitized;
+        }
+    }
+    safe_folder_segment(
+        &subscription.title,
+        &format!("novel_{}", subscription.id.trim()),
+    )
+}
+
+/// Picks a folder name that no other subscription already uses.
+///
+/// Distinct novels can sanitize to the same segment ("Re:Zero" / "Re Zero");
+/// the loser of that race would otherwise write its EPUBs and chapter cache
+/// into the winner's directory. The subscription id disambiguates.
+fn unique_novel_folder_name(vault: &Vault, subscription: &Subscription) -> String {
+    let base = novel_folder_name(subscription);
+    let taken = list_subscriptions(&vault.system_dir())
+        .unwrap_or_default()
+        .iter()
+        .filter(|other| other.id != subscription.id)
+        .any(|other| novel_folder_name(other) == base);
+
+    if taken {
+        format!("{base} ({})", subscription.id)
+    } else {
+        base
+    }
+}
+
+/// Vault location of a novel's files (EPUBs, cover, chapter cache).
+fn webnovel_folder(vault: &Vault, subscription: &Subscription) -> PathBuf {
     vault
         .root()
         .join(MediaType::Webnovel.folder_segment())
-        .join(sanitize_path_segment(title))
+        .join(novel_folder_name(subscription))
 }
 
 /// Cache file name for a chapter index.
@@ -6665,14 +7115,14 @@ fn load_cached_chapters(cache_dir: &Path, indices: &[u32]) -> Result<Vec<EpubCha
 fn build_batch_epub(vault: &Vault, subscription: &Subscription, indices: &[u32]) -> Result<()> {
     let min = indices.iter().min().copied().unwrap_or(0);
     let max = indices.iter().max().copied().unwrap_or(0);
-    let safe_title = sanitize_path_segment(&subscription.title);
+    let safe_title = novel_folder_name(subscription);
     let file_name = if min == max {
         format!("{safe_title} - Kapitel {min:04}.epub")
     } else {
         format!("{safe_title} - Kapitel {min:04}-{max:04}.epub")
     };
 
-    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let novel_dir = webnovel_folder(vault, subscription);
     let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
     let chapters = load_cached_chapters(&cache_dir, indices)?;
 
@@ -6706,11 +7156,11 @@ fn build_complete_epub(vault: &Vault, subscription: &Subscription) -> Result<()>
         return Ok(());
     }
 
-    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let novel_dir = webnovel_folder(vault, subscription);
     let cache_dir = novel_dir.join(WEBNOVEL_CHAPTER_CACHE_DIR);
     let chapters = load_cached_chapters(&cache_dir, &indices)?;
 
-    let safe_title = sanitize_path_segment(&subscription.title);
+    let safe_title = novel_folder_name(subscription);
     let file_name = format!("{safe_title}.epub");
     let meta = EpubMeta {
         title: subscription.title.clone(),
@@ -6743,8 +7193,7 @@ fn merge_webnovel_tags(vault: &Vault, relative: &RelativePath, incoming: &[Strin
     let mut result: Vec<String> = incoming.to_vec();
     let mut seen: HashSet<String> = result.iter().map(|tag| tag.to_lowercase()).collect();
 
-    if let Ok(sidecar_relative) = sidecar_path_for(relative) {
-        let sidecar_path = vault.root().join(sidecar_relative.as_path());
+    if let Ok(Some(sidecar_path)) = find_sidecar_file(vault, relative) {
         if let Ok(raw) = fs::read_to_string(&sidecar_path) {
             if let Ok(existing) = parse_sidecar_metadata(&raw) {
                 for tag in existing.tags {
@@ -6765,7 +7214,7 @@ fn write_webnovel_sidecar(
     entry_id: &str,
     chapter_range: Option<(u32, u32)>,
 ) -> Result<()> {
-    let safe_title = sanitize_path_segment(&subscription.title);
+    let safe_title = novel_folder_name(subscription);
     let relative = RelativePath::new(
         PathBuf::from(MediaType::Webnovel.folder_segment())
             .join(&safe_title)
@@ -6806,7 +7255,7 @@ fn write_webnovel_sidecar(
     }
 
     // Point the sidecar at the cached cover so library views can show it.
-    let novel_dir = webnovel_folder(vault, &subscription.title);
+    let novel_dir = webnovel_folder(vault, subscription);
     if let Some(cover_path) = load_novel_cover_path(&novel_dir) {
         if let Some(cover_name) = cover_path.file_name().and_then(|name| name.to_str()) {
             entry.properties.cover_path = RelativePath::new(
@@ -6819,9 +7268,9 @@ fn write_webnovel_sidecar(
     }
 
     let yaml = render_sidecar_yaml(&entry)?;
-    let sidecar_relative = sidecar_path_for(&relative)?;
-    fs::write(vault.root().join(sidecar_relative.as_path()), yaml).map_err(VaultError::from)?;
-    Ok(())
+    // Shared writer: creates the parent directory and clears sidecars left
+    // behind by older naming schemes.
+    write_sidecar_preview(vault, &relative, &yaml)
 }
 
 /// Opens an external web link in the system browser.
@@ -7059,7 +7508,7 @@ fn build_webnovel_solve_response(body: &[u8]) -> WebnovelSolveResponse {
             let should_probe = if has_clearance {
                 probes_after_clearance < SOLVE_MAX_PROBES
             } else {
-                started.elapsed() >= grace && cycle % 4 == 0
+                started.elapsed() >= grace && cycle.is_multiple_of(4)
             };
 
             if should_probe {
@@ -7211,15 +7660,17 @@ fn load_stored_sessions() -> Vec<StoredSession> {
         .unwrap_or_default()
 }
 
+/// Persists the session store.
+///
+/// The file holds live login cookies for third-party sites, so it is written
+/// with owner-only permissions — the default `0644` would expose every
+/// captured session to any other user or process on the machine.
 fn write_stored_sessions(sessions: &[StoredSession]) {
     let Some(path) = webnovel_sessions_path() else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
     if let Ok(json) = serde_json::to_string_pretty(sessions) {
-        let _ = fs::write(path, json);
+        let _ = write_private_file(&path, &json);
     }
 }
 
@@ -7239,6 +7690,17 @@ fn persist_session(host: &str, session: &BrowserSession) {
 
 /// Loads persisted sessions into the RAM store (called once at startup).
 fn restore_webnovel_sessions() {
+    // Tighten permissions on stores written by older versions, which created
+    // the file with the default (world-readable) mode.
+    if let Some(path) = webnovel_sessions_path() {
+        if path.exists() {
+            restrict_to_owner(&path, false);
+        }
+        if let Some(parent) = path.parent() {
+            restrict_to_owner(parent, true);
+        }
+    }
+
     for entry in load_stored_sessions() {
         set_browser_session(
             &entry.host,
@@ -7519,17 +7981,33 @@ fn debug_log_path() -> Option<PathBuf> {
     )
 }
 
+/// Size at which the debug log is rotated to `<name>.1`.
+const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
 /// Appends a timestamped line to the webnovel debug log (best effort).
+///
+/// The log records every URL the fetcher visits, i.e. a complete reading
+/// history — it is therefore owner-readable only and rotated at
+/// [`DEBUG_LOG_MAX_BYTES`] so it cannot grow without bound.
 fn debug_log(message: &str) {
     let Some(path) = debug_log_path() else {
         return;
     };
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        ensure_private_dir(parent);
     }
+
+    // Rotate before appending: one previous generation is kept.
+    if fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0) >= DEBUG_LOG_MAX_BYTES {
+        let rotated = path.with_extension("log.1");
+        let _ = fs::remove_file(&rotated);
+        let _ = fs::rename(&path, &rotated);
+    }
+
     let line = format!("[{}] {message}\n", unix_now());
     use std::io::Write;
     if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        restrict_to_owner(&path, false);
         let _ = file.write_all(line.as_bytes());
     }
 }
@@ -7542,6 +8020,13 @@ const RENDER_TIMEOUT_SECS: u64 = 45;
 const CHALLENGE_WAIT_SECS: u64 = 180;
 /// Characters of hex per title chunk pulled from the window.
 const TITLE_CHUNK_LEN: usize = 4000;
+/// Largest hex payload accepted from the browser window (≈8 MB of page HTML
+/// before compression). The relay script runs inside the foreign page, so the
+/// page can replace it and announce any size it likes.
+const MAX_RELAY_HEX_LEN: usize = 16 * 1024 * 1024;
+/// Cap for the decompressed HTML, so a crafted gzip stream cannot exhaust
+/// memory.
+const MAX_RENDERED_HTML_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Reflects the current browser-fetch state to the running job's message.
 static CURRENT_JOB_ID: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
@@ -7649,7 +8134,7 @@ const BROWSER_RELAY_SCRIPT: &str = r#"
 
 /// Decodes a lowercase-hex string into bytes.
 fn hex_decode(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     let bytes = hex.as_bytes();
@@ -7699,7 +8184,7 @@ fn navigate_browser_window(handle: &tauri::AppHandle, url: &tauri::Url) {
         let target = serde_json::to_string(url.as_str()).unwrap_or_else(|_| "\"\"".to_string());
         // Invalidate the current page's payload before navigating so a poll
         // that races the navigation reads WAIT, never the previous page.
-        let _ = window.eval(&format!(
+        let _ = window.eval(format!(
             "try{{window.__mvData=null;window.__mvPath='';}}catch(e){{}}window.location.href = {target};"
         ));
     } else {
@@ -7848,6 +8333,12 @@ fn render_page_via_window(url: &str) -> Result<String> {
             if total == 0 {
                 continue;
             }
+            if total > MAX_RELAY_HEX_LEN {
+                debug_log(&format!("render: FAIL Payload zu groß ({total} Zeichen)"));
+                return Err(VaultError::ExternalApi(
+                    "Die Seite hat eine unerwartet große Antwort geliefert.".to_string(),
+                ));
+            }
             // Reject a capture that belongs to the previously loaded page: the
             // relay reports its own `location.pathname`, which must match the
             // page we navigated to. Guards against reading stale content while
@@ -7906,7 +8397,10 @@ fn render_page_via_window(url: &str) -> Result<String> {
             })?;
             let html = if mode == "gz" {
                 use std::io::Read;
-                let mut decoder = flate2::read::GzDecoder::new(&bytes[..]);
+                // `take` bounds the *decompressed* size — the compression
+                // ratio is chosen by the remote page, not by us.
+                let mut decoder =
+                    flate2::read::GzDecoder::new(&bytes[..]).take(MAX_RENDERED_HTML_BYTES);
                 let mut text = String::new();
                 decoder.read_to_string(&mut text).map_err(|e| {
                     debug_log(&format!("render: FAIL gunzip: {e}"));
@@ -7933,5 +8427,85 @@ fn render_page_via_window(url: &str) -> Result<String> {
                 "Seite konnte im Browserfenster nicht gerendert werden (Timeout).".to_string(),
             ));
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn subscription_with_title(title: &str) -> Subscription {
+        Subscription::new("https://example.com/novel", "generic", title)
+    }
+
+    #[test]
+    fn sanitize_strips_path_operators() {
+        assert_eq!(sanitize_path_segment(".."), "");
+        assert_eq!(sanitize_path_segment("."), "");
+        assert_eq!(sanitize_path_segment("../../etc"), "etc");
+        assert_eq!(sanitize_path_segment("///"), "");
+        assert_eq!(sanitize_path_segment(".hidden"), "hidden");
+        assert_eq!(sanitize_path_segment("Normaler Titel"), "Normaler Titel");
+    }
+
+    #[test]
+    fn sanitize_caps_length_and_reserved_names() {
+        let long = "a".repeat(400);
+        assert_eq!(
+            sanitize_path_segment(&long).chars().count(),
+            MAX_PATH_SEGMENT_CHARS
+        );
+        assert_eq!(sanitize_path_segment("CON"), "CON_");
+        assert_eq!(sanitize_path_segment("trailing."), "trailing");
+    }
+
+    #[test]
+    fn safe_folder_segment_uses_fallback_when_unusable() {
+        assert_eq!(safe_folder_segment("..", "Fallback"), "Fallback");
+        assert_eq!(safe_folder_segment("", "Fallback"), "Fallback");
+        assert_eq!(safe_folder_segment("Titel", "Fallback"), "Titel");
+    }
+
+    /// A novel folder must always sit exactly one level below the media-type
+    /// directory — otherwise deleting one novel could delete the library.
+    #[test]
+    fn novel_folder_never_escapes_media_directory() {
+        let vault = Vault::new("/vault").expect("vault root should be valid");
+        let base = vault.root().join(MediaType::Webnovel.folder_segment());
+
+        for title in ["..", ".", "", "///", "../../etc", ".hidden"] {
+            let subscription = subscription_with_title(title);
+
+            let folder = webnovel_folder(&vault, &subscription);
+            assert_eq!(
+                folder.parent(),
+                Some(base.as_path()),
+                "title {title:?} escaped the Webnovel directory"
+            );
+            assert_ne!(folder, base, "title {title:?} resolved to the parent");
+
+            let trash = webnovel_trash_folder(&vault, &subscription);
+            let trash_base = vault
+                .root()
+                .join(TRASH_DIR)
+                .join(MediaType::Webnovel.folder_segment());
+            assert_eq!(trash.parent(), Some(trash_base.as_path()));
+            assert_ne!(trash, trash_base);
+        }
+    }
+
+    #[test]
+    fn novel_folder_prefers_pinned_name() {
+        let mut subscription = subscription_with_title("Neuer Titel");
+        subscription.folder_name = Some("Alter Titel".to_string());
+        assert_eq!(novel_folder_name(&subscription), "Alter Titel");
+
+        // A pinned name is sanitized too — stored records are not trusted.
+        subscription.folder_name = Some("..".to_string());
+        assert_eq!(novel_folder_name(&subscription), "Neuer Titel");
     }
 }

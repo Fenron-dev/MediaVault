@@ -1600,14 +1600,10 @@ function buildTargetPath(item) {
   return `${folderSegment}/${title}${yearSuffix}/${filename}`;
 }
 
+// Mirrors `core::properties::sidecar_path_for`: the suffix is appended to the
+// full file name, so "Film.mkv" and "Film.mp4" keep separate sidecars.
 function buildSidecarPath(targetPath) {
-  const normalized = String(targetPath);
-  const slashIndex = normalized.lastIndexOf("/");
-  const fileName = slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
-  const stemIndex = fileName.lastIndexOf(".");
-  const stem = stemIndex > 0 ? fileName.slice(0, stemIndex) : fileName;
-  const prefix = slashIndex >= 0 ? normalized.slice(0, slashIndex + 1) : "";
-  return `${prefix}${stem}.mediavault.yaml`;
+  return `${String(targetPath)}.mediavault.yaml`;
 }
 
 function yamlScalar(value) {
@@ -2781,6 +2777,17 @@ function absKey() {
   return absKeyInput?.value.trim() || absGetSettings().key;
 }
 
+// The API key travels in the request body, never in the URL — query strings
+// end up in logs and crash reports.
+async function absPost(path, payload) {
+  const res = await fetch(`mediavault://localhost/api/abs/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return res.json();
+}
+
 async function absTest() {
   const url = absUrl();
   const key = absKey();
@@ -2790,10 +2797,7 @@ async function absTest() {
   }
   absSaveSettings(url, key);
   try {
-    const res = await fetch(
-      `mediavault://localhost/api/abs/test?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`
-    );
-    const data = await res.json();
+    const data = await absPost("test", { url, key });
     if (data.ok) {
       if (absFeedback) absFeedback.textContent = "Verbindung erfolgreich.";
       return true;
@@ -2816,10 +2820,7 @@ async function absLoadLibraries() {
   absSaveSettings(url, key);
   if (absFeedback) absFeedback.textContent = "Lade Bibliotheken…";
   try {
-    const res = await fetch(
-      `mediavault://localhost/api/abs/libraries?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}`
-    );
-    const data = await res.json();
+    const data = await absPost("libraries", { url, key });
     if (data.error) {
       if (absFeedback) absFeedback.textContent = `Fehler: ${data.error}`;
       return;
@@ -2846,10 +2847,7 @@ async function absImportLibrary() {
   if (!url || !libraryId) return;
   if (absFeedback) absFeedback.textContent = "Lade Bibliotheksinhalte…";
   try {
-    const res = await fetch(
-      `mediavault://localhost/api/abs/library-items?url=${encodeURIComponent(url)}&key=${encodeURIComponent(key)}&library=${encodeURIComponent(libraryId)}`
-    );
-    const data = await res.json();
+    const data = await absPost("library-items", { url, key, library: libraryId });
     if (data.error) {
       if (absFeedback) absFeedback.textContent = `Fehler: ${data.error}`;
       return;

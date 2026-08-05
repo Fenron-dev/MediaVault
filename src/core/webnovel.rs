@@ -42,6 +42,14 @@ pub struct Subscription {
     pub source: String,
     /// Novel title as reported by the source.
     pub title: String,
+    /// Directory name used for this novel's files inside `<vault>/Webnovels`.
+    ///
+    /// Pinned at subscribe time so a later upstream title change (or a scrape
+    /// that returns an empty title) can never redirect file operations at a
+    /// different folder.  `None` means "derive from the title" and exists only
+    /// for records written before this field was introduced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_name: Option<String>,
     /// Author, if the source exposes one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
@@ -122,6 +130,7 @@ impl Subscription {
             url,
             source: source.into(),
             title: title.into(),
+            folder_name: None,
             author: None,
             cover_url: None,
             description: None,
@@ -170,6 +179,31 @@ pub fn subscription_id(url: &str) -> String {
     format!("{:016x}", fnv1a64(normalize_url(url).as_bytes()))
 }
 
+/// Length of a subscription id in hex characters (FNV-1a-64).
+const SUBSCRIPTION_ID_LEN: usize = 16;
+
+/// Whether a string is a well-formed subscription id.
+///
+/// Ids reach the store straight from request bodies and are interpolated into
+/// file names, so anything that is not exactly the generated shape
+/// (`[0-9a-f]{16}`) is rejected before it can touch the filesystem.
+pub fn is_valid_subscription_id(candidate: &str) -> bool {
+    candidate.len() == SUBSCRIPTION_ID_LEN
+        && candidate
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Returns an error unless `candidate` is a well-formed subscription id.
+fn ensure_valid_subscription_id(candidate: &str) -> Result<()> {
+    if is_valid_subscription_id(candidate) {
+        return Ok(());
+    }
+    Err(VaultError::InvalidProperty(format!(
+        "invalid subscription id: {candidate}"
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // Store operations
 // ---------------------------------------------------------------------------
@@ -185,7 +219,11 @@ pub fn subscription_file_path(system_dir: &Path, subscription_id: &str) -> PathB
 }
 
 /// Loads a subscription by id, if one exists.
+///
+/// # Errors
+/// - `VaultError::InvalidProperty` if `subscription_id` is not a generated id
 pub fn load_subscription(system_dir: &Path, subscription_id: &str) -> Result<Option<Subscription>> {
+    ensure_valid_subscription_id(subscription_id)?;
     let path = subscription_file_path(system_dir, subscription_id);
     if !path.exists() {
         return Ok(None);
@@ -197,7 +235,11 @@ pub fn load_subscription(system_dir: &Path, subscription_id: &str) -> Result<Opt
 }
 
 /// Persists a subscription, creating the store directory if needed.
+///
+/// # Errors
+/// - `VaultError::InvalidProperty` if the record carries a malformed id
 pub fn save_subscription(system_dir: &Path, subscription: &Subscription) -> Result<()> {
+    ensure_valid_subscription_id(&subscription.id)?;
     let dir = webnovels_dir(system_dir);
     fs::create_dir_all(&dir).map_err(VaultError::from)?;
     let path = subscription_file_path(system_dir, &subscription.id);
@@ -224,6 +266,7 @@ pub fn trash_subscription(
     system_dir: &Path,
     subscription_id: &str,
 ) -> Result<Option<Subscription>> {
+    ensure_valid_subscription_id(subscription_id)?;
     let Some(mut subscription) = load_subscription(system_dir, subscription_id)? else {
         return Ok(None);
     };
@@ -240,6 +283,7 @@ pub fn trash_subscription(
 
 /// Restores a trashed subscription back into the active list.
 pub fn restore_subscription(system_dir: &Path, subscription_id: &str) -> Result<Subscription> {
+    ensure_valid_subscription_id(subscription_id)?;
     let path = trashed_file_path(system_dir, subscription_id);
     let raw = fs::read_to_string(&path).map_err(VaultError::from)?;
     let mut subscription: Subscription = serde_json::from_str(&raw)
@@ -272,6 +316,7 @@ pub fn list_trashed_subscriptions(system_dir: &Path) -> Result<Vec<Subscription>
 
 /// Permanently removes a trashed subscription record.
 pub fn purge_trashed_subscription(system_dir: &Path, subscription_id: &str) -> Result<()> {
+    ensure_valid_subscription_id(subscription_id)?;
     let path = trashed_file_path(system_dir, subscription_id);
     if path.exists() {
         fs::remove_file(&path).map_err(VaultError::from)?;
@@ -282,6 +327,7 @@ pub fn purge_trashed_subscription(system_dir: &Path, subscription_id: &str) -> R
 /// Deletes a subscription record.  The novel's downloaded files are NOT
 /// touched — callers decide separately whether to remove the vault folder.
 pub fn delete_subscription(system_dir: &Path, subscription_id: &str) -> Result<()> {
+    ensure_valid_subscription_id(subscription_id)?;
     let path = subscription_file_path(system_dir, subscription_id);
     if path.exists() {
         fs::remove_file(&path).map_err(VaultError::from)?;
@@ -482,6 +528,24 @@ mod tests {
             subscription_id("https://example.com/novel/"),
             subscription_id("https://example.com/novel#toc")
         );
+    }
+
+    #[test]
+    fn subscription_ids_are_validated() {
+        assert!(is_valid_subscription_id(&subscription_id(
+            "https://example.com/novel"
+        )));
+        assert!(!is_valid_subscription_id("../../escape"));
+        assert!(!is_valid_subscription_id("ABCDEF0123456789"));
+        assert!(!is_valid_subscription_id("0123456789abcde"));
+    }
+
+    #[test]
+    fn store_rejects_traversal_ids() {
+        let dir = temp_system_dir("traversal");
+        assert!(load_subscription(&dir, "../../etc/passwd").is_err());
+        assert!(delete_subscription(&dir, "../../etc/passwd").is_err());
+        assert!(purge_trashed_subscription(&dir, "..").is_err());
     }
 
     #[test]

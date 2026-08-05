@@ -7,8 +7,35 @@ use crate::core::vault::RelativePath;
 use crate::error::Result;
 use crate::media::{MediaEntry, MediaProperties};
 
+/// Suffix appended to a media file name to form its sidecar name.
+pub const SIDECAR_SUFFIX: &str = ".mediavault.yaml";
+
 /// Returns the relative sidecar path for a media file.
+///
+/// The suffix is **appended** to the full file name
+/// (`Film.mkv` → `Film.mkv.mediavault.yaml`) rather than replacing the
+/// extension. Replacing it made `Film.mkv` and `Film.mp4` share a single
+/// sidecar, so importing both silently overwrote one file's metadata with the
+/// other's.
+///
+/// See [`legacy_sidecar_path_for`] for the old shape, which is still read.
 pub fn sidecar_path_for(media_path: &RelativePath) -> Result<RelativePath> {
+    let file_name = media_path
+        .file_name()
+        .ok_or(crate::error::VaultError::MissingFileName)?
+        .to_string_lossy()
+        .to_string();
+
+    let mut path = PathBuf::from(media_path.as_path());
+    path.set_file_name(format!("{file_name}{SIDECAR_SUFFIX}"));
+    RelativePath::new(path)
+}
+
+/// Returns the pre-1.0 sidecar path (`Film.mkv` → `Film.mediavault.yaml`).
+///
+/// Vaults written by earlier versions still contain these files; they are read
+/// as a fallback and replaced the next time the sidecar is written.
+pub fn legacy_sidecar_path_for(media_path: &RelativePath) -> Result<RelativePath> {
     let mut path = PathBuf::from(media_path.as_path());
     path.set_extension("mediavault.yaml");
     RelativePath::new(path)
@@ -205,7 +232,24 @@ mod tests {
         let sidecar = sidecar_path_for(&media_path).expect("sidecar path should be valid");
         assert_eq!(
             sidecar.to_string(),
-            "Anime/Violet Evergarden.mediavault.yaml"
+            "Anime/Violet Evergarden.mkv.mediavault.yaml"
+        );
+    }
+
+    /// Same stem, different container: both files must keep their own sidecar.
+    #[test]
+    fn sidecar_paths_do_not_collide_across_extensions() {
+        let mkv = RelativePath::new("Filme/Film.mkv").expect("media path should be valid");
+        let mp4 = RelativePath::new("Filme/Film.mp4").expect("media path should be valid");
+
+        let mkv_sidecar = sidecar_path_for(&mkv).expect("sidecar path should be valid");
+        let mp4_sidecar = sidecar_path_for(&mp4).expect("sidecar path should be valid");
+
+        assert_ne!(mkv_sidecar, mp4_sidecar);
+        assert_eq!(
+            legacy_sidecar_path_for(&mkv).expect("legacy path should be valid"),
+            legacy_sidecar_path_for(&mp4).expect("legacy path should be valid"),
+            "the legacy scheme is exactly what collided"
         );
     }
 
