@@ -13,7 +13,14 @@ gen/
 .vscode/
 
 # Portable vault data and local secrets must never be committed.
+# `.mediavault/` is the current system directory, `.mediashelf/` the pre-rename
+# one; a vault created inside the working copy would otherwise be committable.
+.mediavault/
 .mediashelf/
+# Captured site logins and the fetch log (normally in ~/.mediavault, listed
+# here so a stray copy next to the sources can never be added).
+webnovel_sessions.json
+webnovel_debug.log*
 .env
 *.local
 *.secret
