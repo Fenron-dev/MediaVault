@@ -129,7 +129,15 @@ jobs:
       - name: Build macOS app bundle
         env:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: cargo tauri build --bundles app
+        # An *empty* APPLE_SIGNING_IDENTITY is worse than none: Tauri sees the
+        # variable, tries to sign with identity "" and fails with "no identity
+        # found". Unset it when the secret is absent so the build stays
+        # unsigned and the ad-hoc step below takes over.
+        run: |
+          if [ -z "$APPLE_SIGNING_IDENTITY" ]; then
+            unset APPLE_SIGNING_IDENTITY
+          fi
+          cargo tauri build --bundles app
 
       - name: Ad-hoc sign app bundle
         # Only when no Developer ID was imported — otherwise this would replace
