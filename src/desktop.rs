@@ -2249,6 +2249,7 @@ impl DemoPlanItem {
             media_type,
             title.as_deref(),
             effective_year,
+            effective_series_title.as_deref(),
             anime_context.as_ref(),
             anilist,
         );
@@ -2503,6 +2504,7 @@ fn build_collection_path(
     media_type: MediaType,
     title: Option<&str>,
     year: Option<u16>,
+    series_title: Option<&str>,
     anime_context: Option<&AnimeEpisodeContext>,
     anilist: Option<&AniListAnimeMetadata>,
 ) -> String {
@@ -2569,6 +2571,18 @@ fn build_collection_path(
             let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("Musik/{t}{y}")
+        }
+        // Manga and comics arrive one file per chapter, so grouping by the
+        // file's own title would give every chapter its own collection node
+        // ("Chapter 1", "Chapter 2", …). The series title from the sidecar is
+        // what holds a series together.
+        MediaType::Manga | MediaType::Comic | MediaType::HentaiManga => {
+            let series = series_title.or(title).unwrap_or("Unbenannt");
+            format!(
+                "{}/{}",
+                media_type.folder_segment(),
+                safe_folder_segment(series, "Unbenannt")
+            )
         }
         _ => {
             let folder = media_type.folder_segment();
@@ -8577,5 +8591,77 @@ mod tests {
         // A pinned name is sanitized too — stored records are not trusted.
         subscription.folder_name = Some("..".to_string());
         assert_eq!(novel_folder_name(&subscription), "Neuer Titel");
+    }
+
+    #[test]
+    fn manga_chapters_group_under_their_series() {
+        // One CBZ per chapter: grouping by the file's own title would give
+        // every chapter its own collection node.
+        let path_for = |chapter: &str| {
+            build_collection_path(
+                MediaType::Manga,
+                Some(chapter),
+                None,
+                Some("Yakuza Fiancé"),
+                None,
+                None,
+            )
+        };
+
+        assert_eq!(path_for("Chapter 1"), "Manga/Yakuza Fiancé");
+        assert_eq!(path_for("Chapter 2"), path_for("Chapter 1"));
+        assert_eq!(path_for("Chapter 38.1"), path_for("Chapter 1"));
+    }
+
+    #[test]
+    fn manga_without_a_series_title_falls_back_to_the_file_title() {
+        // Hand-imported CBZ files carry no sidecar series title.
+        assert_eq!(
+            build_collection_path(MediaType::Manga, Some("Berserk"), None, None, None, None),
+            "Manga/Berserk"
+        );
+        assert_eq!(
+            build_collection_path(MediaType::Manga, None, None, None, None, None),
+            "Manga/Unbenannt"
+        );
+    }
+
+    #[test]
+    fn comics_and_hentai_manga_group_the_same_way() {
+        assert_eq!(
+            build_collection_path(
+                MediaType::Comic,
+                Some("Issue 3"),
+                None,
+                Some("Saga"),
+                None,
+                None
+            ),
+            "Comics/Saga"
+        );
+        assert_eq!(
+            build_collection_path(
+                MediaType::HentaiManga,
+                Some("Chapter 3"),
+                None,
+                Some("Serie"),
+                None,
+                None
+            ),
+            "Hentai/Serie"
+        );
+    }
+
+    #[test]
+    fn other_media_types_keep_grouping_by_their_own_title() {
+        // The manga branch must not change how films or books are grouped.
+        assert_eq!(
+            build_collection_path(MediaType::Film, Some("Dune"), Some(2021), None, None, None),
+            "Filme/Dune (2021)"
+        );
+        assert_eq!(
+            build_collection_path(MediaType::Document, Some("Vertrag"), None, None, None, None),
+            "Dokumente/Vertrag"
+        );
     }
 }
