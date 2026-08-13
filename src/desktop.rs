@@ -401,6 +401,44 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
             StatusCode::OK,
             &build_webnovel_job_response(request.uri().query()),
         ),
+        // Manga subscriptions mirror the webnovel endpoints one for one; the
+        // handlers live in `desktop_manga` to keep this file from growing.
+        "/api/manga/list" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_list_response(request.uri().query()),
+        ),
+        "/api/manga/subscribe" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_subscribe_response(request.body()),
+        ),
+        "/api/manga/unsubscribe" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_unsubscribe_response(request.body()),
+        ),
+        "/api/manga/update" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_update_response(request.body()),
+        ),
+        "/api/manga/check" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_check_response(request.body()),
+        ),
+        "/api/manga/job" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_job_response(request.uri().query()),
+        ),
+        "/api/manga/trash" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_trash_response(request.uri().query()),
+        ),
+        "/api/manga/restore" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_restore_response(request.body()),
+        ),
+        "/api/manga/purge" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_purge_response(request.body()),
+        ),
         _ => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
@@ -417,7 +455,7 @@ fn response(status: StatusCode, content_type: &str, body: &str) -> Response<Vec<
         .expect("response construction should succeed")
 }
 
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8>> {
+pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8>> {
     match serde_json::to_vec(value) {
         Ok(body) => Response::builder()
             .status(status)
@@ -3000,7 +3038,7 @@ const RESERVED_SEGMENT_NAMES: &[&str] = &[
 /// capped. An input that carries no usable characters yields an **empty**
 /// string — callers that build real paths must treat that as "no name" and
 /// substitute their own fallback (see [`safe_folder_segment`]).
-fn sanitize_path_segment(value: &str) -> String {
+pub(crate) fn sanitize_path_segment(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
 
     for character in value.chars() {
@@ -3050,7 +3088,7 @@ fn sanitize_path_segment(value: &str) -> String {
 /// becomes a real directory: an empty segment would silently resolve to the
 /// parent directory, which turns a per-novel delete into a delete of the whole
 /// library.
-fn safe_folder_segment(value: &str, fallback: &str) -> String {
+pub(crate) fn safe_folder_segment(value: &str, fallback: &str) -> String {
     let sanitized = sanitize_path_segment(value);
     if sanitized.is_empty() {
         return fallback.to_string();
@@ -3099,7 +3137,7 @@ fn format_plan_step(step: PlannedImportStep) -> String {
     }
 }
 
-fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
+pub(crate) fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
@@ -3211,7 +3249,7 @@ fn save_sidecar_item(vault: &Vault, item: &SaveSidecarItem) -> Result<()> {
     write_sidecar_preview(vault, &media_relative, &item.sidecar_preview)
 }
 
-fn write_sidecar_preview(
+pub(crate) fn write_sidecar_preview(
     vault: &Vault,
     media_relative: &RelativePath,
     sidecar_preview: &str,
@@ -3353,7 +3391,7 @@ fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
     }
 }
 
-fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {
     if let Some(root) = normalized_override(root_override) {
         let resolved = resolve_existing_root(root)?;
         if !is_authorized_root(&resolved) {
@@ -6160,7 +6198,10 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
             index: (position + 1) as u32,
             title: chapter.title.clone(),
             url: chapter.url.clone(),
+            volume: None,
+            page_count: None,
             downloaded_at_unix: None,
+            placeholder: false,
         })
         .collect();
 
@@ -6761,7 +6802,10 @@ fn check_one_subscription(
                 index: next_index,
                 title: chapter.title.clone(),
                 url: chapter.url.clone(),
+                volume: None,
+                page_count: None,
                 downloaded_at_unix: None,
+                placeholder: false,
             });
             next_index += 1;
         }
@@ -6778,7 +6822,10 @@ fn check_one_subscription(
         .known_chapters
         .iter()
         .enumerate()
-        .filter(|(_, chapter)| chapter.downloaded_at_unix.is_none())
+        // Placeholders are retried here: a chapter that failed once is usually
+        // a transient upstream hiccup, and leaving it permanently "done" would
+        // bake the error notice into every rebuilt EPUB.
+        .filter(|(_, chapter)| chapter.needs_fetch())
         .map(|(position, _)| position)
         .collect();
     update_webnovel_job(job_id, |status| {
@@ -6786,6 +6833,7 @@ fn check_one_subscription(
     });
 
     let mut downloaded_indices: Vec<u32> = Vec::new();
+    let mut repaired_chapters = 0usize;
     let mut fetch_error: Option<VaultError> = None;
     let mut consecutive_failures = 0usize;
     let mut skipped_chapters = 0usize;
@@ -6801,7 +6849,8 @@ fn check_one_subscription(
                 url: chapter.url.clone(),
             }
         };
-        let content = match source.fetch_chapter(client, &chapter_ref) {
+        let was_placeholder = subscription.known_chapters[*chapter_position].placeholder;
+        let (content, is_placeholder) = match source.fetch_chapter(client, &chapter_ref) {
             Ok(content) => {
                 consecutive_failures = 0;
                 debug_log(&format!(
@@ -6812,7 +6861,7 @@ fn check_one_subscription(
                     content.xhtml.len(),
                     chapter_ref.url
                 ));
-                content
+                (content, false)
             }
             Err(error) => {
                 consecutive_failures += 1;
@@ -6832,8 +6881,8 @@ fn check_one_subscription(
                 }
                 // A single unparseable chapter (e.g. an author-note "not a
                 // chapter" filler) must not block the rest of the novel: store
-                // a placeholder so the run continues and it is not retried
-                // forever.
+                // a placeholder so the run continues.  The chapter stays
+                // flagged and is retried on the next check.
                 skipped_chapters += 1;
                 debug_log(&format!(
                     "chapter {}/{}: übersprungen (Platzhalter) '{}'",
@@ -6841,14 +6890,17 @@ fn check_one_subscription(
                     pending.len(),
                     chapter_ref.title
                 ));
-                ChapterContent {
-                    title: chapter_ref.title.clone(),
-                    xhtml: format!(
-                        "<p><em>[Dieses Kapitel konnte nicht automatisch geladen \
-                         werden. Bitte im Browser öffnen: {}]</em></p>",
-                        chapter_ref.url
-                    ),
-                }
+                (
+                    ChapterContent {
+                        title: chapter_ref.title.clone(),
+                        xhtml: format!(
+                            "<p><em>[Dieses Kapitel konnte nicht automatisch geladen \
+                             werden. Bitte im Browser öffnen: {}]</em></p>",
+                            chapter_ref.url
+                        ),
+                    },
+                    true,
+                )
             }
         };
 
@@ -6865,7 +6917,14 @@ fn check_one_subscription(
         )
         .map_err(VaultError::from)?;
         chapter.downloaded_at_unix = Some(unix_now());
-        downloaded_indices.push(chapter.index);
+        chapter.placeholder = is_placeholder;
+        if was_placeholder && !is_placeholder {
+            // A retry that finally succeeded: the cached text changed, so the
+            // complete EPUB has to be rebuilt even if nothing else is new.
+            repaired_chapters += 1;
+        } else if !was_placeholder {
+            downloaded_indices.push(chapter.index);
+        }
 
         // Persist after every chapter so an aborted run can resume.
         save_subscription(&vault.system_dir(), subscription)?;
@@ -6883,7 +6942,11 @@ fn check_one_subscription(
     let safe_title = novel_folder_name(subscription);
     let complete_file = format!("{safe_title}.epub");
     let complete_missing = !novel_dir.join(&complete_file).exists();
-    if options.build_complete && (!downloaded_indices.is_empty() || cover_added || complete_missing)
+    if options.build_complete
+        && (!downloaded_indices.is_empty()
+            || repaired_chapters > 0
+            || cover_added
+            || complete_missing)
     {
         build_complete_epub(vault, subscription)?;
     } else if !complete_missing {
@@ -6894,7 +6957,14 @@ fn check_one_subscription(
 
     if skipped_chapters > 0 {
         debug_log(&format!(
-            "check: '{}' — {skipped_chapters} Kapitel als Platzhalter übersprungen",
+            "check: '{}' — {skipped_chapters} Kapitel als Platzhalter übersprungen \
+             (werden beim nächsten Check erneut versucht)",
+            subscription.title
+        ));
+    }
+    if repaired_chapters > 0 {
+        debug_log(&format!(
+            "check: '{}' — {repaired_chapters} Platzhalter-Kapitel nachgeladen",
             subscription.title
         ));
     }
@@ -6902,7 +6972,7 @@ fn check_one_subscription(
     if let Some(error) = fetch_error {
         return Err(error);
     }
-    Ok(downloaded_indices.len())
+    Ok(downloaded_indices.len() + repaired_chapters)
 }
 
 /// How many chapters may fail back to back before the run aborts (and resumes
@@ -7989,7 +8059,7 @@ const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// The log records every URL the fetcher visits, i.e. a complete reading
 /// history — it is therefore owner-readable only and rotated at
 /// [`DEBUG_LOG_MAX_BYTES`] so it cannot grow without bound.
-fn debug_log(message: &str) {
+pub(crate) fn debug_log(message: &str) {
     let Some(path) = debug_log_path() else {
         return;
     };
@@ -8257,7 +8327,7 @@ fn unix_now_ms() -> u128 {
 }
 
 /// Closes the browser window at the end of a manual run.
-fn close_browser_window() {
+pub(crate) fn close_browser_window() {
     if let Some(handle) = APP_HANDLE.get() {
         let handle = handle.clone();
         let inner = handle.clone();
@@ -8273,7 +8343,7 @@ fn close_browser_window() {
 ///
 /// Blocks the calling (worker) thread until the injected relay delivers the
 /// page via the window title, a challenge times out, or rendering times out.
-fn render_page_via_window(url: &str) -> Result<String> {
+pub(crate) fn render_page_via_window(url: &str) -> Result<String> {
     let handle = APP_HANDLE
         .get()
         .cloned()
