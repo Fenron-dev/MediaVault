@@ -1,6 +1,10 @@
 //! # core::cbz
 //!
-//! CBZ (comic book zip) writer used by the manga subscription engine.
+//! CBZ (comic book zip) reader and writer.
+//!
+//! The subscription engine writes archives here; the manga viewer reads page
+//! images back out of them one at a time, so a 50-page chapter never has to be
+//! unpacked to disk or pushed into the WebView as a whole.
 //!
 //! ## Why hand-rolled?
 //! A CBZ is nothing but a zip archive of page images that readers display in
@@ -213,6 +217,252 @@ fn zip_error(error: zip::result::ZipError) -> VaultError {
 }
 
 // ---------------------------------------------------------------------------
+// Reading
+// ---------------------------------------------------------------------------
+
+/// File extensions treated as page images when reading an archive.
+const PAGE_EXTENSIONS: [&str; 6] = ["jpg", "jpeg", "png", "webp", "gif", "avif"];
+
+/// What a viewer needs to know about an archive before showing page one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CbzInfo {
+    /// Page entry names in reading order.
+    pub pages: Vec<String>,
+    /// Series name from `ComicInfo.xml`.
+    pub series: Option<String>,
+    /// Chapter title from `ComicInfo.xml`.
+    pub title: Option<String>,
+    /// Chapter number from `ComicInfo.xml`.
+    pub number: Option<String>,
+    /// Right-to-left reading order — drives page order and spread pairing.
+    pub right_to_left: bool,
+}
+
+/// Reads an archive's page list and `ComicInfo.xml` metadata.
+///
+/// Page order is the archive's entry names sorted **naturally**, so `2.jpg`
+/// precedes `10.jpg`.  Archives written by this app zero-pad and would sort
+/// correctly either way, but files from other tools routinely do not.
+///
+/// # Parameters
+/// - `path` – Absolute path to the `.cbz` file
+///
+/// # Returns
+/// - `Ok(CbzInfo)` – Page names in reading order plus available metadata
+///
+/// # Errors
+/// - `VaultError::Io` if the file cannot be opened or is not a zip
+/// - `VaultError::InvalidProperty` if the archive holds no page images
+pub fn read_cbz_info(path: &Path) -> Result<CbzInfo> {
+    let file = File::open(path).map_err(VaultError::from)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(read_error)?;
+
+    let mut pages: Vec<String> = Vec::new();
+    let mut comic_info: Option<String> = None;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(read_error)?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().to_string();
+        if is_comic_info(&name) {
+            comic_info = Some(name);
+            continue;
+        }
+        if is_page_entry(&name) {
+            pages.push(name);
+        }
+    }
+
+    if pages.is_empty() {
+        return Err(VaultError::InvalidProperty(format!(
+            "Archiv enthält keine Seitenbilder: {}",
+            path.display()
+        )));
+    }
+    pages.sort_by(|left, right| natural_compare(left, right));
+
+    let mut info = CbzInfo {
+        pages,
+        ..CbzInfo::default()
+    };
+    if let Some(entry_name) = comic_info {
+        let mut xml = String::new();
+        if let Ok(mut entry) = archive.by_name(&entry_name) {
+            use std::io::Read;
+            if entry.read_to_string(&mut xml).is_ok() {
+                info.series = xml_tag_value(&xml, "Series");
+                info.title = xml_tag_value(&xml, "Title");
+                info.number = xml_tag_value(&xml, "Number");
+                // ComicRack encodes direction in `Manga`; only the explicit
+                // right-to-left value flips the reading order.
+                info.right_to_left = xml_tag_value(&xml, "Manga")
+                    .map(|value| value.eq_ignore_ascii_case("YesAndRightToLeft"))
+                    .unwrap_or(false);
+            }
+        }
+    }
+    Ok(info)
+}
+
+/// Reads a single page image out of an archive.
+///
+/// # Parameters
+/// - `path` – Absolute path to the `.cbz` file
+/// - `index` – 0-based page position in [`read_cbz_info`] order
+///
+/// # Returns
+/// - `Ok((media_type, bytes))` – Image MIME type and raw bytes
+///
+/// # Errors
+/// - `VaultError::InvalidProperty` if `index` is past the last page
+/// - `VaultError::Io` if the archive or entry cannot be read
+pub fn read_cbz_page(path: &Path, index: usize) -> Result<(String, Vec<u8>)> {
+    use std::io::Read;
+
+    let info = read_cbz_info(path)?;
+    let Some(name) = info.pages.get(index) else {
+        return Err(VaultError::InvalidProperty(format!(
+            "Seite {index} existiert nicht ({} Seiten)",
+            info.pages.len()
+        )));
+    };
+
+    let file = File::open(path).map_err(VaultError::from)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(read_error)?;
+    let mut entry = archive.by_name(name).map_err(read_error)?;
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut bytes).map_err(VaultError::from)?;
+
+    // Sniff the real bytes rather than trusting the extension: a mislabelled
+    // entry would otherwise reach the viewer with the wrong content type.
+    let media_type = crate::api::novel::detect_image_media_type(&bytes)
+        .map(str::to_string)
+        .unwrap_or_else(|| media_type_for_name(name).to_string());
+    Ok((media_type, bytes))
+}
+
+/// Whether an entry name is the metadata document.
+fn is_comic_info(name: &str) -> bool {
+    name.rsplit('/')
+        .next()
+        .map(|file| file.eq_ignore_ascii_case("ComicInfo.xml"))
+        .unwrap_or(false)
+}
+
+/// Whether an entry name looks like a page image.
+///
+/// Skips macOS resource-fork entries, which carry image extensions but hold
+/// no usable image data.
+fn is_page_entry(name: &str) -> bool {
+    if name.starts_with("__MACOSX/") {
+        return false;
+    }
+    let file = name.rsplit('/').next().unwrap_or(name);
+    if file.starts_with('.') {
+        return false;
+    }
+    extension_of(file)
+        .map(|ext| PAGE_EXTENSIONS.contains(&ext.as_str()))
+        .unwrap_or(false)
+}
+
+fn extension_of(name: &str) -> Option<String> {
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext.trim().to_lowercase())
+}
+
+fn media_type_for_name(name: &str) -> &'static str {
+    match extension_of(name).as_deref() {
+        Some("png") => "image/png",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("avif") => "image/avif",
+        _ => "image/jpeg",
+    }
+}
+
+/// Reads the text content of the first `<tag>` in an XML document.
+///
+/// `ComicInfo.xml` is a flat element list, so this avoids an XML dependency.
+fn xml_tag_value(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    let value = unescape_xml(xml[start..end].trim());
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+/// Reverses [`escape_xml`] for the entities it produces.
+fn unescape_xml(value: &str) -> String {
+    value
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        // Ampersand last: doing it first would re-expand the entities above.
+        .replace("&amp;", "&")
+}
+
+/// Compares names so embedded numbers order numerically (`2` before `10`).
+fn natural_compare(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let mut left_chars = left.chars().peekable();
+    let mut right_chars = right.chars().peekable();
+
+    loop {
+        match (left_chars.peek().copied(), right_chars.peek().copied()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(left_char), Some(right_char)) => {
+                if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+                    let left_number = take_number(&mut left_chars);
+                    let right_number = take_number(&mut right_chars);
+                    match left_number.cmp(&right_number) {
+                        Ordering::Equal => continue,
+                        other => return other,
+                    }
+                }
+                let left_key = left_char.to_ascii_lowercase();
+                let right_key = right_char.to_ascii_lowercase();
+                match left_key.cmp(&right_key) {
+                    Ordering::Equal => {
+                        left_chars.next();
+                        right_chars.next();
+                    }
+                    other => return other,
+                }
+            }
+        }
+    }
+}
+
+/// Consumes a run of digits and returns its numeric value.
+///
+/// Saturates rather than overflowing: an absurdly long digit run in a crafted
+/// entry name must not panic the viewer.
+fn take_number(chars: &mut std::iter::Peekable<std::str::Chars>) -> u128 {
+    let mut value: u128 = 0;
+    while let Some(digit) = chars.peek().and_then(|ch| ch.to_digit(10)) {
+        value = value.saturating_mul(10).saturating_add(u128::from(digit));
+        chars.next();
+    }
+    value
+}
+
+/// Converts a zip error from the reading path into the shared error type.
+fn read_error(error: zip::result::ZipError) -> VaultError {
+    VaultError::Io(format!("cbz read failed: {error}"))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -253,6 +503,111 @@ mod tests {
         let result = write_cbz(&target, &CbzMeta::default(), &[]);
         assert!(matches!(result, Err(VaultError::InvalidProperty(_))));
         assert!(!target.exists());
+    }
+
+    #[test]
+    fn write_then_read_round_trips_pages_and_metadata() {
+        let target = temp_target("roundtrip");
+        let meta = CbzMeta {
+            series: "Test & Serie".to_string(),
+            title: Some("Kapitel <1>".to_string()),
+            number: Some("10.5".to_string()),
+            right_to_left: true,
+            ..CbzMeta::default()
+        };
+        write_cbz(&target, &meta, &[page("image/jpeg"), page("image/png")])
+            .expect("write should succeed");
+
+        let info = read_cbz_info(&target).expect("read should succeed");
+        assert_eq!(
+            info.pages,
+            vec!["0001.jpg".to_string(), "0002.png".to_string()]
+        );
+        // Escaped metadata must come back as it went in.
+        assert_eq!(info.series.as_deref(), Some("Test & Serie"));
+        assert_eq!(info.title.as_deref(), Some("Kapitel <1>"));
+        assert_eq!(info.number.as_deref(), Some("10.5"));
+        assert!(info.right_to_left);
+
+        let (media_type, bytes) = read_cbz_page(&target, 0).expect("page should read");
+        assert_eq!(media_type, "image/jpeg");
+        assert_eq!(bytes, vec![0xFF, 0xD8, 0xFF, 0x00]);
+
+        // Past the last page is an error, not a panic.
+        assert!(read_cbz_page(&target, 2).is_err());
+
+        std::fs::remove_file(&target).ok();
+    }
+
+    #[test]
+    fn left_to_right_archives_report_no_flip() {
+        let target = temp_target("ltr");
+        write_cbz(
+            &target,
+            &CbzMeta {
+                series: "Webtoon".to_string(),
+                right_to_left: false,
+                ..CbzMeta::default()
+            },
+            &[page("image/jpeg")],
+        )
+        .expect("write should succeed");
+
+        assert!(!read_cbz_info(&target).expect("read").right_to_left);
+        std::fs::remove_file(&target).ok();
+    }
+
+    #[test]
+    fn pages_sort_naturally_not_lexicographically() {
+        // Archives from other tools rarely zero-pad; "10" must follow "2".
+        let mut names = vec![
+            "page10.jpg".to_string(),
+            "page2.jpg".to_string(),
+            "page1.jpg".to_string(),
+            "page20.jpg".to_string(),
+        ];
+        names.sort_by(|left, right| natural_compare(left, right));
+        assert_eq!(
+            names,
+            ["page1.jpg", "page2.jpg", "page10.jpg", "page20.jpg"]
+        );
+
+        // A digit run far beyond u64 must not panic or wrap.
+        let huge = format!("p{}.jpg", "9".repeat(60));
+        assert_eq!(natural_compare(&huge, &huge), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn skips_metadata_and_platform_junk_entries() {
+        assert!(is_page_entry("0001.jpg"));
+        assert!(is_page_entry("sub/folder/0002.png"));
+        assert!(!is_page_entry("ComicInfo.xml"));
+        // macOS resource forks carry image extensions but hold no image.
+        assert!(!is_page_entry("__MACOSX/._0001.jpg"));
+        assert!(!is_page_entry(".hidden.jpg"));
+        assert!(!is_page_entry("readme.txt"));
+
+        assert!(is_comic_info("ComicInfo.xml"));
+        assert!(is_comic_info("nested/comicinfo.xml"));
+        assert!(!is_comic_info("0001.jpg"));
+    }
+
+    #[test]
+    fn archive_without_pages_is_rejected() {
+        let target = temp_target("nopages");
+        // A zip holding only metadata is not a readable comic.
+        let file = File::create(&target).expect("create");
+        let mut zip = ZipWriter::new(file);
+        zip.start_file("ComicInfo.xml", SimpleFileOptions::default())
+            .expect("entry");
+        zip.write_all(b"<ComicInfo/>").expect("write");
+        zip.finish().expect("finish");
+
+        assert!(matches!(
+            read_cbz_info(&target),
+            Err(VaultError::InvalidProperty(_))
+        ));
+        std::fs::remove_file(&target).ok();
     }
 
     #[test]

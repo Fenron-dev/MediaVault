@@ -1057,11 +1057,38 @@
         <iframe id="player-pdf-frame" title="PDF-Ansicht"></iframe>
       </div>
 
-      <!-- Manga/image stage (shown for image sequences) -->
+      <!-- Manga viewer: CBZ archives and loose image sequences -->
       <div class="player-manga-stage" id="player-manga-stage" hidden>
-        <button class="action-button icon-button player-manga-nav" id="player-manga-prev" title="Zurück">‹</button>
-        <img id="player-manga-img" alt="Seite" />
-        <button class="action-button icon-button player-manga-nav" id="player-manga-next" title="Weiter">›</button>
+        <div class="manga-toolbar" id="manga-toolbar">
+          <div class="manga-toolbar-group">
+            <button class="action-button" id="manga-fit-toggle" title="Anpassung wechseln (F)">Breite</button>
+            <button class="action-button" id="manga-mode-toggle" title="Ansicht wechseln (M)">Einzelseite</button>
+            <button class="action-button" id="manga-direction-toggle" title="Leserichtung wechseln (R)">→</button>
+          </div>
+          <div class="manga-toolbar-group">
+            <button class="action-button" id="manga-prev-chapter" title="Vorheriges Kapitel">⏮ Kapitel</button>
+            <span class="manga-chapter-label" id="manga-chapter-label"></span>
+            <button class="action-button" id="manga-next-chapter" title="Nächstes Kapitel">Kapitel ⏭</button>
+          </div>
+        </div>
+
+        <!-- Paged view: one or two pages side by side -->
+        <div class="manga-pages" id="manga-pages">
+          <button class="manga-nav-zone manga-nav-prev" id="player-manga-prev" title="Zurück">
+            <span class="manga-nav-arrow">‹</span>
+          </button>
+          <div class="manga-page-frame" id="manga-page-frame">
+            <img id="player-manga-img" alt="Seite" />
+            <img id="manga-page-secondary" alt="" hidden />
+          </div>
+          <button class="manga-nav-zone manga-nav-next" id="player-manga-next" title="Weiter">
+            <span class="manga-nav-arrow">›</span>
+          </button>
+        </div>
+
+        <!-- Webtoon view: all slices stacked for continuous scrolling -->
+        <div class="manga-strip" id="manga-strip" hidden></div>
+
         <div class="player-manga-counter" id="player-manga-counter">1 / 1</div>
       </div>
 

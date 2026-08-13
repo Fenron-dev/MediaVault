@@ -2262,7 +2262,7 @@ async function loadDashboard() {
       });
       const playHandler = (it) => {
         const ext = playerFileExt(it.vault_path);
-        if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
+        if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || MANGA_CBZ_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
           openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
         }
       };
@@ -2298,9 +2298,8 @@ const PLAYER_PDF_EXTS = new Set(["pdf"]);
 const PLAYER_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"]);
 // EPUB opens via system viewer; listed here so the inspector "Abspielen" button shows.
 const PLAYER_EPUB_EXTS = new Set(["epub"]);
-
-// mangaState holds the image list and current index when a manga/image sequence is open.
-let mangaState = null; // { items: string[], index: number }
+// CBZ opens in the built-in manga viewer, which reads pages out of the zip.
+const MANGA_CBZ_EXTS = new Set(["cbz"]);
 
 let playerState = null; // { mediaEl, item, vaultPath, sleepTimerId, saveTimerId, subtitleTrack }
 
@@ -2407,7 +2406,7 @@ function playerStop() {
   if (playerPdfFrame) playerPdfFrame.src = "";
   if (playerPdfStage) playerPdfStage.hidden = true;
   if (playerMangaStage) playerMangaStage.hidden = true;
-  mangaState = null;
+  mangaClose();
 
   playerState = null;
 }
@@ -2570,35 +2569,395 @@ async function loadSubtitles(vaultPath) {
   await loadSubtitleFile(first);
 }
 
-// ── Manga/image sequence ────────────────────────────────────────────────────
+// ── Manga viewer ────────────────────────────────────────────────────────────
+// Serves two shapes from one UI: CBZ archives (pages read out of the zip by
+// the backend, one request per page) and loose image files in a folder. Only
+// `mangaPageUrl` and the page list differ between them.
 
-function mangaSiblings(vaultPath) {
+const MANGA_SETTINGS_KEY = "mediavault.mangaViewer";
+// How many pages ahead to warm the cache. Paging feels instant at 3 without
+// pulling a whole chapter into memory.
+const MANGA_PRELOAD_AHEAD = 3;
+
+const mangaPageFrame = document.getElementById("manga-page-frame");
+const mangaPageSecondary = document.getElementById("manga-page-secondary");
+const mangaPagesView = document.getElementById("manga-pages");
+const mangaStrip = document.getElementById("manga-strip");
+const mangaFitToggle = document.getElementById("manga-fit-toggle");
+const mangaModeToggle = document.getElementById("manga-mode-toggle");
+const mangaDirectionToggle = document.getElementById("manga-direction-toggle");
+const mangaPrevChapter = document.getElementById("manga-prev-chapter");
+const mangaNextChapter = document.getElementById("manga-next-chapter");
+const mangaChapterLabel = document.getElementById("manga-chapter-label");
+
+let mangaState = null;
+let mangaSaveTimer = null;
+
+function mangaLoadSettings() {
+  const stored = loadStoredJson(MANGA_SETTINGS_KEY, {});
+  return {
+    fit: ["width", "height", "original"].includes(stored.fit) ? stored.fit : "width",
+    mode: ["single", "spread", "strip"].includes(stored.mode) ? stored.mode : "single",
+  };
+}
+
+function mangaSaveSettings() {
+  if (!mangaState) return;
+  saveStoredJson(MANGA_SETTINGS_KEY, { fit: mangaState.fit, mode: mangaState.mode });
+}
+
+function mangaRootQuery() {
+  const root = getVaultRoot();
+  return root ? `&root=${encodeURIComponent(root)}` : "";
+}
+
+/// URL of page `index` — from inside the archive, or the image file itself.
+function mangaPageUrl(index) {
+  if (!mangaState) return "";
+  if (mangaState.kind === "cbz") {
+    return `mediavault://localhost/api/cbz/page?path=${encodeURIComponent(
+      mangaState.archivePath,
+    )}&index=${index}${mangaRootQuery()}`;
+  }
+  const path = mangaState.items[index];
+  if (!path) return "";
+  return `mediavault://localhost/api/media-file?path=${encodeURIComponent(path)}${mangaRootQuery()}`;
+}
+
+/// Files of the same kind in the same folder, in reading order.
+function mangaSiblings(vaultPath, extensions) {
   if (!currentPlan) return [vaultPath];
   const dir = vaultPath.includes("/") ? vaultPath.substring(0, vaultPath.lastIndexOf("/")) : "";
-  return currentPlan.items
-    .filter((it) => {
-      const p = it.source_path || "";
+  const siblings = currentPlan.items
+    .map((it) => it.source_path || "")
+    .filter((p) => {
+      if (!p) return false;
       const ext = p.split(".").pop().toLowerCase();
-      if (!PLAYER_IMAGE_EXTS.has(ext)) return false;
+      if (!extensions.has(ext)) return false;
       const d = p.includes("/") ? p.substring(0, p.lastIndexOf("/")) : "";
       return d === dir;
     })
-    .map((it) => it.source_path)
-    .sort();
+    .sort(naturalCompare);
+  return siblings.length ? siblings : [vaultPath];
 }
 
-function mangaShowIndex(index) {
-  if (!mangaState || !playerMangaImg || !playerMangaCounter) return;
-  const items = mangaState.items;
-  const clamped = Math.max(0, Math.min(items.length - 1, index));
-  mangaState.index = clamped;
-  const vaultPath = items[clamped];
+/// Opens a CBZ archive or a loose image in the viewer.
+async function openMangaViewer(vaultPath, item) {
+  const settings = mangaLoadSettings();
+  const ext = playerFileExt(vaultPath);
+  const isArchive = MANGA_CBZ_EXTS.has(ext);
+
+  mangaState = {
+    kind: isArchive ? "cbz" : "images",
+    archivePath: vaultPath,
+    items: [],
+    pageCount: 0,
+    index: 0,
+    rtl: false,
+    fit: settings.fit,
+    mode: settings.mode,
+    chapters: isArchive ? mangaSiblings(vaultPath, MANGA_CBZ_EXTS) : [],
+    item,
+  };
+  mangaState.chapterIndex = Math.max(0, mangaState.chapters.indexOf(vaultPath));
+
+  if (isArchive) {
+    try {
+      const res = await fetch(
+        `mediavault://localhost/api/cbz/info?path=${encodeURIComponent(vaultPath)}${mangaRootQuery()}`,
+      );
+      const info = await res.json();
+      if (info.error) {
+        mangaShowError(info.error);
+        return;
+      }
+      mangaState.pageCount = info.pageCount ?? 0;
+      mangaState.rtl = Boolean(info.rightToLeft);
+      mangaState.label = [info.series, info.title].filter(Boolean).join(" · ");
+    } catch (error) {
+      mangaShowError(`Archiv konnte nicht gelesen werden: ${error.message}`);
+      return;
+    }
+  } else {
+    mangaState.items = mangaSiblings(vaultPath, PLAYER_IMAGE_EXTS);
+    mangaState.pageCount = mangaState.items.length;
+    mangaState.index = Math.max(0, mangaState.items.indexOf(vaultPath));
+    mangaState.label = item?.title ?? "";
+  }
+
+  if (mangaState.pageCount === 0) {
+    mangaShowError("Keine Seiten gefunden.");
+    return;
+  }
+
+  // Resume where the reader left off, unless a specific image was opened.
+  if (mangaState.kind === "cbz") {
+    const record = await playerLoadProgress(vaultPath);
+    const savedPage = record?.progress?.page;
+    if (typeof savedPage === "number" && savedPage > 0 && savedPage < mangaState.pageCount) {
+      mangaState.index = savedPage;
+    }
+  }
+
+  mangaRender();
+}
+
+function mangaShowError(message) {
+  if (playerMangaCounter) playerMangaCounter.textContent = message;
+  if (playerMangaImg) playerMangaImg.removeAttribute("src");
+  if (mangaPageSecondary) mangaPageSecondary.hidden = true;
+}
+
+/// Pages advanced per step — two at a time only in spread view.
+function mangaStep() {
+  return mangaState?.mode === "spread" ? 2 : 1;
+}
+
+function mangaRender() {
+  if (!mangaState) return;
+  const { mode, fit, rtl, index, pageCount } = mangaState;
+
+  if (mangaChapterLabel) mangaChapterLabel.textContent = mangaState.label ?? "";
+  if (mangaFitToggle) {
+    mangaFitToggle.textContent = { width: "Breite", height: "Höhe", original: "Original" }[fit];
+  }
+  if (mangaModeToggle) {
+    mangaModeToggle.textContent = {
+      single: "Einzelseite",
+      spread: "Doppelseite",
+      strip: "Webtoon",
+    }[mode];
+  }
+  if (mangaDirectionToggle) {
+    mangaDirectionToggle.textContent = rtl ? "←" : "→";
+    mangaDirectionToggle.title = rtl
+      ? "Leserichtung: rechts nach links (R)"
+      : "Leserichtung: links nach rechts (R)";
+  }
+
+  const hasChapters = mangaState.chapters.length > 1;
+  if (mangaPrevChapter) {
+    mangaPrevChapter.hidden = !hasChapters;
+    mangaPrevChapter.disabled = mangaState.chapterIndex <= 0;
+  }
+  if (mangaNextChapter) {
+    mangaNextChapter.hidden = !hasChapters;
+    mangaNextChapter.disabled = mangaState.chapterIndex >= mangaState.chapters.length - 1;
+  }
+
+  if (mode === "strip") {
+    mangaRenderStrip();
+  } else {
+    mangaRenderPaged();
+  }
+
+  if (playerMangaCounter) {
+    playerMangaCounter.textContent =
+      mode === "strip" ? `${pageCount} Seiten` : `${index + 1} / ${pageCount}`;
+  }
+  mangaPreload();
+  mangaScheduleSave();
+}
+
+function mangaRenderPaged() {
+  const { index, pageCount, mode, fit, rtl } = mangaState;
+  if (mangaPagesView) mangaPagesView.hidden = false;
+  if (mangaStrip) {
+    mangaStrip.hidden = true;
+    clearNode(mangaStrip);
+  }
+
+  const spread = mode === "spread" && index + 1 < pageCount;
+  if (mangaPageFrame) {
+    mangaPageFrame.className = `manga-page-frame fit-${fit}`;
+    mangaPageFrame.classList.toggle("is-rtl", rtl);
+    mangaPageFrame.classList.toggle("is-spread", spread);
+    mangaPageFrame.scrollTop = 0;
+    mangaPageFrame.scrollLeft = 0;
+  }
+  if (playerMangaImg) playerMangaImg.src = mangaPageUrl(index);
+  if (mangaPageSecondary) {
+    mangaPageSecondary.hidden = !spread;
+    if (spread) mangaPageSecondary.src = mangaPageUrl(index + 1);
+  }
+
+  // In right-to-left reading the "next" control sits on the left.
+  const atStart = index <= 0;
+  const atEnd = index + mangaStep() >= pageCount;
+  if (playerMangaPrev) playerMangaPrev.disabled = rtl ? atEnd : atStart;
+  if (playerMangaNext) playerMangaNext.disabled = rtl ? atStart : atEnd;
+}
+
+function mangaRenderStrip() {
+  if (mangaPagesView) mangaPagesView.hidden = true;
+  if (!mangaStrip) return;
+  mangaStrip.hidden = false;
+
+  // Rebuild only when the chapter changed, otherwise scrolling would reset.
+  if (mangaStrip.dataset.source !== mangaStripKey()) {
+    clearNode(mangaStrip);
+    for (let page = 0; page < mangaState.pageCount; page += 1) {
+      const img = document.createElement("img");
+      // Native lazy loading keeps a 140-slice webtoon from firing 140
+      // requests the moment the chapter opens.
+      img.loading = "lazy";
+      img.alt = "";
+      img.dataset.page = String(page);
+      img.src = mangaPageUrl(page);
+      mangaStrip.appendChild(img);
+    }
+    mangaStrip.dataset.source = mangaStripKey();
+    mangaStrip.scrollTop = 0;
+  }
+}
+
+function mangaStripKey() {
+  return `${mangaState.kind}:${mangaState.archivePath}:${mangaState.pageCount}`;
+}
+
+/// Warms the cache for the pages just ahead of the reader.
+function mangaPreload() {
+  if (!mangaState || mangaState.mode === "strip") return;
+  for (let offset = 1; offset <= MANGA_PRELOAD_AHEAD; offset += 1) {
+    const page = mangaState.index + offset;
+    if (page >= mangaState.pageCount) break;
+    const img = new Image();
+    img.src = mangaPageUrl(page);
+  }
+}
+
+function mangaGo(delta) {
+  if (!mangaState || mangaState.mode === "strip") return;
+  const next = mangaState.index + delta * mangaStep();
+
+  if (next < 0) {
+    // Stepping back past page one continues in the previous chapter.
+    if (mangaState.chapterIndex > 0) mangaLoadChapter(mangaState.chapterIndex - 1, "end");
+    return;
+  }
+  if (next >= mangaState.pageCount) {
+    if (mangaState.chapterIndex < mangaState.chapters.length - 1) {
+      mangaLoadChapter(mangaState.chapterIndex + 1, "start");
+    }
+    return;
+  }
+
+  mangaState.index = next;
+  mangaRender();
+}
+
+/// Advances by one step in **reading order**.
+///
+/// Callers that speak screen position (the click zones) map it themselves via
+/// `mangaZoneStep`; doing it in both places would cancel out.
+function mangaAdvance(forward) {
+  mangaGo(forward ? 1 : -1);
+}
+
+/// Maps a click zone to reading order: the right zone reads forward in a
+/// left-to-right book and backward in a right-to-left one.
+function mangaZoneStep(rightZone) {
+  if (!mangaState) return;
+  mangaAdvance(mangaState.rtl ? !rightZone : rightZone);
+}
+
+async function mangaLoadChapter(chapterIndex, position) {
+  if (!mangaState) return;
+  const path = mangaState.chapters[chapterIndex];
+  if (!path) return;
+
+  mangaSaveProgress(true);
+  const chapters = mangaState.chapters;
+  const item = mangaState.item;
+  await openMangaViewer(path, item);
+  if (!mangaState) return;
+
+  // openMangaViewer recomputes siblings; keep the list we already had so a
+  // chapter that vanished from the plan cannot shorten the chain mid-read.
+  mangaState.chapters = chapters;
+  mangaState.chapterIndex = chapterIndex;
+  mangaState.index = position === "end" ? Math.max(0, mangaState.pageCount - mangaStep()) : 0;
+  mangaRender();
+}
+
+function mangaCycleFit() {
+  if (!mangaState) return;
+  const order = ["width", "height", "original"];
+  mangaState.fit = order[(order.indexOf(mangaState.fit) + 1) % order.length];
+  mangaSaveSettings();
+  mangaRender();
+}
+
+function mangaCycleMode() {
+  if (!mangaState) return;
+  const order = ["single", "spread", "strip"];
+  mangaState.mode = order[(order.indexOf(mangaState.mode) + 1) % order.length];
+  // Leaving strip view lands on the page the reader scrolled to.
+  if (mangaState.mode !== "strip") mangaState.index = mangaStripVisiblePage();
+  mangaSaveSettings();
+  mangaRender();
+}
+
+function mangaToggleDirection() {
+  if (!mangaState) return;
+  mangaState.rtl = !mangaState.rtl;
+  mangaRender();
+}
+
+/// Page currently at the top of the webtoon view.
+function mangaStripVisiblePage() {
+  if (!mangaStrip || mangaStrip.hidden) return mangaState?.index ?? 0;
+  const containerTop = mangaStrip.getBoundingClientRect().top;
+  const images = Array.from(mangaStrip.querySelectorAll("img"));
+  for (const img of images) {
+    const rect = img.getBoundingClientRect();
+    // First slice whose bottom edge is still below the viewport top.
+    if (rect.bottom > containerTop) {
+      return Number(img.dataset.page) || 0;
+    }
+  }
+  return mangaState?.index ?? 0;
+}
+
+function mangaScheduleSave() {
+  if (mangaSaveTimer) clearTimeout(mangaSaveTimer);
+  // Debounced: paging quickly through a chapter must not write once per page.
+  mangaSaveTimer = setTimeout(() => mangaSaveProgress(false), 1200);
+}
+
+function mangaSaveProgress(immediate) {
+  if (!mangaState || mangaState.kind !== "cbz") return;
+  if (mangaSaveTimer && immediate) {
+    clearTimeout(mangaSaveTimer);
+    mangaSaveTimer = null;
+  }
+  const page = mangaState.mode === "strip" ? mangaStripVisiblePage() : mangaState.index;
   const root = getVaultRoot();
-  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
-  playerMangaImg.src = `mediavault://localhost/api/media-file?path=${encodeURIComponent(vaultPath)}${rootQuery}`;
-  playerMangaCounter.textContent = `${clamped + 1} / ${items.length}`;
-  if (playerMangaPrev) playerMangaPrev.disabled = clamped === 0;
-  if (playerMangaNext) playerMangaNext.disabled = clamped === items.length - 1;
+  fetch("mediavault://localhost/api/progress/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vault_root: root || null,
+      vault_path: mangaState.archivePath,
+      progress: { type: "manga", page, total_pages: mangaState.pageCount },
+      completed: page >= mangaState.pageCount - 1,
+    }),
+  }).catch(() => {});
+}
+
+function mangaClose() {
+  mangaSaveProgress(true);
+  if (mangaSaveTimer) {
+    clearTimeout(mangaSaveTimer);
+    mangaSaveTimer = null;
+  }
+  if (mangaStrip) {
+    clearNode(mangaStrip);
+    delete mangaStrip.dataset.source;
+  }
+  if (playerMangaImg) playerMangaImg.removeAttribute("src");
+  if (mangaPageSecondary) mangaPageSecondary.removeAttribute("src");
+  mangaState = null;
 }
 
 function playerSetPlayPause(el) {
@@ -2619,10 +2978,11 @@ async function openPlayer(item) {
   const isAudio = isAudioFile(sourcePath);
   const isPdf = PLAYER_PDF_EXTS.has(ext);
   const isImage = PLAYER_IMAGE_EXTS.has(ext);
+  const isComic = MANGA_CBZ_EXTS.has(ext);
   const isEpub = PLAYER_EPUB_EXTS.has(ext);
   const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext) || isEpub;
 
-  if (!isVideo && !isAudio && !isPdf && !isImage && !unsupported) return;
+  if (!isVideo && !isAudio && !isPdf && !isImage && !isComic && !unsupported) return;
 
   // Unsupported formats (MKV, AVI, TS, ePub…): open directly in system player
   // without showing the internal player dialog.
@@ -2663,18 +3023,15 @@ async function openPlayer(item) {
     return;
   }
 
-  // ── Image / manga sequence ───────────────────────────────────────────────
-  if (isImage) {
+  // ── Manga viewer: CBZ archives and loose image sequences ─────────────────
+  if (isImage || isComic) {
     if (playerStage) playerStage.hidden = true;
     if (playerAudioArt) playerAudioArt.hidden = true;
     if (playerPdfStage) playerPdfStage.hidden = true;
     if (playerMangaStage) playerMangaStage.hidden = false;
     if (playerPlayPause) playerPlayPause.disabled = true;
-    const siblings = mangaSiblings(sourcePath);
-    const startIdx = Math.max(0, siblings.indexOf(sourcePath));
-    mangaState = { items: siblings, index: startIdx };
-    mangaShowIndex(startIdx);
     playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
+    await openMangaViewer(sourcePath, item);
     return;
   }
 
@@ -3399,17 +3756,23 @@ function initPlayer() {
     });
   }
 
-  // Manga navigation buttons
-  if (playerMangaPrev) {
-    playerMangaPrev.addEventListener("click", () => {
-      if (mangaState) mangaShowIndex(mangaState.index - 1);
-    });
-  }
-  if (playerMangaNext) {
-    playerMangaNext.addEventListener("click", () => {
-      if (mangaState) mangaShowIndex(mangaState.index + 1);
-    });
-  }
+  // Manga viewer controls. The zones sit left and right of the page, so they
+  // step by screen position; `mangaAdvance` maps that onto reading order.
+  playerMangaPrev?.addEventListener("click", () => mangaZoneStep(false));
+  playerMangaNext?.addEventListener("click", () => mangaZoneStep(true));
+  mangaFitToggle?.addEventListener("click", mangaCycleFit);
+  mangaModeToggle?.addEventListener("click", mangaCycleMode);
+  mangaDirectionToggle?.addEventListener("click", mangaToggleDirection);
+  mangaPrevChapter?.addEventListener("click", () => {
+    if (mangaState) mangaLoadChapter(mangaState.chapterIndex - 1, "start");
+  });
+  mangaNextChapter?.addEventListener("click", () => {
+    if (mangaState) mangaLoadChapter(mangaState.chapterIndex + 1, "start");
+  });
+  // Scrolling a webtoon is the only progress signal that view produces.
+  mangaStrip?.addEventListener("scroll", () => {
+    if (mangaState?.mode === "strip") mangaScheduleSave();
+  });
 
   // Keep time display and seek bar in sync.
   for (const mediaEl of [playerVideo, playerAudio]) {
@@ -3434,15 +3797,33 @@ function initPlayer() {
     if (playerDialog && !playerDialog.hidden) {
       if (e.key === " " || e.key === "k") {
         e.preventDefault();
-        playerPlayPause?.click();
+        if (mangaState) mangaAdvance(!e.shiftKey);
+        else playerPlayPause?.click();
       }
       if (e.key === "ArrowLeft") {
-        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index - 1); }
-        else { e.preventDefault(); playerSkipBack?.click(); }
+        e.preventDefault();
+        // Left means "back" in a left-to-right book and "forward" in a
+        // right-to-left one, which is what readers expect from manga.
+        if (mangaState) mangaAdvance(Boolean(mangaState.rtl));
+        else playerSkipBack?.click();
       }
       if (e.key === "ArrowRight") {
-        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index + 1); }
-        else { e.preventDefault(); playerSkipFwd?.click(); }
+        e.preventDefault();
+        if (mangaState) mangaAdvance(!mangaState.rtl);
+        else playerSkipFwd?.click();
+      }
+      if (mangaState) {
+        if (e.key === "PageDown") { e.preventDefault(); mangaAdvance(true); }
+        if (e.key === "PageUp") { e.preventDefault(); mangaAdvance(false); }
+        if (e.key === "Home") { e.preventDefault(); mangaState.index = 0; mangaRender(); }
+        if (e.key === "End") {
+          e.preventDefault();
+          mangaState.index = Math.max(0, mangaState.pageCount - mangaStep());
+          mangaRender();
+        }
+        if (e.key === "f") { e.preventDefault(); mangaCycleFit(); }
+        if (e.key === "m") { e.preventDefault(); mangaCycleMode(); }
+        if (e.key === "r") { e.preventDefault(); mangaToggleDirection(); }
       }
     }
   });
@@ -4693,6 +5074,7 @@ function renderInspector(value) {
       PLAYER_UNSUPPORTED_EXTS.has(ext) ||
       PLAYER_PDF_EXTS.has(ext) ||
       PLAYER_IMAGE_EXTS.has(ext) ||
+      MANGA_CBZ_EXTS.has(ext) ||
       PLAYER_EPUB_EXTS.has(ext);
     inspectorPlay.hidden = !item || !playable;
   }

@@ -230,6 +230,11 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
                 .map(|s| s.to_string());
             build_media_file_response(request.uri().query(), range.as_deref())
         }
+        "/api/cbz/info" => json_response(
+            StatusCode::OK,
+            &build_cbz_info_response(request.uri().query()),
+        ),
+        "/api/cbz/page" => build_cbz_page_response(request.uri().query()),
         "/api/apply-import" => {
             json_response(StatusCode::OK, &build_apply_import_response(request.body()))
         }
@@ -626,6 +631,122 @@ fn build_select_folder_response() -> SelectFolderResponse {
     SelectFolderResponse {
         path: selected.map(|path| path.display().to_string()),
         error: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CBZ reading (manga viewer)
+// ---------------------------------------------------------------------------
+
+/// Resolves a `?path=&root=` query to an absolute file inside the vault.
+///
+/// Shares the sandbox rules with [`build_media_file_response`]: the path is a
+/// vault-relative [`RelativePath`], and `resolve_existing` rejects anything
+/// that escapes the vault, symlinks included.
+fn resolve_vault_file(query: Option<&str>) -> std::result::Result<PathBuf, String> {
+    let query = query.ok_or_else(|| "missing query".to_string())?;
+    let path = extract_query_value(query, "path").ok_or_else(|| "missing path".to_string())?;
+    let root_override = extract_query_value(query, "root");
+
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Err("Kein Vault geöffnet.".to_string()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let vault = Vault::new(vault_root).map_err(|error| error.to_string())?;
+    let relative = RelativePath::new(path).map_err(|error| error.to_string())?;
+    vault
+        .resolve_existing(relative.as_path())
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CbzInfoResponse {
+    /// Number of page images in the archive.
+    page_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<String>,
+    /// Right-to-left reading order (Japanese manga).
+    right_to_left: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl CbzInfoResponse {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            page_count: 0,
+            series: None,
+            title: None,
+            number: None,
+            right_to_left: false,
+            error: Some(message.into()),
+        }
+    }
+}
+
+/// Returns page count and `ComicInfo.xml` metadata for a CBZ in the vault.
+fn build_cbz_info_response(query: Option<&str>) -> CbzInfoResponse {
+    let absolute = match resolve_vault_file(query) {
+        Ok(path) => path,
+        Err(message) => return CbzInfoResponse::error(message),
+    };
+    match crate::core::cbz::read_cbz_info(&absolute) {
+        Ok(info) => CbzInfoResponse {
+            page_count: info.pages.len(),
+            series: info.series,
+            title: info.title,
+            number: info.number,
+            right_to_left: info.right_to_left,
+            error: None,
+        },
+        Err(error) => CbzInfoResponse::error(error.to_string()),
+    }
+}
+
+/// Serves one page image out of a CBZ in the vault.
+///
+/// Pages are immutable once written, so the response is cached aggressively —
+/// without it, paging back and forth re-reads the archive every time.
+fn build_cbz_page_response(query: Option<&str>) -> Response<Vec<u8>> {
+    let absolute = match resolve_vault_file(query) {
+        Ok(path) => path,
+        Err(message) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                &message,
+            )
+        }
+    };
+    let index = query
+        .and_then(|q| extract_query_value(q, "index"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    match crate::core::cbz::read_cbz_page(&absolute, index) {
+        Ok((media_type, bytes)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, media_type)
+            .header("Cache-Control", "private, max-age=3600")
+            .body(bytes)
+            .unwrap_or_else(|_| {
+                response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "text/plain; charset=utf-8",
+                    "response build failed",
+                )
+            }),
+        Err(error) => response(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            &error.to_string(),
+        ),
     }
 }
 
