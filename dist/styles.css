@@ -165,6 +165,14 @@ body:not(.is-vault-open) .app-shell {
   display: grid;
 }
 
+/* The `hidden` attribute only works through the UA rule `[hidden]{display:none}`,
+   which ANY author `display` declaration silently overrides. That has bitten this
+   file repeatedly (see the scoped workarounds below), so it is settled centrally:
+   an element marked hidden is hidden, whatever else its rules say. */
+[hidden] {
+  display: none !important;
+}
+
 .app-modal > [hidden] {
   display: none !important;
 }

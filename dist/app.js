@@ -2406,6 +2406,7 @@ function playerStop() {
   if (playerPdfFrame) playerPdfFrame.src = "";
   if (playerPdfStage) playerPdfStage.hidden = true;
   if (playerMangaStage) playerMangaStage.hidden = true;
+  if (playerControls) playerControls.hidden = false;
   mangaClose();
 
   playerState = null;
@@ -2589,6 +2590,7 @@ const mangaDirectionToggle = document.getElementById("manga-direction-toggle");
 const mangaPrevChapter = document.getElementById("manga-prev-chapter");
 const mangaNextChapter = document.getElementById("manga-next-chapter");
 const mangaChapterLabel = document.getElementById("manga-chapter-label");
+const playerControls = document.getElementById("player-controls");
 
 let mangaState = null;
 let mangaSaveTimer = null;
@@ -2597,13 +2599,52 @@ function mangaLoadSettings() {
   const stored = loadStoredJson(MANGA_SETTINGS_KEY, {});
   return {
     fit: ["width", "height", "original"].includes(stored.fit) ? stored.fit : "width",
-    mode: ["single", "spread", "strip"].includes(stored.mode) ? stored.mode : "single",
+    // The view mode belongs to the series, not the app: a webtoon must not
+    // force continuous scrolling onto the next Japanese manga that is opened.
+    modes: stored.modes && typeof stored.modes === "object" ? stored.modes : {},
   };
 }
 
 function mangaSaveSettings() {
   if (!mangaState) return;
-  saveStoredJson(MANGA_SETTINGS_KEY, { fit: mangaState.fit, mode: mangaState.mode });
+  const stored = mangaLoadSettings();
+  stored.fit = mangaState.fit;
+  stored.modes[mangaSeriesKey()] = mangaState.mode;
+  saveStoredJson(MANGA_SETTINGS_KEY, { fit: stored.fit, modes: stored.modes });
+}
+
+/// Identifies the series a chapter belongs to: its containing folder.
+function mangaSeriesKey() {
+  const path = mangaState?.archivePath ?? "";
+  return path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : path;
+}
+
+/// Ratio above which a page counts as a webtoon slice rather than a book page.
+/// A printed page is roughly 1.4 tall; strips run far past 2.
+const MANGA_STRIP_RATIO = 2;
+
+/// Picks the initial view mode when the series has never been opened before.
+///
+/// Measures the first page: webtoon slices are dramatically taller than wide,
+/// so the reader lands in continuous scrolling without touching a setting.
+function mangaDetectMode() {
+  return new Promise((resolve) => {
+    const probe = new Image();
+    let settled = false;
+    const finish = (mode) => {
+      if (settled) return;
+      settled = true;
+      resolve(mode);
+    };
+    probe.onload = () => {
+      const ratio = probe.naturalHeight / Math.max(1, probe.naturalWidth);
+      finish(ratio >= MANGA_STRIP_RATIO ? "strip" : "single");
+    };
+    probe.onerror = () => finish("single");
+    // Never let a stalled image hold the viewer open.
+    setTimeout(() => finish("single"), 4000);
+    probe.src = mangaPageUrl(0);
+  });
 }
 
 function mangaRootQuery() {
@@ -2655,7 +2696,7 @@ async function openMangaViewer(vaultPath, item) {
     index: 0,
     rtl: false,
     fit: settings.fit,
-    mode: settings.mode,
+    mode: "single",
     chapters: isArchive ? mangaSiblings(vaultPath, MANGA_CBZ_EXTS) : [],
     item,
   };
@@ -2688,6 +2729,15 @@ async function openMangaViewer(vaultPath, item) {
   if (mangaState.pageCount === 0) {
     mangaShowError("Keine Seiten gefunden.");
     return;
+  }
+
+  const rememberedMode = settings.modes[mangaSeriesKey()];
+  if (["single", "spread", "strip"].includes(rememberedMode)) {
+    mangaState.mode = rememberedMode;
+  } else {
+    mangaState.mode = await mangaDetectMode();
+    if (!mangaState) return; // Viewer closed while the probe was running.
+    mangaSaveSettings();
   }
 
   // Resume where the reader left off, unless a specific image was opened.
@@ -2781,11 +2831,16 @@ function mangaRenderPaged() {
     if (spread) mangaPageSecondary.src = mangaPageUrl(index + 1);
   }
 
-  // In right-to-left reading the "next" control sits on the left.
-  const atStart = index <= 0;
-  const atEnd = index + mangaStep() >= pageCount;
-  if (playerMangaPrev) playerMangaPrev.disabled = rtl ? atEnd : atStart;
-  if (playerMangaNext) playerMangaNext.disabled = rtl ? atStart : atEnd;
+  // A zone is only dead if stepping that way leads nowhere at all. Disabling
+  // it at the chapter boundary would swallow the jump into the neighbouring
+  // chapter, which is exactly what the click is supposed to trigger.
+  const backBlocked = index <= 0 && mangaState.chapterIndex <= 0;
+  const forwardBlocked =
+    index + mangaStep() >= pageCount &&
+    mangaState.chapterIndex >= mangaState.chapters.length - 1;
+  // In right-to-left reading the forward control sits on the left.
+  if (playerMangaPrev) playerMangaPrev.disabled = rtl ? forwardBlocked : backBlocked;
+  if (playerMangaNext) playerMangaNext.disabled = rtl ? backBlocked : forwardBlocked;
 }
 
 function mangaRenderStrip() {
@@ -3030,6 +3085,8 @@ async function openPlayer(item) {
     if (playerPdfStage) playerPdfStage.hidden = true;
     if (playerMangaStage) playerMangaStage.hidden = false;
     if (playerPlayPause) playerPlayPause.disabled = true;
+    // Nothing plays back here, so seek bar, speed and sleep timer are noise.
+    if (playerControls) playerControls.hidden = true;
     playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
     await openMangaViewer(sourcePath, item);
     return;
