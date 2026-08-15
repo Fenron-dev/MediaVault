@@ -2069,10 +2069,46 @@ h3 {
    artwork of a continuous strip. */
 .manga-strip img {
   display: block;
-  width: 100%;
-  max-width: 900px;
   margin: 0 auto;
   height: auto;
+}
+
+/* The fit modes apply here too. Without this the strip was pinned to a fixed
+   column and "Breite" did nothing at all in webtoon view. */
+.manga-strip.fit-width img {
+  width: 100%;
+  max-width: none;
+}
+
+/* "Höhe" has no meaning for an endless strip, so it serves as the comfortable
+   reading column instead — long line lengths are what hurt on a wide screen. */
+.manga-strip.fit-height img {
+  width: 100%;
+  max-width: 900px;
+}
+
+.manga-strip.fit-original img {
+  width: auto;
+  max-width: none;
+}
+
+/* Immersive mode: the toolbar folds away and returns on hover, so a full
+   screen really is only the page. */
+.player-manga-stage.is-immersive .manga-toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  opacity: 0;
+  transform: translateY(-100%);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.player-manga-stage.is-immersive:hover .manga-toolbar,
+.player-manga-stage.is-immersive .manga-toolbar:focus-within {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .player-manga-counter {

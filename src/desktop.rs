@@ -29,7 +29,8 @@ use crate::core::playlist::{
     Playlist, PlaylistCursor,
 };
 use crate::core::progress::{
-    delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
+    delete_progress, list_in_progress, load_progress, save_progress_labeled, MediaProgress,
+    ProgressRecord,
 };
 use crate::core::properties::{
     legacy_sidecar_path_for, render_sidecar_yaml, sidecar_path_for, SIDECAR_SUFFIX,
@@ -4708,6 +4709,10 @@ struct SaveProgressRequest {
     progress: MediaProgress,
     #[serde(default)]
     completed: bool,
+    /// Human-readable position for other readers of the interchange record,
+    /// e.g. `Kapitel 3/12 · Seite 7`.
+    #[serde(default)]
+    label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -4792,11 +4797,12 @@ fn build_save_progress_response(body: &[u8]) -> SaveProgressResponse {
         Err(e) => return SaveProgressResponse::error(e.to_string()),
     };
 
-    match save_progress(
+    match save_progress_labeled(
         &vault.progress_dir(),
         &req.vault_path,
         req.progress,
         req.completed,
+        req.label,
     ) {
         Ok(()) => SaveProgressResponse::ok(),
         Err(e) => SaveProgressResponse::error(e.to_string()),

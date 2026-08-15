@@ -2591,26 +2591,34 @@ const mangaPrevChapter = document.getElementById("manga-prev-chapter");
 const mangaNextChapter = document.getElementById("manga-next-chapter");
 const mangaChapterLabel = document.getElementById("manga-chapter-label");
 const playerControls = document.getElementById("player-controls");
+const mangaFullscreenToggle = document.getElementById("manga-fullscreen-toggle");
 
 let mangaState = null;
 let mangaSaveTimer = null;
 
+/// Display settings live per series, not per app: a webtoon must not force
+/// continuous scrolling and full-width pages onto the next Japanese manga.
 function mangaLoadSettings() {
   const stored = loadStoredJson(MANGA_SETTINGS_KEY, {});
-  return {
-    fit: ["width", "height", "original"].includes(stored.fit) ? stored.fit : "width",
-    // The view mode belongs to the series, not the app: a webtoon must not
-    // force continuous scrolling onto the next Japanese manga that is opened.
-    modes: stored.modes && typeof stored.modes === "object" ? stored.modes : {},
-  };
+  return stored && typeof stored.series === "object" && stored.series
+    ? stored
+    : { series: {} };
+}
+
+function mangaSeriesSettings(key) {
+  const entry = mangaLoadSettings().series[key];
+  return entry && typeof entry === "object" ? entry : null;
 }
 
 function mangaSaveSettings() {
   if (!mangaState) return;
   const stored = mangaLoadSettings();
-  stored.fit = mangaState.fit;
-  stored.modes[mangaSeriesKey()] = mangaState.mode;
-  saveStoredJson(MANGA_SETTINGS_KEY, { fit: stored.fit, modes: stored.modes });
+  stored.series[mangaSeriesKey()] = {
+    mode: mangaState.mode,
+    fit: mangaState.fit,
+    rtl: mangaState.rtl,
+  };
+  saveStoredJson(MANGA_SETTINGS_KEY, stored);
 }
 
 /// Identifies the series a chapter belongs to: its containing folder.
@@ -2684,7 +2692,6 @@ function mangaSiblings(vaultPath, extensions) {
 
 /// Opens a CBZ archive or a loose image in the viewer.
 async function openMangaViewer(vaultPath, item) {
-  const settings = mangaLoadSettings();
   const ext = playerFileExt(vaultPath);
   const isArchive = MANGA_CBZ_EXTS.has(ext);
 
@@ -2695,7 +2702,7 @@ async function openMangaViewer(vaultPath, item) {
     pageCount: 0,
     index: 0,
     rtl: false,
-    fit: settings.fit,
+    fit: "width",
     mode: "single",
     chapters: isArchive ? mangaSiblings(vaultPath, MANGA_CBZ_EXTS) : [],
     item,
@@ -2731,9 +2738,14 @@ async function openMangaViewer(vaultPath, item) {
     return;
   }
 
-  const rememberedMode = settings.modes[mangaSeriesKey()];
-  if (["single", "spread", "strip"].includes(rememberedMode)) {
-    mangaState.mode = rememberedMode;
+  const remembered = mangaSeriesSettings(mangaSeriesKey());
+  if (remembered && ["single", "spread", "strip"].includes(remembered.mode)) {
+    mangaState.mode = remembered.mode;
+    if (["width", "height", "original"].includes(remembered.fit)) {
+      mangaState.fit = remembered.fit;
+    }
+    // A direction the reader set by hand outranks the archive's own flag.
+    if (typeof remembered.rtl === "boolean") mangaState.rtl = remembered.rtl;
   } else {
     mangaState.mode = await mangaDetectMode();
     if (!mangaState) return; // Viewer closed while the probe was running.
@@ -2769,7 +2781,13 @@ function mangaRender() {
 
   if (mangaChapterLabel) mangaChapterLabel.textContent = mangaState.label ?? "";
   if (mangaFitToggle) {
-    mangaFitToggle.textContent = { width: "Breite", height: "Höhe", original: "Original" }[fit];
+    // "Höhe" is meaningless for an endless strip, where that setting caps the
+    // reading column instead — so it is named for what it actually does.
+    const labels =
+      mode === "strip"
+        ? { width: "Volle Breite", height: "Spalte", original: "Original" }
+        : { width: "Breite", height: "Höhe", original: "Original" };
+    mangaFitToggle.textContent = labels[fit];
   }
   if (mangaModeToggle) {
     mangaModeToggle.textContent = {
@@ -2815,6 +2833,9 @@ function mangaRenderPaged() {
   if (mangaStrip) {
     mangaStrip.hidden = true;
     clearNode(mangaStrip);
+    // The key must go with the children, or switching back finds an empty
+    // strip that believes it is already built.
+    delete mangaStrip.dataset.source;
   }
 
   const spread = mode === "spread" && index + 1 < pageCount;
@@ -2847,6 +2868,8 @@ function mangaRenderStrip() {
   if (mangaPagesView) mangaPagesView.hidden = true;
   if (!mangaStrip) return;
   mangaStrip.hidden = false;
+  // Without this the strip ignored every fit mode and stayed in a fixed column.
+  mangaStrip.className = `manga-strip fit-${mangaState.fit}`;
 
   // Rebuild only when the chapter changed, otherwise scrolling would reset.
   if (mangaStrip.dataset.source !== mangaStripKey()) {
@@ -2862,8 +2885,31 @@ function mangaRenderStrip() {
       mangaStrip.appendChild(img);
     }
     mangaStrip.dataset.source = mangaStripKey();
-    mangaStrip.scrollTop = 0;
+    // Resume where the reader stopped. Images have no height yet, so the jump
+    // waits until the target slice has actually laid out.
+    mangaScrollToPage(mangaState.index);
   }
+}
+
+/// Scrolls the strip so `page` sits at the top of the view.
+function mangaScrollToPage(page) {
+  if (!mangaStrip) return;
+  if (page <= 0) {
+    mangaStrip.scrollTop = 0;
+    return;
+  }
+  const target = mangaStrip.querySelector(`img[data-page="${page}"]`);
+  if (!target) return;
+  const jump = () => {
+    // `scroll-behavior: smooth` would animate a restore across a whole
+    // chapter; jump straight there and restore the smooth behaviour after.
+    const previous = mangaStrip.style.scrollBehavior;
+    mangaStrip.style.scrollBehavior = "auto";
+    mangaStrip.scrollTop = target.offsetTop - mangaStrip.offsetTop;
+    mangaStrip.style.scrollBehavior = previous;
+  };
+  if (target.complete && target.naturalHeight > 0) jump();
+  else target.addEventListener("load", jump, { once: true });
 }
 
 function mangaStripKey() {
@@ -2882,7 +2928,13 @@ function mangaPreload() {
 }
 
 function mangaGo(delta) {
-  if (!mangaState || mangaState.mode === "strip") return;
+  if (!mangaState) return;
+  // In the strip there are no pages to turn: the same controls scroll, and
+  // reaching either end moves to the neighbouring chapter.
+  if (mangaState.mode === "strip") {
+    mangaScrollStrip(delta);
+    return;
+  }
   const next = mangaState.index + delta * mangaStep();
 
   if (next < 0) {
@@ -2899,6 +2951,36 @@ function mangaGo(delta) {
 
   mangaState.index = next;
   mangaRender();
+}
+
+/// Distance a key press scrolls the strip: just under a screen, so a line of
+/// artwork is never skipped between two presses.
+const MANGA_STRIP_SCROLL_OVERLAP = 0.9;
+
+/// Scrolls the webtoon strip, chaining chapters at either end.
+function mangaScrollStrip(delta) {
+  if (!mangaStrip) return;
+  const page = mangaStrip.clientHeight * MANGA_STRIP_SCROLL_OVERLAP;
+  const before = mangaStrip.scrollTop;
+  const maximum = mangaStrip.scrollHeight - mangaStrip.clientHeight;
+  // A pixel of slack: browsers report fractional scroll positions that never
+  // land exactly on the maximum.
+  const atBottom = before >= maximum - 1;
+  const atTop = before <= 0;
+
+  if (delta > 0 && atBottom) {
+    if (mangaState.chapterIndex < mangaState.chapters.length - 1) {
+      mangaLoadChapter(mangaState.chapterIndex + 1, "start");
+    }
+    return;
+  }
+  if (delta < 0 && atTop) {
+    if (mangaState.chapterIndex > 0) mangaLoadChapter(mangaState.chapterIndex - 1, "end");
+    return;
+  }
+
+  mangaStrip.scrollTop = before + delta * page;
+  mangaScheduleSave();
 }
 
 /// Advances by one step in **reading order**.
@@ -2945,17 +3027,47 @@ function mangaCycleFit() {
 
 function mangaCycleMode() {
   if (!mangaState) return;
+  const previous = mangaState.mode;
   const order = ["single", "spread", "strip"];
   mangaState.mode = order[(order.indexOf(mangaState.mode) + 1) % order.length];
   // Leaving strip view lands on the page the reader scrolled to.
-  if (mangaState.mode !== "strip") mangaState.index = mangaStripVisiblePage();
+  if (previous === "strip") mangaState.index = mangaStripVisiblePage();
   mangaSaveSettings();
   mangaRender();
+  // Entering it should land on the page they were reading.
+  if (mangaState.mode === "strip") mangaScrollToPage(mangaState.index);
+}
+
+/// Toggles distraction-free reading: the window goes fullscreen and the
+/// toolbar folds away until the pointer reaches the top edge.
+function mangaToggleFullscreen() {
+  const stage = playerMangaStage;
+  if (!stage) return;
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.();
+    return;
+  }
+  // Fullscreen is requested on the stage itself so the surrounding app chrome
+  // disappears rather than merely being covered.
+  stage.requestFullscreen?.().catch(() => {
+    // Fullscreen can be refused (permissions, embedded webview); the immersive
+    // styling alone still gets most of the benefit.
+    stage.classList.add("is-immersive");
+  });
+}
+
+function mangaSyncFullscreen() {
+  const active = Boolean(document.fullscreenElement);
+  playerMangaStage?.classList.toggle("is-immersive", active);
+  if (mangaFullscreenToggle) {
+    mangaFullscreenToggle.textContent = active ? "⛶ Fenster" : "⛶ Vollbild";
+  }
 }
 
 function mangaToggleDirection() {
   if (!mangaState) return;
   mangaState.rtl = !mangaState.rtl;
+  mangaSaveSettings();
   mangaRender();
 }
 
@@ -2988,6 +3100,12 @@ function mangaSaveProgress(immediate) {
   }
   const page = mangaState.mode === "strip" ? mangaStripVisiblePage() : mangaState.index;
   const root = getVaultRoot();
+  const chapterCount = mangaState.chapters.length;
+  // Mirrors the label the Fundus library writes, so a position handed over
+  // reads the same there: "Kapitel 3/12 · Seite 7".
+  const label = chapterCount
+    ? `Kapitel ${mangaState.chapterIndex + 1}/${chapterCount} · Seite ${page + 1}`
+    : `Seite ${page + 1}`;
   fetch("mediavault://localhost/api/progress/save", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -2995,7 +3113,10 @@ function mangaSaveProgress(immediate) {
       vault_root: root || null,
       vault_path: mangaState.archivePath,
       progress: { type: "manga", page, total_pages: mangaState.pageCount },
-      completed: page >= mangaState.pageCount - 1,
+      // Finished means the last page of the last chapter, as Fundus counts it.
+      completed:
+        page >= mangaState.pageCount - 1 && mangaState.chapterIndex + 1 >= chapterCount,
+      label,
     }),
   }).catch(() => {});
 }
@@ -3820,6 +3941,8 @@ function initPlayer() {
   mangaFitToggle?.addEventListener("click", mangaCycleFit);
   mangaModeToggle?.addEventListener("click", mangaCycleMode);
   mangaDirectionToggle?.addEventListener("click", mangaToggleDirection);
+  mangaFullscreenToggle?.addEventListener("click", mangaToggleFullscreen);
+  document.addEventListener("fullscreenchange", mangaSyncFullscreen);
   mangaPrevChapter?.addEventListener("click", () => {
     if (mangaState) mangaLoadChapter(mangaState.chapterIndex - 1, "start");
   });
@@ -3872,15 +3995,25 @@ function initPlayer() {
       if (mangaState) {
         if (e.key === "PageDown") { e.preventDefault(); mangaAdvance(true); }
         if (e.key === "PageUp") { e.preventDefault(); mangaAdvance(false); }
-        if (e.key === "Home") { e.preventDefault(); mangaState.index = 0; mangaRender(); }
+        if (e.key === "Home") {
+          e.preventDefault();
+          mangaState.index = 0;
+          if (mangaState.mode === "strip") mangaScrollToPage(0);
+          else mangaRender();
+        }
         if (e.key === "End") {
           e.preventDefault();
-          mangaState.index = Math.max(0, mangaState.pageCount - mangaStep());
-          mangaRender();
+          if (mangaState.mode === "strip") {
+            if (mangaStrip) mangaStrip.scrollTop = mangaStrip.scrollHeight;
+          } else {
+            mangaState.index = Math.max(0, mangaState.pageCount - mangaStep());
+            mangaRender();
+          }
         }
         if (e.key === "f") { e.preventDefault(); mangaCycleFit(); }
         if (e.key === "m") { e.preventDefault(); mangaCycleMode(); }
         if (e.key === "r") { e.preventDefault(); mangaToggleDirection(); }
+        if (e.key === "v" || e.key === "F11") { e.preventDefault(); mangaToggleFullscreen(); }
       }
     }
   });
