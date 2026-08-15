@@ -227,6 +227,7 @@ const labels = {
   collections: "Sammlungen",
   playlists: "Wiedergabelisten",
   webnovels: "Webnovels",
+  mangas: "Mangas",
   settings: "Einstellungen",
   trash: "Papierkorb",
 };
@@ -535,6 +536,7 @@ async function openVault(path, name = "") {
   syncVaultHint();
   loadPlan();
   initWebnovels();
+  initMangas();
 }
 
 async function bootstrapVault() {
@@ -2260,7 +2262,7 @@ async function loadDashboard() {
       });
       const playHandler = (it) => {
         const ext = playerFileExt(it.vault_path);
-        if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
+        if (isVideoFile(it.vault_path) || isAudioFile(it.vault_path) || PLAYER_UNSUPPORTED_EXTS.has(ext) || PLAYER_PDF_EXTS.has(ext) || PLAYER_IMAGE_EXTS.has(ext) || MANGA_CBZ_EXTS.has(ext) || PLAYER_EPUB_EXTS.has(ext)) {
           openPlayer({ source_path: it.vault_path, target_path: it.vault_path, title: it.title });
         }
       };
@@ -2296,9 +2298,8 @@ const PLAYER_PDF_EXTS = new Set(["pdf"]);
 const PLAYER_IMAGE_EXTS = new Set(["jpg", "jpeg", "png", "webp", "gif", "avif", "bmp"]);
 // EPUB opens via system viewer; listed here so the inspector "Abspielen" button shows.
 const PLAYER_EPUB_EXTS = new Set(["epub"]);
-
-// mangaState holds the image list and current index when a manga/image sequence is open.
-let mangaState = null; // { items: string[], index: number }
+// CBZ opens in the built-in manga viewer, which reads pages out of the zip.
+const MANGA_CBZ_EXTS = new Set(["cbz"]);
 
 let playerState = null; // { mediaEl, item, vaultPath, sleepTimerId, saveTimerId, subtitleTrack }
 
@@ -2405,7 +2406,8 @@ function playerStop() {
   if (playerPdfFrame) playerPdfFrame.src = "";
   if (playerPdfStage) playerPdfStage.hidden = true;
   if (playerMangaStage) playerMangaStage.hidden = true;
-  mangaState = null;
+  if (playerControls) playerControls.hidden = false;
+  mangaClose();
 
   playerState = null;
 }
@@ -2568,35 +2570,570 @@ async function loadSubtitles(vaultPath) {
   await loadSubtitleFile(first);
 }
 
-// ── Manga/image sequence ────────────────────────────────────────────────────
+// ── Manga viewer ────────────────────────────────────────────────────────────
+// Serves two shapes from one UI: CBZ archives (pages read out of the zip by
+// the backend, one request per page) and loose image files in a folder. Only
+// `mangaPageUrl` and the page list differ between them.
 
-function mangaSiblings(vaultPath) {
+const MANGA_SETTINGS_KEY = "mediavault.mangaViewer";
+// How many pages ahead to warm the cache. Paging feels instant at 3 without
+// pulling a whole chapter into memory.
+const MANGA_PRELOAD_AHEAD = 3;
+
+const mangaPageFrame = document.getElementById("manga-page-frame");
+const mangaPageSecondary = document.getElementById("manga-page-secondary");
+const mangaPagesView = document.getElementById("manga-pages");
+const mangaStrip = document.getElementById("manga-strip");
+const mangaFitToggle = document.getElementById("manga-fit-toggle");
+const mangaModeToggle = document.getElementById("manga-mode-toggle");
+const mangaDirectionToggle = document.getElementById("manga-direction-toggle");
+const mangaPrevChapter = document.getElementById("manga-prev-chapter");
+const mangaNextChapter = document.getElementById("manga-next-chapter");
+const mangaChapterLabel = document.getElementById("manga-chapter-label");
+const playerControls = document.getElementById("player-controls");
+const mangaFullscreenToggle = document.getElementById("manga-fullscreen-toggle");
+
+let mangaState = null;
+let mangaSaveTimer = null;
+
+/// Display settings live per series, not per app: a webtoon must not force
+/// continuous scrolling and full-width pages onto the next Japanese manga.
+function mangaLoadSettings() {
+  const stored = loadStoredJson(MANGA_SETTINGS_KEY, {});
+  return stored && typeof stored.series === "object" && stored.series
+    ? stored
+    : { series: {} };
+}
+
+function mangaSeriesSettings(key) {
+  const entry = mangaLoadSettings().series[key];
+  return entry && typeof entry === "object" ? entry : null;
+}
+
+function mangaSaveSettings() {
+  if (!mangaState) return;
+  const stored = mangaLoadSettings();
+  stored.series[mangaSeriesKey()] = {
+    mode: mangaState.mode,
+    fit: mangaState.fit,
+    rtl: mangaState.rtl,
+  };
+  saveStoredJson(MANGA_SETTINGS_KEY, stored);
+}
+
+/// Identifies the series a chapter belongs to: its containing folder.
+function mangaSeriesKey() {
+  const path = mangaState?.archivePath ?? "";
+  return path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : path;
+}
+
+/// Ratio above which a page counts as a webtoon slice rather than a book page.
+/// A printed page is roughly 1.4 tall; strips run far past 2.
+const MANGA_STRIP_RATIO = 2;
+
+/// Picks the initial view mode when the series has never been opened before.
+///
+/// Measures the first page: webtoon slices are dramatically taller than wide,
+/// so the reader lands in continuous scrolling without touching a setting.
+function mangaDetectMode() {
+  return new Promise((resolve) => {
+    const probe = new Image();
+    let settled = false;
+    const finish = (mode) => {
+      if (settled) return;
+      settled = true;
+      resolve(mode);
+    };
+    probe.onload = () => {
+      const ratio = probe.naturalHeight / Math.max(1, probe.naturalWidth);
+      finish(ratio >= MANGA_STRIP_RATIO ? "strip" : "single");
+    };
+    probe.onerror = () => finish("single");
+    // Never let a stalled image hold the viewer open.
+    setTimeout(() => finish("single"), 4000);
+    probe.src = mangaPageUrl(0);
+  });
+}
+
+function mangaRootQuery() {
+  const root = getVaultRoot();
+  return root ? `&root=${encodeURIComponent(root)}` : "";
+}
+
+/// URL of page `index` — from inside the archive, or the image file itself.
+function mangaPageUrl(index) {
+  if (!mangaState) return "";
+  if (mangaState.kind === "cbz") {
+    return `mediavault://localhost/api/cbz/page?path=${encodeURIComponent(
+      mangaState.archivePath,
+    )}&index=${index}${mangaRootQuery()}`;
+  }
+  const path = mangaState.items[index];
+  if (!path) return "";
+  return `mediavault://localhost/api/media-file?path=${encodeURIComponent(path)}${mangaRootQuery()}`;
+}
+
+/// Files of the same kind in the same folder, in reading order.
+function mangaSiblings(vaultPath, extensions) {
   if (!currentPlan) return [vaultPath];
   const dir = vaultPath.includes("/") ? vaultPath.substring(0, vaultPath.lastIndexOf("/")) : "";
-  return currentPlan.items
-    .filter((it) => {
-      const p = it.source_path || "";
+  const siblings = currentPlan.items
+    .map((it) => it.source_path || "")
+    .filter((p) => {
+      if (!p) return false;
       const ext = p.split(".").pop().toLowerCase();
-      if (!PLAYER_IMAGE_EXTS.has(ext)) return false;
+      if (!extensions.has(ext)) return false;
       const d = p.includes("/") ? p.substring(0, p.lastIndexOf("/")) : "";
       return d === dir;
     })
-    .map((it) => it.source_path)
-    .sort();
+    .sort(naturalCompare);
+  return siblings.length ? siblings : [vaultPath];
 }
 
-function mangaShowIndex(index) {
-  if (!mangaState || !playerMangaImg || !playerMangaCounter) return;
-  const items = mangaState.items;
-  const clamped = Math.max(0, Math.min(items.length - 1, index));
-  mangaState.index = clamped;
-  const vaultPath = items[clamped];
+/// Opens a CBZ archive or a loose image in the viewer.
+async function openMangaViewer(vaultPath, item) {
+  const ext = playerFileExt(vaultPath);
+  const isArchive = MANGA_CBZ_EXTS.has(ext);
+
+  mangaState = {
+    kind: isArchive ? "cbz" : "images",
+    archivePath: vaultPath,
+    items: [],
+    pageCount: 0,
+    index: 0,
+    rtl: false,
+    fit: "width",
+    mode: "single",
+    chapters: isArchive ? mangaSiblings(vaultPath, MANGA_CBZ_EXTS) : [],
+    item,
+  };
+  mangaState.chapterIndex = Math.max(0, mangaState.chapters.indexOf(vaultPath));
+
+  if (isArchive) {
+    try {
+      const res = await fetch(
+        `mediavault://localhost/api/cbz/info?path=${encodeURIComponent(vaultPath)}${mangaRootQuery()}`,
+      );
+      const info = await res.json();
+      if (info.error) {
+        mangaShowError(info.error);
+        return;
+      }
+      mangaState.pageCount = info.pageCount ?? 0;
+      mangaState.rtl = Boolean(info.rightToLeft);
+      mangaState.label = [info.series, info.title].filter(Boolean).join(" · ");
+    } catch (error) {
+      mangaShowError(`Archiv konnte nicht gelesen werden: ${error.message}`);
+      return;
+    }
+  } else {
+    mangaState.items = mangaSiblings(vaultPath, PLAYER_IMAGE_EXTS);
+    mangaState.pageCount = mangaState.items.length;
+    mangaState.index = Math.max(0, mangaState.items.indexOf(vaultPath));
+    mangaState.label = item?.title ?? "";
+  }
+
+  if (mangaState.pageCount === 0) {
+    mangaShowError("Keine Seiten gefunden.");
+    return;
+  }
+
+  const remembered = mangaSeriesSettings(mangaSeriesKey());
+  if (remembered && ["single", "spread", "strip"].includes(remembered.mode)) {
+    mangaState.mode = remembered.mode;
+    if (["width", "height", "original"].includes(remembered.fit)) {
+      mangaState.fit = remembered.fit;
+    }
+    // A direction the reader set by hand outranks the archive's own flag.
+    if (typeof remembered.rtl === "boolean") mangaState.rtl = remembered.rtl;
+  } else {
+    mangaState.mode = await mangaDetectMode();
+    if (!mangaState) return; // Viewer closed while the probe was running.
+    mangaSaveSettings();
+  }
+
+  // Resume where the reader left off, unless a specific image was opened.
+  if (mangaState.kind === "cbz") {
+    const record = await playerLoadProgress(vaultPath);
+    const savedPage = record?.progress?.page;
+    if (typeof savedPage === "number" && savedPage > 0 && savedPage < mangaState.pageCount) {
+      mangaState.index = savedPage;
+    }
+  }
+
+  mangaRender();
+}
+
+function mangaShowError(message) {
+  if (playerMangaCounter) playerMangaCounter.textContent = message;
+  if (playerMangaImg) playerMangaImg.removeAttribute("src");
+  if (mangaPageSecondary) mangaPageSecondary.hidden = true;
+}
+
+/// Pages advanced per step — two at a time only in spread view.
+function mangaStep() {
+  return mangaState?.mode === "spread" ? 2 : 1;
+}
+
+function mangaRender() {
+  if (!mangaState) return;
+  const { mode, fit, rtl, index, pageCount } = mangaState;
+
+  if (mangaChapterLabel) mangaChapterLabel.textContent = mangaState.label ?? "";
+  if (mangaFitToggle) {
+    // "Höhe" is meaningless for an endless strip, where that setting caps the
+    // reading column instead — so it is named for what it actually does.
+    const labels =
+      mode === "strip"
+        ? { width: "Volle Breite", height: "Spalte", original: "Original" }
+        : { width: "Breite", height: "Höhe", original: "Original" };
+    mangaFitToggle.textContent = labels[fit];
+  }
+  if (mangaModeToggle) {
+    mangaModeToggle.textContent = {
+      single: "Einzelseite",
+      spread: "Doppelseite",
+      strip: "Webtoon",
+    }[mode];
+  }
+  if (mangaDirectionToggle) {
+    mangaDirectionToggle.textContent = rtl ? "←" : "→";
+    mangaDirectionToggle.title = rtl
+      ? "Leserichtung: rechts nach links (R)"
+      : "Leserichtung: links nach rechts (R)";
+  }
+
+  const hasChapters = mangaState.chapters.length > 1;
+  if (mangaPrevChapter) {
+    mangaPrevChapter.hidden = !hasChapters;
+    mangaPrevChapter.disabled = mangaState.chapterIndex <= 0;
+  }
+  if (mangaNextChapter) {
+    mangaNextChapter.hidden = !hasChapters;
+    mangaNextChapter.disabled = mangaState.chapterIndex >= mangaState.chapters.length - 1;
+  }
+
+  if (mode === "strip") {
+    mangaRenderStrip();
+  } else {
+    mangaRenderPaged();
+  }
+
+  if (playerMangaCounter) {
+    playerMangaCounter.textContent =
+      mode === "strip" ? `${pageCount} Seiten` : `${index + 1} / ${pageCount}`;
+  }
+  mangaPreload();
+  mangaScheduleSave();
+}
+
+function mangaRenderPaged() {
+  const { index, pageCount, mode, fit, rtl } = mangaState;
+  if (mangaPagesView) mangaPagesView.hidden = false;
+  if (mangaStrip) {
+    mangaStrip.hidden = true;
+    clearNode(mangaStrip);
+    // The key must go with the children, or switching back finds an empty
+    // strip that believes it is already built.
+    delete mangaStrip.dataset.source;
+  }
+
+  const spread = mode === "spread" && index + 1 < pageCount;
+  if (mangaPageFrame) {
+    mangaPageFrame.className = `manga-page-frame fit-${fit}`;
+    mangaPageFrame.classList.toggle("is-rtl", rtl);
+    mangaPageFrame.classList.toggle("is-spread", spread);
+    mangaPageFrame.scrollTop = 0;
+    mangaPageFrame.scrollLeft = 0;
+  }
+  if (playerMangaImg) playerMangaImg.src = mangaPageUrl(index);
+  if (mangaPageSecondary) {
+    mangaPageSecondary.hidden = !spread;
+    if (spread) mangaPageSecondary.src = mangaPageUrl(index + 1);
+  }
+
+  // A zone is only dead if stepping that way leads nowhere at all. Disabling
+  // it at the chapter boundary would swallow the jump into the neighbouring
+  // chapter, which is exactly what the click is supposed to trigger.
+  const backBlocked = index <= 0 && mangaState.chapterIndex <= 0;
+  const forwardBlocked =
+    index + mangaStep() >= pageCount &&
+    mangaState.chapterIndex >= mangaState.chapters.length - 1;
+  // In right-to-left reading the forward control sits on the left.
+  if (playerMangaPrev) playerMangaPrev.disabled = rtl ? forwardBlocked : backBlocked;
+  if (playerMangaNext) playerMangaNext.disabled = rtl ? backBlocked : forwardBlocked;
+}
+
+function mangaRenderStrip() {
+  if (mangaPagesView) mangaPagesView.hidden = true;
+  if (!mangaStrip) return;
+  mangaStrip.hidden = false;
+  // Without this the strip ignored every fit mode and stayed in a fixed column.
+  mangaStrip.className = `manga-strip fit-${mangaState.fit}`;
+
+  // Rebuild only when the chapter changed, otherwise scrolling would reset.
+  if (mangaStrip.dataset.source !== mangaStripKey()) {
+    clearNode(mangaStrip);
+    for (let page = 0; page < mangaState.pageCount; page += 1) {
+      const img = document.createElement("img");
+      // Native lazy loading keeps a 140-slice webtoon from firing 140
+      // requests the moment the chapter opens.
+      img.loading = "lazy";
+      img.alt = "";
+      img.dataset.page = String(page);
+      img.src = mangaPageUrl(page);
+      mangaStrip.appendChild(img);
+    }
+    mangaStrip.dataset.source = mangaStripKey();
+    // Resume where the reader stopped. Images have no height yet, so the jump
+    // waits until the target slice has actually laid out.
+    mangaScrollToPage(mangaState.index);
+  }
+}
+
+/// Scrolls the strip so `page` sits at the top of the view.
+function mangaScrollToPage(page) {
+  if (!mangaStrip) return;
+  if (page <= 0) {
+    mangaStrip.scrollTop = 0;
+    return;
+  }
+  const target = mangaStrip.querySelector(`img[data-page="${page}"]`);
+  if (!target) return;
+  const jump = () => {
+    // `scroll-behavior: smooth` would animate a restore across a whole
+    // chapter; jump straight there and restore the smooth behaviour after.
+    const previous = mangaStrip.style.scrollBehavior;
+    mangaStrip.style.scrollBehavior = "auto";
+    mangaStrip.scrollTop = target.offsetTop - mangaStrip.offsetTop;
+    mangaStrip.style.scrollBehavior = previous;
+  };
+  if (target.complete && target.naturalHeight > 0) jump();
+  else target.addEventListener("load", jump, { once: true });
+}
+
+function mangaStripKey() {
+  return `${mangaState.kind}:${mangaState.archivePath}:${mangaState.pageCount}`;
+}
+
+/// Warms the cache for the pages just ahead of the reader.
+function mangaPreload() {
+  if (!mangaState || mangaState.mode === "strip") return;
+  for (let offset = 1; offset <= MANGA_PRELOAD_AHEAD; offset += 1) {
+    const page = mangaState.index + offset;
+    if (page >= mangaState.pageCount) break;
+    const img = new Image();
+    img.src = mangaPageUrl(page);
+  }
+}
+
+function mangaGo(delta) {
+  if (!mangaState) return;
+  // In the strip there are no pages to turn: the same controls scroll, and
+  // reaching either end moves to the neighbouring chapter.
+  if (mangaState.mode === "strip") {
+    mangaScrollStrip(delta);
+    return;
+  }
+  const next = mangaState.index + delta * mangaStep();
+
+  if (next < 0) {
+    // Stepping back past page one continues in the previous chapter.
+    if (mangaState.chapterIndex > 0) mangaLoadChapter(mangaState.chapterIndex - 1, "end");
+    return;
+  }
+  if (next >= mangaState.pageCount) {
+    if (mangaState.chapterIndex < mangaState.chapters.length - 1) {
+      mangaLoadChapter(mangaState.chapterIndex + 1, "start");
+    }
+    return;
+  }
+
+  mangaState.index = next;
+  mangaRender();
+}
+
+/// Distance a key press scrolls the strip: just under a screen, so a line of
+/// artwork is never skipped between two presses.
+const MANGA_STRIP_SCROLL_OVERLAP = 0.9;
+
+/// Scrolls the webtoon strip, chaining chapters at either end.
+function mangaScrollStrip(delta) {
+  if (!mangaStrip) return;
+  const page = mangaStrip.clientHeight * MANGA_STRIP_SCROLL_OVERLAP;
+  const before = mangaStrip.scrollTop;
+  const maximum = mangaStrip.scrollHeight - mangaStrip.clientHeight;
+  // A pixel of slack: browsers report fractional scroll positions that never
+  // land exactly on the maximum.
+  const atBottom = before >= maximum - 1;
+  const atTop = before <= 0;
+
+  if (delta > 0 && atBottom) {
+    if (mangaState.chapterIndex < mangaState.chapters.length - 1) {
+      mangaLoadChapter(mangaState.chapterIndex + 1, "start");
+    }
+    return;
+  }
+  if (delta < 0 && atTop) {
+    if (mangaState.chapterIndex > 0) mangaLoadChapter(mangaState.chapterIndex - 1, "end");
+    return;
+  }
+
+  mangaStrip.scrollTop = before + delta * page;
+  mangaScheduleSave();
+}
+
+/// Advances by one step in **reading order**.
+///
+/// Callers that speak screen position (the click zones) map it themselves via
+/// `mangaZoneStep`; doing it in both places would cancel out.
+function mangaAdvance(forward) {
+  mangaGo(forward ? 1 : -1);
+}
+
+/// Maps a click zone to reading order: the right zone reads forward in a
+/// left-to-right book and backward in a right-to-left one.
+function mangaZoneStep(rightZone) {
+  if (!mangaState) return;
+  mangaAdvance(mangaState.rtl ? !rightZone : rightZone);
+}
+
+async function mangaLoadChapter(chapterIndex, position) {
+  if (!mangaState) return;
+  const path = mangaState.chapters[chapterIndex];
+  if (!path) return;
+
+  mangaSaveProgress(true);
+  const chapters = mangaState.chapters;
+  const item = mangaState.item;
+  await openMangaViewer(path, item);
+  if (!mangaState) return;
+
+  // openMangaViewer recomputes siblings; keep the list we already had so a
+  // chapter that vanished from the plan cannot shorten the chain mid-read.
+  mangaState.chapters = chapters;
+  mangaState.chapterIndex = chapterIndex;
+  mangaState.index = position === "end" ? Math.max(0, mangaState.pageCount - mangaStep()) : 0;
+  mangaRender();
+}
+
+function mangaCycleFit() {
+  if (!mangaState) return;
+  const order = ["width", "height", "original"];
+  mangaState.fit = order[(order.indexOf(mangaState.fit) + 1) % order.length];
+  mangaSaveSettings();
+  mangaRender();
+}
+
+function mangaCycleMode() {
+  if (!mangaState) return;
+  const previous = mangaState.mode;
+  const order = ["single", "spread", "strip"];
+  mangaState.mode = order[(order.indexOf(mangaState.mode) + 1) % order.length];
+  // Leaving strip view lands on the page the reader scrolled to.
+  if (previous === "strip") mangaState.index = mangaStripVisiblePage();
+  mangaSaveSettings();
+  mangaRender();
+  // Entering it should land on the page they were reading.
+  if (mangaState.mode === "strip") mangaScrollToPage(mangaState.index);
+}
+
+/// Toggles distraction-free reading: the window goes fullscreen and the
+/// toolbar folds away until the pointer reaches the top edge.
+function mangaToggleFullscreen() {
+  const stage = playerMangaStage;
+  if (!stage) return;
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.();
+    return;
+  }
+  // Fullscreen is requested on the stage itself so the surrounding app chrome
+  // disappears rather than merely being covered.
+  stage.requestFullscreen?.().catch(() => {
+    // Fullscreen can be refused (permissions, embedded webview); the immersive
+    // styling alone still gets most of the benefit.
+    stage.classList.add("is-immersive");
+  });
+}
+
+function mangaSyncFullscreen() {
+  const active = Boolean(document.fullscreenElement);
+  playerMangaStage?.classList.toggle("is-immersive", active);
+  if (mangaFullscreenToggle) {
+    mangaFullscreenToggle.textContent = active ? "⛶ Fenster" : "⛶ Vollbild";
+  }
+}
+
+function mangaToggleDirection() {
+  if (!mangaState) return;
+  mangaState.rtl = !mangaState.rtl;
+  mangaSaveSettings();
+  mangaRender();
+}
+
+/// Page currently at the top of the webtoon view.
+function mangaStripVisiblePage() {
+  if (!mangaStrip || mangaStrip.hidden) return mangaState?.index ?? 0;
+  const containerTop = mangaStrip.getBoundingClientRect().top;
+  const images = Array.from(mangaStrip.querySelectorAll("img"));
+  for (const img of images) {
+    const rect = img.getBoundingClientRect();
+    // First slice whose bottom edge is still below the viewport top.
+    if (rect.bottom > containerTop) {
+      return Number(img.dataset.page) || 0;
+    }
+  }
+  return mangaState?.index ?? 0;
+}
+
+function mangaScheduleSave() {
+  if (mangaSaveTimer) clearTimeout(mangaSaveTimer);
+  // Debounced: paging quickly through a chapter must not write once per page.
+  mangaSaveTimer = setTimeout(() => mangaSaveProgress(false), 1200);
+}
+
+function mangaSaveProgress(immediate) {
+  if (!mangaState || mangaState.kind !== "cbz") return;
+  if (mangaSaveTimer && immediate) {
+    clearTimeout(mangaSaveTimer);
+    mangaSaveTimer = null;
+  }
+  const page = mangaState.mode === "strip" ? mangaStripVisiblePage() : mangaState.index;
   const root = getVaultRoot();
-  const rootQuery = root ? `&root=${encodeURIComponent(root)}` : "";
-  playerMangaImg.src = `mediavault://localhost/api/media-file?path=${encodeURIComponent(vaultPath)}${rootQuery}`;
-  playerMangaCounter.textContent = `${clamped + 1} / ${items.length}`;
-  if (playerMangaPrev) playerMangaPrev.disabled = clamped === 0;
-  if (playerMangaNext) playerMangaNext.disabled = clamped === items.length - 1;
+  const chapterCount = mangaState.chapters.length;
+  // Mirrors the label the Fundus library writes, so a position handed over
+  // reads the same there: "Kapitel 3/12 · Seite 7".
+  const label = chapterCount
+    ? `Kapitel ${mangaState.chapterIndex + 1}/${chapterCount} · Seite ${page + 1}`
+    : `Seite ${page + 1}`;
+  fetch("mediavault://localhost/api/progress/save", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      vault_root: root || null,
+      vault_path: mangaState.archivePath,
+      progress: { type: "manga", page, total_pages: mangaState.pageCount },
+      // Finished means the last page of the last chapter, as Fundus counts it.
+      completed:
+        page >= mangaState.pageCount - 1 && mangaState.chapterIndex + 1 >= chapterCount,
+      label,
+    }),
+  }).catch(() => {});
+}
+
+function mangaClose() {
+  mangaSaveProgress(true);
+  if (mangaSaveTimer) {
+    clearTimeout(mangaSaveTimer);
+    mangaSaveTimer = null;
+  }
+  if (mangaStrip) {
+    clearNode(mangaStrip);
+    delete mangaStrip.dataset.source;
+  }
+  if (playerMangaImg) playerMangaImg.removeAttribute("src");
+  if (mangaPageSecondary) mangaPageSecondary.removeAttribute("src");
+  mangaState = null;
 }
 
 function playerSetPlayPause(el) {
@@ -2617,10 +3154,11 @@ async function openPlayer(item) {
   const isAudio = isAudioFile(sourcePath);
   const isPdf = PLAYER_PDF_EXTS.has(ext);
   const isImage = PLAYER_IMAGE_EXTS.has(ext);
+  const isComic = MANGA_CBZ_EXTS.has(ext);
   const isEpub = PLAYER_EPUB_EXTS.has(ext);
   const unsupported = PLAYER_UNSUPPORTED_EXTS.has(ext) || isEpub;
 
-  if (!isVideo && !isAudio && !isPdf && !isImage && !unsupported) return;
+  if (!isVideo && !isAudio && !isPdf && !isImage && !isComic && !unsupported) return;
 
   // Unsupported formats (MKV, AVI, TS, ePub…): open directly in system player
   // without showing the internal player dialog.
@@ -2661,18 +3199,17 @@ async function openPlayer(item) {
     return;
   }
 
-  // ── Image / manga sequence ───────────────────────────────────────────────
-  if (isImage) {
+  // ── Manga viewer: CBZ archives and loose image sequences ─────────────────
+  if (isImage || isComic) {
     if (playerStage) playerStage.hidden = true;
     if (playerAudioArt) playerAudioArt.hidden = true;
     if (playerPdfStage) playerPdfStage.hidden = true;
     if (playerMangaStage) playerMangaStage.hidden = false;
     if (playerPlayPause) playerPlayPause.disabled = true;
-    const siblings = mangaSiblings(sourcePath);
-    const startIdx = Math.max(0, siblings.indexOf(sourcePath));
-    mangaState = { items: siblings, index: startIdx };
-    mangaShowIndex(startIdx);
+    // Nothing plays back here, so seek bar, speed and sleep timer are noise.
+    if (playerControls) playerControls.hidden = true;
     playerState = { mediaEl: null, item, vaultPath: sourcePath, sleepTimerId: null, saveTimerId: null };
+    await openMangaViewer(sourcePath, item);
     return;
   }
 
@@ -3397,17 +3934,25 @@ function initPlayer() {
     });
   }
 
-  // Manga navigation buttons
-  if (playerMangaPrev) {
-    playerMangaPrev.addEventListener("click", () => {
-      if (mangaState) mangaShowIndex(mangaState.index - 1);
-    });
-  }
-  if (playerMangaNext) {
-    playerMangaNext.addEventListener("click", () => {
-      if (mangaState) mangaShowIndex(mangaState.index + 1);
-    });
-  }
+  // Manga viewer controls. The zones sit left and right of the page, so they
+  // step by screen position; `mangaAdvance` maps that onto reading order.
+  playerMangaPrev?.addEventListener("click", () => mangaZoneStep(false));
+  playerMangaNext?.addEventListener("click", () => mangaZoneStep(true));
+  mangaFitToggle?.addEventListener("click", mangaCycleFit);
+  mangaModeToggle?.addEventListener("click", mangaCycleMode);
+  mangaDirectionToggle?.addEventListener("click", mangaToggleDirection);
+  mangaFullscreenToggle?.addEventListener("click", mangaToggleFullscreen);
+  document.addEventListener("fullscreenchange", mangaSyncFullscreen);
+  mangaPrevChapter?.addEventListener("click", () => {
+    if (mangaState) mangaLoadChapter(mangaState.chapterIndex - 1, "start");
+  });
+  mangaNextChapter?.addEventListener("click", () => {
+    if (mangaState) mangaLoadChapter(mangaState.chapterIndex + 1, "start");
+  });
+  // Scrolling a webtoon is the only progress signal that view produces.
+  mangaStrip?.addEventListener("scroll", () => {
+    if (mangaState?.mode === "strip") mangaScheduleSave();
+  });
 
   // Keep time display and seek bar in sync.
   for (const mediaEl of [playerVideo, playerAudio]) {
@@ -3432,15 +3977,43 @@ function initPlayer() {
     if (playerDialog && !playerDialog.hidden) {
       if (e.key === " " || e.key === "k") {
         e.preventDefault();
-        playerPlayPause?.click();
+        if (mangaState) mangaAdvance(!e.shiftKey);
+        else playerPlayPause?.click();
       }
       if (e.key === "ArrowLeft") {
-        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index - 1); }
-        else { e.preventDefault(); playerSkipBack?.click(); }
+        e.preventDefault();
+        // Left means "back" in a left-to-right book and "forward" in a
+        // right-to-left one, which is what readers expect from manga.
+        if (mangaState) mangaAdvance(Boolean(mangaState.rtl));
+        else playerSkipBack?.click();
       }
       if (e.key === "ArrowRight") {
-        if (mangaState) { e.preventDefault(); mangaShowIndex(mangaState.index + 1); }
-        else { e.preventDefault(); playerSkipFwd?.click(); }
+        e.preventDefault();
+        if (mangaState) mangaAdvance(!mangaState.rtl);
+        else playerSkipFwd?.click();
+      }
+      if (mangaState) {
+        if (e.key === "PageDown") { e.preventDefault(); mangaAdvance(true); }
+        if (e.key === "PageUp") { e.preventDefault(); mangaAdvance(false); }
+        if (e.key === "Home") {
+          e.preventDefault();
+          mangaState.index = 0;
+          if (mangaState.mode === "strip") mangaScrollToPage(0);
+          else mangaRender();
+        }
+        if (e.key === "End") {
+          e.preventDefault();
+          if (mangaState.mode === "strip") {
+            if (mangaStrip) mangaStrip.scrollTop = mangaStrip.scrollHeight;
+          } else {
+            mangaState.index = Math.max(0, mangaState.pageCount - mangaStep());
+            mangaRender();
+          }
+        }
+        if (e.key === "f") { e.preventDefault(); mangaCycleFit(); }
+        if (e.key === "m") { e.preventDefault(); mangaCycleMode(); }
+        if (e.key === "r") { e.preventDefault(); mangaToggleDirection(); }
+        if (e.key === "v" || e.key === "F11") { e.preventDefault(); mangaToggleFullscreen(); }
       }
     }
   });
@@ -4691,6 +5264,7 @@ function renderInspector(value) {
       PLAYER_UNSUPPORTED_EXTS.has(ext) ||
       PLAYER_PDF_EXTS.has(ext) ||
       PLAYER_IMAGE_EXTS.has(ext) ||
+      MANGA_CBZ_EXTS.has(ext) ||
       PLAYER_EPUB_EXTS.has(ext);
     inspectorPlay.hidden = !item || !playable;
   }
@@ -9166,3 +9740,483 @@ document.getElementById("webnovel-logout-btn")?.addEventListener("click", async 
 
 // Reflect the persisted login state on startup.
 refreshNovelUpdatesLoginStatus();
+
+// ---------------------------------------------------------------------------
+// Manga subscriptions
+// ---------------------------------------------------------------------------
+// Mirrors the webnovel tab: same endpoints, same card markup, same CSS. What
+// differs is the artifact (one CBZ per chapter) and the progress display,
+// which also reports pages — a single chapter is dozens of image requests.
+
+const mangaSettingsKey = "mediavault.mangaSettings";
+const mangaUrlInput = document.getElementById("manga-url-input");
+const mangaSubscribeBtn = document.getElementById("manga-subscribe-btn");
+const mangaCheckAllBtn = document.getElementById("manga-check-all-btn");
+const mangaFeedback = document.getElementById("manga-feedback");
+const mangaSourcesHint = document.getElementById("manga-sources-hint");
+const mangaJobProgress = document.getElementById("manga-job-progress");
+const mangaJobText = document.getElementById("manga-job-text");
+const mangaJobBar = document.getElementById("manga-job-bar");
+const mangaList = document.getElementById("manga-list");
+const mangaListEmpty = document.getElementById("manga-list-empty");
+const mangaFilters = document.getElementById("manga-filters");
+const mangaDelayInput = document.getElementById("manga-delay-input");
+const mangaMaxChapters = document.getElementById("manga-max-chapters");
+
+/// Sites with an adapter, shown so a rejected URL is not a surprise.
+const mangaSupportedSources =
+  "Unterstützt: mangatown.com · fanfox.net · webtoons.com · mangaread.org · manhuaplus.com · hentai20.io";
+
+let mangaSubscriptionsCache = [];
+let mangaTrashCache = [];
+let mangaActiveFilter = "all";
+let mangaCheckRunning = false;
+let mangaInitialized = false;
+
+function setMangaFeedback(message, isError = false) {
+  if (!mangaFeedback) return;
+  mangaFeedback.textContent = message ?? "";
+  mangaFeedback.classList.toggle("is-error", Boolean(isError));
+}
+
+function mangaRootQuery() {
+  const root = getVaultRoot();
+  return root ? `&root=${encodeURIComponent(root)}` : "";
+}
+
+function loadMangaSettings() {
+  const stored = loadStoredJson(mangaSettingsKey, {});
+  return {
+    delayMs: Number(stored.delayMs) || 1500,
+    maxChapters: Number(stored.maxChapters) || 50,
+  };
+}
+
+function saveMangaSettings() {
+  saveStoredJson(mangaSettingsKey, {
+    delayMs: Number(mangaDelayInput?.value) || 1500,
+    maxChapters: Number(mangaMaxChapters?.value) || 50,
+  });
+}
+
+async function refreshMangaList() {
+  if (!mangaList) return;
+  try {
+    const payload = await webnovelApi(`/api/manga/list?_=${Date.now()}${mangaRootQuery()}`);
+    if (payload.error) {
+      setMangaFeedback(payload.error, true);
+      return;
+    }
+    mangaSubscriptionsCache = payload.subscriptions ?? [];
+    if (mangaActiveFilter === "trash") {
+      await refreshMangaTrash();
+    } else {
+      renderMangaList(applyMangaFilter(mangaSubscriptionsCache));
+    }
+  } catch (error) {
+    setMangaFeedback(`Abos konnten nicht geladen werden: ${error.message}`, true);
+  }
+}
+
+async function refreshMangaTrash() {
+  try {
+    const payload = await webnovelApi(`/api/manga/trash?_=${Date.now()}${mangaRootQuery()}`);
+    mangaTrashCache = payload.subscriptions ?? [];
+    renderMangaList(mangaTrashCache, true);
+  } catch (error) {
+    setMangaFeedback(`Papierkorb konnte nicht geladen werden: ${error.message}`, true);
+  }
+}
+
+function applyMangaFilter(subscriptions) {
+  switch (mangaActiveFilter) {
+    case "ongoing":
+      return subscriptions.filter((s) => !s.completed && !s.hiatus && s.enabled);
+    case "completed":
+      return subscriptions.filter((s) => s.completed);
+    case "paused":
+      return subscriptions.filter((s) => !s.enabled);
+    case "error":
+      return subscriptions.filter((s) => Boolean(s.lastError));
+    case "new":
+      return subscriptions.filter(
+        (s) => (s.knownChapters ?? 0) - (s.downloadedChapters ?? 0) > 0,
+      );
+    default:
+      return subscriptions;
+  }
+}
+
+function mangaCoverUrl(subscription) {
+  if (!subscription.coverPath) return null;
+  const root = getVaultRoot();
+  return `/api/media-file?path=${encodeURIComponent(subscription.coverPath)}${
+    root ? `&root=${encodeURIComponent(root)}` : ""
+  }`;
+}
+
+function renderMangaList(subscriptions, isTrash = false) {
+  if (!mangaList) return;
+  clearNode(mangaList);
+  if (mangaListEmpty) {
+    mangaListEmpty.hidden = subscriptions.length > 0;
+    mangaListEmpty.textContent = isTrash
+      ? "Papierkorb ist leer."
+      : mangaSubscriptionsCache.length
+        ? "Keine Abos für diesen Filter."
+        : "Noch keine Abos vorhanden.";
+  }
+
+  subscriptions.forEach((subscription) => {
+    const card = document.createElement("article");
+    card.className = "webnovel-card";
+
+    const coverUrl = mangaCoverUrl(subscription);
+    if (coverUrl) {
+      const cover = document.createElement("img");
+      cover.className = "webnovel-card-cover";
+      cover.loading = "lazy";
+      cover.alt = "";
+      cover.src = coverUrl;
+      card.appendChild(cover);
+    }
+
+    const cardBody = document.createElement("div");
+    cardBody.className = "webnovel-card-body";
+
+    const head = document.createElement("div");
+    head.className = "webnovel-card-head";
+    const title = document.createElement("span");
+    title.className = "webnovel-card-title";
+    title.textContent = subscription.title || subscription.url;
+    head.appendChild(title);
+
+    const badges = document.createElement("span");
+    const sourceBadge = document.createElement("span");
+    sourceBadge.className = "webnovel-badge";
+    sourceBadge.textContent = subscription.source;
+    badges.appendChild(sourceBadge);
+
+    const pending = (subscription.knownChapters ?? 0) - (subscription.downloadedChapters ?? 0);
+    if (pending > 0) {
+      const newBadge = document.createElement("span");
+      newBadge.className = "webnovel-badge is-new";
+      newBadge.textContent = `${pending} neu`;
+      badges.appendChild(newBadge);
+    }
+    if (subscription.completed) {
+      const doneBadge = document.createElement("span");
+      doneBadge.className = "webnovel-badge is-completed";
+      doneBadge.textContent = "abgeschlossen";
+      badges.appendChild(doneBadge);
+    }
+    if (subscription.hiatus) {
+      const hiatusBadge = document.createElement("span");
+      hiatusBadge.className = "webnovel-badge is-hiatus";
+      hiatusBadge.textContent = "Hiatus";
+      badges.appendChild(hiatusBadge);
+    }
+    if (!subscription.enabled) {
+      const pausedBadge = document.createElement("span");
+      pausedBadge.className = "webnovel-badge is-paused";
+      pausedBadge.textContent = "pausiert";
+      badges.appendChild(pausedBadge);
+    }
+    if (subscription.lastError) {
+      const errorBadge = document.createElement("span");
+      errorBadge.className = "webnovel-badge is-error";
+      errorBadge.textContent = "Fehler";
+      errorBadge.title = subscription.lastError;
+      badges.appendChild(errorBadge);
+    }
+    head.appendChild(badges);
+    cardBody.appendChild(head);
+
+    const meta = document.createElement("p");
+    meta.className = "webnovel-card-meta";
+    const authorPart = subscription.author ? `${subscription.author} · ` : "";
+    meta.textContent =
+      `${authorPart}${subscription.downloadedChapters ?? 0}/${subscription.knownChapters ?? 0} Kapitel · ` +
+      `zuletzt geprüft: ${formatWebnovelTimestamp(subscription.lastCheckUnix)}`;
+    cardBody.appendChild(meta);
+    card.appendChild(cardBody);
+
+    card.classList.add("is-clickable");
+    card.addEventListener("click", () => openMangaDetail(subscription, isTrash));
+    mangaList.appendChild(card);
+  });
+}
+
+function openMangaDetail(subscription, isTrash = false) {
+  const overlay = document.getElementById("manga-detail");
+  if (!overlay) return;
+
+  const cover = document.getElementById("manga-detail-cover");
+  const coverUrl = mangaCoverUrl(subscription);
+  if (cover) {
+    cover.hidden = !coverUrl;
+    if (coverUrl) cover.src = coverUrl;
+  }
+  document.getElementById("manga-detail-title").textContent =
+    subscription.title || subscription.url;
+
+  const authorParts = [subscription.author, subscription.artist].filter(Boolean);
+  document.getElementById("manga-detail-author").textContent = authorParts.length
+    ? authorParts.join(" · ")
+    : "";
+  document.getElementById("manga-detail-description").textContent =
+    subscription.description || "Keine Beschreibung vorhanden.";
+  document.getElementById("manga-detail-genres").textContent = (subscription.genres ?? []).join(
+    ", ",
+  );
+  document.getElementById("manga-detail-chapters").textContent =
+    `${subscription.downloadedChapters ?? 0} von ${subscription.knownChapters ?? 0} Kapiteln geladen`;
+
+  const errorEl = document.getElementById("manga-detail-error");
+  errorEl.hidden = !subscription.lastError;
+  errorEl.textContent = subscription.lastError ?? "";
+
+  const links = document.getElementById("manga-detail-links");
+  clearNode(links);
+  [
+    ["Quelle öffnen", subscription.url],
+    ["AniList", subscription.anilistUrl],
+  ].forEach(([label, url]) => {
+    if (!url) return;
+    const button = document.createElement("button");
+    button.className = "action-button";
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      fetch(`/api/open-url?url=${encodeURIComponent(url)}`).catch(() => {});
+    });
+    links.appendChild(button);
+  });
+
+  const actions = document.getElementById("manga-detail-actions");
+  clearNode(actions);
+  const addAction = (label, handler, className = "action-button") => {
+    const button = document.createElement("button");
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await handler();
+      } finally {
+        button.disabled = false;
+      }
+    });
+    actions.appendChild(button);
+  };
+
+  if (isTrash) {
+    addAction("Wiederherstellen", async () => {
+      await mangaPost("/api/manga/restore", { id: subscription.id });
+      overlay.hidden = true;
+      await refreshMangaList();
+    });
+    addAction(
+      "Endgültig löschen",
+      async () => {
+        if (!confirm(`„${subscription.title}“ endgültig löschen? Dateien werden entfernt.`)) return;
+        await mangaPost("/api/manga/purge", { id: subscription.id });
+        overlay.hidden = true;
+        await refreshMangaList();
+      },
+      "action-button danger",
+    );
+  } else {
+    addAction("Jetzt prüfen", async () => {
+      overlay.hidden = true;
+      await startMangaCheck(subscription.id);
+    });
+    addAction(subscription.enabled ? "Pausieren" : "Fortsetzen", async () => {
+      await mangaPost("/api/manga/update", {
+        id: subscription.id,
+        enabled: !subscription.enabled,
+      });
+      overlay.hidden = true;
+      await refreshMangaList();
+    });
+    addAction(subscription.completed ? "Als laufend markieren" : "Als abgeschlossen markieren",
+      async () => {
+        await mangaPost("/api/manga/update", {
+          id: subscription.id,
+          completed: !subscription.completed,
+        });
+        overlay.hidden = true;
+        await refreshMangaList();
+      });
+    addAction(
+      "In den Papierkorb",
+      async () => {
+        const keepFiles = confirm(
+          `„${subscription.title}“ in den Papierkorb.\n\n` +
+            "OK = Dateien behalten · Abbrechen = Dateien ebenfalls in den Papierkorb",
+        );
+        await mangaPost("/api/manga/unsubscribe", {
+          id: subscription.id,
+          keepFiles,
+        });
+        overlay.hidden = true;
+        await refreshMangaList();
+      },
+      "action-button danger",
+    );
+  }
+
+  overlay.hidden = false;
+}
+
+async function mangaPost(path, payload) {
+  return webnovelApi(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...payload, root: getVaultRoot() || undefined }),
+  });
+}
+
+async function subscribeManga() {
+  const url = (mangaUrlInput?.value ?? "").trim();
+  if (!url) {
+    setMangaFeedback("Bitte eine Manga-URL eingeben.", true);
+    return;
+  }
+  setMangaFeedback("Serie wird gelesen …");
+  if (mangaSubscribeBtn) mangaSubscribeBtn.disabled = true;
+  try {
+    const payload = await mangaPost("/api/manga/subscribe", { url });
+    if (payload.error) {
+      setMangaFeedback(payload.error, true);
+      return;
+    }
+    if (mangaUrlInput) mangaUrlInput.value = "";
+    setMangaFeedback(
+      payload.alreadySubscribed
+        ? `„${payload.subscription?.title}“ ist bereits abonniert.`
+        : `„${payload.subscription?.title}“ abonniert — ${payload.subscription?.knownChapters ?? 0} Kapitel gefunden.`,
+    );
+    await refreshMangaList();
+  } catch (error) {
+    setMangaFeedback(`Abonnieren fehlgeschlagen: ${error.message}`, true);
+  } finally {
+    if (mangaSubscribeBtn) mangaSubscribeBtn.disabled = false;
+  }
+}
+
+async function startMangaCheck(onlyId = null) {
+  if (mangaCheckRunning) {
+    setMangaFeedback("Eine Prüfung läuft bereits.", true);
+    return;
+  }
+  const settings = loadMangaSettings();
+  try {
+    mangaCheckRunning = true;
+    if (mangaCheckAllBtn) mangaCheckAllBtn.disabled = true;
+    const payload = await mangaPost("/api/manga/check", {
+      id: onlyId ?? undefined,
+      delayMs: settings.delayMs,
+      maxChapters: settings.maxChapters,
+    });
+    if (payload.error) {
+      setMangaFeedback(payload.error, true);
+      return;
+    }
+    setMangaFeedback("Prüfung gestartet …");
+    await pollMangaJob(payload.jobId);
+  } catch (error) {
+    setMangaFeedback(`Prüfung fehlgeschlagen: ${error.message}`, true);
+  } finally {
+    mangaCheckRunning = false;
+    if (mangaCheckAllBtn) mangaCheckAllBtn.disabled = false;
+    if (mangaJobProgress) mangaJobProgress.hidden = true;
+    await refreshMangaList();
+  }
+}
+
+async function pollMangaJob(jobId) {
+  if (!jobId) return;
+  if (mangaJobProgress) mangaJobProgress.hidden = false;
+
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    let payload;
+    try {
+      payload = await webnovelApi(`/api/manga/job?job_id=${encodeURIComponent(jobId)}`);
+    } catch (error) {
+      setMangaFeedback(`Fortschritt nicht abrufbar: ${error.message}`, true);
+      return;
+    }
+    const status = payload.status;
+    if (!status) return;
+
+    if (mangaJobText) {
+      const chapterPart = status.totalChapters
+        ? `Kapitel ${status.currentChapter}/${status.totalChapters}`
+        : "wird vorbereitet";
+      const pagePart = status.totalPages
+        ? ` · Seite ${status.currentPage}/${status.totalPages}`
+        : "";
+      mangaJobText.textContent = `${status.mangaTitle || "…"} — ${chapterPart}${pagePart}`;
+    }
+    if (mangaJobBar) {
+      // Chapter progress drives the bar; pages refine it inside one chapter so
+      // a long chapter still moves the indicator.
+      const chapterShare = status.totalChapters
+        ? (status.currentChapter - 1) / status.totalChapters
+        : 0;
+      const pageShare =
+        status.totalChapters && status.totalPages
+          ? status.currentPage / status.totalPages / status.totalChapters
+          : 0;
+      const percent = Math.min(100, Math.max(0, (chapterShare + pageShare) * 100));
+      mangaJobBar.style.width = `${percent}%`;
+    }
+
+    if (status.state !== "running") {
+      setMangaFeedback(status.message ?? "Prüfung beendet.", status.state === "failed");
+      return;
+    }
+  }
+}
+
+function initMangas() {
+  if (mangaInitialized) {
+    refreshMangaList();
+    return;
+  }
+  mangaInitialized = true;
+
+  if (mangaSourcesHint) mangaSourcesHint.textContent = mangaSupportedSources;
+
+  const settings = loadMangaSettings();
+  if (mangaDelayInput) mangaDelayInput.value = String(settings.delayMs);
+  if (mangaMaxChapters) mangaMaxChapters.value = String(settings.maxChapters);
+  mangaDelayInput?.addEventListener("change", saveMangaSettings);
+  mangaMaxChapters?.addEventListener("change", saveMangaSettings);
+
+  mangaSubscribeBtn?.addEventListener("click", subscribeManga);
+  mangaUrlInput?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") subscribeManga();
+  });
+  mangaCheckAllBtn?.addEventListener("click", () => startMangaCheck());
+  document.getElementById("manga-detail-close")?.addEventListener("click", () => {
+    document.getElementById("manga-detail").hidden = true;
+  });
+
+  mangaFilters?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-manga-filter]");
+    if (!button) return;
+    mangaActiveFilter = button.dataset.mangaFilter;
+    mangaFilters.querySelectorAll("[data-manga-filter]").forEach((chip) => {
+      chip.classList.toggle("is-active", chip === button);
+    });
+    if (mangaActiveFilter === "trash") {
+      refreshMangaTrash();
+    } else {
+      renderMangaList(applyMangaFilter(mangaSubscriptionsCache));
+    }
+  });
+
+  refreshMangaList();
+}

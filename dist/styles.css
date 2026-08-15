@@ -165,6 +165,14 @@ body:not(.is-vault-open) .app-shell {
   display: grid;
 }
 
+/* The `hidden` attribute only works through the UA rule `[hidden]{display:none}`,
+   which ANY author `display` declaration silently overrides. That has bitten this
+   file repeatedly (see the scoped workarounds below), so it is settled centrally:
+   an element marked hidden is hidden, whatever else its rules say. */
+[hidden] {
+  display: none !important;
+}
+
 .app-modal > [hidden] {
   display: none !important;
 }
@@ -1923,27 +1931,184 @@ h3 {
 .player-manga-stage {
   flex: 1;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
+  flex-direction: column;
   background: var(--bg);
   position: relative;
   min-height: 0;
   overflow: hidden;
 }
 
-.player-manga-nav {
-  font-size: 2rem;
-  padding: 0 12px;
+.manga-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
   background: rgba(0, 0, 0, 0.45);
   flex-shrink: 0;
-  z-index: 1;
+  flex-wrap: wrap;
 }
 
-#player-manga-img {
-  max-width: calc(100% - 100px);
+.manga-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.manga-chapter-label {
+  font-size: 0.75rem;
+  color: var(--muted);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Paged view ------------------------------------------------------------- */
+
+.manga-pages {
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  min-height: 0;
+  position: relative;
+}
+
+/* Click zones rather than small buttons: the whole left/right third of the
+   stage turns the page, which is how every touch reader behaves. */
+.manga-nav-zone {
+  flex: 0 0 15%;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 2.5rem;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.15s ease;
+  padding: 0;
+}
+
+.manga-nav-zone:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.manga-nav-zone:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.manga-nav-arrow {
+  pointer-events: none;
+}
+
+.manga-page-frame {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  overflow: auto;
+}
+
+/* Spread order follows the reading direction: for right-to-left manga the
+   first page of a pair belongs on the right. */
+.manga-page-frame.is-rtl {
+  flex-direction: row-reverse;
+}
+
+.manga-page-frame img {
+  display: block;
+}
+
+/* Fit modes -------------------------------------------------------------- */
+
+.manga-page-frame.fit-width img {
+  width: 100%;
+  height: auto;
+  max-width: none;
+  object-fit: contain;
+}
+
+.manga-page-frame.fit-width.is-spread img {
+  width: 50%;
+}
+
+.manga-page-frame.fit-height img {
+  height: 100%;
+  width: auto;
   max-height: 100%;
   object-fit: contain;
+}
+
+.manga-page-frame.fit-original {
+  align-items: flex-start;
+  justify-content: flex-start;
+}
+
+.manga-page-frame.fit-original img {
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+}
+
+/* Webtoon view ----------------------------------------------------------- */
+
+.manga-strip {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  text-align: center;
+  scroll-behavior: smooth;
+}
+
+/* Slices are stacked seamlessly: a gap between them would cut through the
+   artwork of a continuous strip. */
+.manga-strip img {
+  display: block;
+  margin: 0 auto;
+  height: auto;
+}
+
+/* The fit modes apply here too. Without this the strip was pinned to a fixed
+   column and "Breite" did nothing at all in webtoon view. */
+.manga-strip.fit-width img {
+  width: 100%;
+  max-width: none;
+}
+
+/* "Höhe" has no meaning for an endless strip, so it serves as the comfortable
+   reading column instead — long line lengths are what hurt on a wide screen. */
+.manga-strip.fit-height img {
+  width: 100%;
+  max-width: 900px;
+}
+
+.manga-strip.fit-original img {
+  width: auto;
+  max-width: none;
+}
+
+/* Immersive mode: the toolbar folds away and returns on hover, so a full
+   screen really is only the page. */
+.player-manga-stage.is-immersive .manga-toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  opacity: 0;
+  transform: translateY(-100%);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.player-manga-stage.is-immersive:hover .manga-toolbar,
+.player-manga-stage.is-immersive .manga-toolbar:focus-within {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .player-manga-counter {
@@ -1956,6 +2121,7 @@ h3 {
   background: rgba(0, 0, 0, 0.5);
   padding: 2px 8px;
   border-radius: 10px;
+  pointer-events: none;
 }
 
 .player-audio-art {

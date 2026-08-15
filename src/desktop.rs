@@ -29,7 +29,8 @@ use crate::core::playlist::{
     Playlist, PlaylistCursor,
 };
 use crate::core::progress::{
-    delete_progress, list_in_progress, load_progress, save_progress, MediaProgress, ProgressRecord,
+    delete_progress, list_in_progress, load_progress, save_progress_labeled, MediaProgress,
+    ProgressRecord,
 };
 use crate::core::properties::{
     legacy_sidecar_path_for, render_sidecar_yaml, sidecar_path_for, SIDECAR_SUFFIX,
@@ -230,6 +231,11 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
                 .map(|s| s.to_string());
             build_media_file_response(request.uri().query(), range.as_deref())
         }
+        "/api/cbz/info" => json_response(
+            StatusCode::OK,
+            &build_cbz_info_response(request.uri().query()),
+        ),
+        "/api/cbz/page" => build_cbz_page_response(request.uri().query()),
         "/api/apply-import" => {
             json_response(StatusCode::OK, &build_apply_import_response(request.body()))
         }
@@ -401,6 +407,44 @@ fn handle_request(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
             StatusCode::OK,
             &build_webnovel_job_response(request.uri().query()),
         ),
+        // Manga subscriptions mirror the webnovel endpoints one for one; the
+        // handlers live in `desktop_manga` to keep this file from growing.
+        "/api/manga/list" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_list_response(request.uri().query()),
+        ),
+        "/api/manga/subscribe" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_subscribe_response(request.body()),
+        ),
+        "/api/manga/unsubscribe" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_unsubscribe_response(request.body()),
+        ),
+        "/api/manga/update" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_update_response(request.body()),
+        ),
+        "/api/manga/check" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_check_response(request.body()),
+        ),
+        "/api/manga/job" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_job_response(request.uri().query()),
+        ),
+        "/api/manga/trash" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_trash_response(request.uri().query()),
+        ),
+        "/api/manga/restore" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_restore_response(request.body()),
+        ),
+        "/api/manga/purge" => json_response(
+            StatusCode::OK,
+            &crate::desktop_manga::build_purge_response(request.body()),
+        ),
         _ => response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
@@ -417,7 +461,7 @@ fn response(status: StatusCode, content_type: &str, body: &str) -> Response<Vec<
         .expect("response construction should succeed")
 }
 
-fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8>> {
+pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response<Vec<u8>> {
     match serde_json::to_vec(value) {
         Ok(body) => Response::builder()
             .status(status)
@@ -588,6 +632,122 @@ fn build_select_folder_response() -> SelectFolderResponse {
     SelectFolderResponse {
         path: selected.map(|path| path.display().to_string()),
         error: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CBZ reading (manga viewer)
+// ---------------------------------------------------------------------------
+
+/// Resolves a `?path=&root=` query to an absolute file inside the vault.
+///
+/// Shares the sandbox rules with [`build_media_file_response`]: the path is a
+/// vault-relative [`RelativePath`], and `resolve_existing` rejects anything
+/// that escapes the vault, symlinks included.
+fn resolve_vault_file(query: Option<&str>) -> std::result::Result<PathBuf, String> {
+    let query = query.ok_or_else(|| "missing query".to_string())?;
+    let path = extract_query_value(query, "path").ok_or_else(|| "missing path".to_string())?;
+    let root_override = extract_query_value(query, "root");
+
+    let vault_root = match resolve_vault_root(root_override.as_deref()) {
+        Ok(Some(root)) => root,
+        Ok(None) => return Err("Kein Vault geöffnet.".to_string()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let vault = Vault::new(vault_root).map_err(|error| error.to_string())?;
+    let relative = RelativePath::new(path).map_err(|error| error.to_string())?;
+    vault
+        .resolve_existing(relative.as_path())
+        .map_err(|error| error.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CbzInfoResponse {
+    /// Number of page images in the archive.
+    page_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    number: Option<String>,
+    /// Right-to-left reading order (Japanese manga).
+    right_to_left: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+impl CbzInfoResponse {
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            page_count: 0,
+            series: None,
+            title: None,
+            number: None,
+            right_to_left: false,
+            error: Some(message.into()),
+        }
+    }
+}
+
+/// Returns page count and `ComicInfo.xml` metadata for a CBZ in the vault.
+fn build_cbz_info_response(query: Option<&str>) -> CbzInfoResponse {
+    let absolute = match resolve_vault_file(query) {
+        Ok(path) => path,
+        Err(message) => return CbzInfoResponse::error(message),
+    };
+    match crate::core::cbz::read_cbz_info(&absolute) {
+        Ok(info) => CbzInfoResponse {
+            page_count: info.pages.len(),
+            series: info.series,
+            title: info.title,
+            number: info.number,
+            right_to_left: info.right_to_left,
+            error: None,
+        },
+        Err(error) => CbzInfoResponse::error(error.to_string()),
+    }
+}
+
+/// Serves one page image out of a CBZ in the vault.
+///
+/// Pages are immutable once written, so the response is cached aggressively —
+/// without it, paging back and forth re-reads the archive every time.
+fn build_cbz_page_response(query: Option<&str>) -> Response<Vec<u8>> {
+    let absolute = match resolve_vault_file(query) {
+        Ok(path) => path,
+        Err(message) => {
+            return response(
+                StatusCode::BAD_REQUEST,
+                "text/plain; charset=utf-8",
+                &message,
+            )
+        }
+    };
+    let index = query
+        .and_then(|q| extract_query_value(q, "index"))
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+
+    match crate::core::cbz::read_cbz_page(&absolute, index) {
+        Ok((media_type, bytes)) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, media_type)
+            .header("Cache-Control", "private, max-age=3600")
+            .body(bytes)
+            .unwrap_or_else(|_| {
+                response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "text/plain; charset=utf-8",
+                    "response build failed",
+                )
+            }),
+        Err(error) => response(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            &error.to_string(),
+        ),
     }
 }
 
@@ -2211,6 +2371,7 @@ impl DemoPlanItem {
             media_type,
             title.as_deref(),
             effective_year,
+            effective_series_title.as_deref(),
             anime_context.as_ref(),
             anilist,
         );
@@ -2465,6 +2626,7 @@ fn build_collection_path(
     media_type: MediaType,
     title: Option<&str>,
     year: Option<u16>,
+    series_title: Option<&str>,
     anime_context: Option<&AnimeEpisodeContext>,
     anilist: Option<&AniListAnimeMetadata>,
 ) -> String {
@@ -2531,6 +2693,18 @@ fn build_collection_path(
             let t = safe_folder_segment(title.unwrap_or_default(), "Unbenannt");
             let y = year_suffix(year);
             format!("Musik/{t}{y}")
+        }
+        // Manga and comics arrive one file per chapter, so grouping by the
+        // file's own title would give every chapter its own collection node
+        // ("Chapter 1", "Chapter 2", …). The series title from the sidecar is
+        // what holds a series together.
+        MediaType::Manga | MediaType::Comic | MediaType::HentaiManga => {
+            let series = series_title.or(title).unwrap_or("Unbenannt");
+            format!(
+                "{}/{}",
+                media_type.folder_segment(),
+                safe_folder_segment(series, "Unbenannt")
+            )
         }
         _ => {
             let folder = media_type.folder_segment();
@@ -3000,7 +3174,7 @@ const RESERVED_SEGMENT_NAMES: &[&str] = &[
 /// capped. An input that carries no usable characters yields an **empty**
 /// string — callers that build real paths must treat that as "no name" and
 /// substitute their own fallback (see [`safe_folder_segment`]).
-fn sanitize_path_segment(value: &str) -> String {
+pub(crate) fn sanitize_path_segment(value: &str) -> String {
     let mut sanitized = String::with_capacity(value.len());
 
     for character in value.chars() {
@@ -3050,7 +3224,7 @@ fn sanitize_path_segment(value: &str) -> String {
 /// becomes a real directory: an empty segment would silently resolve to the
 /// parent directory, which turns a per-novel delete into a delete of the whole
 /// library.
-fn safe_folder_segment(value: &str, fallback: &str) -> String {
+pub(crate) fn safe_folder_segment(value: &str, fallback: &str) -> String {
     let sanitized = sanitize_path_segment(value);
     if sanitized.is_empty() {
         return fallback.to_string();
@@ -3099,7 +3273,7 @@ fn format_plan_step(step: PlannedImportStep) -> String {
     }
 }
 
-fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
+pub(crate) fn extract_query_value(query: &str, wanted_key: &str) -> Option<String> {
     for pair in query.split('&') {
         let Some((key, value)) = pair.split_once('=') else {
             continue;
@@ -3211,7 +3385,7 @@ fn save_sidecar_item(vault: &Vault, item: &SaveSidecarItem) -> Result<()> {
     write_sidecar_preview(vault, &media_relative, &item.sidecar_preview)
 }
 
-fn write_sidecar_preview(
+pub(crate) fn write_sidecar_preview(
     vault: &Vault,
     media_relative: &RelativePath,
     sidecar_preview: &str,
@@ -3353,7 +3527,7 @@ fn prune_empty_inbox_dirs(vault: &Vault, start: Option<&Path>) {
     }
 }
 
-fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {
+pub(crate) fn resolve_vault_root(root_override: Option<&str>) -> Result<Option<PathBuf>> {
     if let Some(root) = normalized_override(root_override) {
         let resolved = resolve_existing_root(root)?;
         if !is_authorized_root(&resolved) {
@@ -4535,6 +4709,10 @@ struct SaveProgressRequest {
     progress: MediaProgress,
     #[serde(default)]
     completed: bool,
+    /// Human-readable position for other readers of the interchange record,
+    /// e.g. `Kapitel 3/12 · Seite 7`.
+    #[serde(default)]
+    label: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -4619,11 +4797,12 @@ fn build_save_progress_response(body: &[u8]) -> SaveProgressResponse {
         Err(e) => return SaveProgressResponse::error(e.to_string()),
     };
 
-    match save_progress(
+    match save_progress_labeled(
         &vault.progress_dir(),
         &req.vault_path,
         req.progress,
         req.completed,
+        req.label,
     ) {
         Ok(()) => SaveProgressResponse::ok(),
         Err(e) => SaveProgressResponse::error(e.to_string()),
@@ -6160,7 +6339,10 @@ fn build_webnovel_subscribe_response(body: &[u8]) -> WebnovelSubscribeResponse {
             index: (position + 1) as u32,
             title: chapter.title.clone(),
             url: chapter.url.clone(),
+            volume: None,
+            page_count: None,
             downloaded_at_unix: None,
+            placeholder: false,
         })
         .collect();
 
@@ -6761,7 +6943,10 @@ fn check_one_subscription(
                 index: next_index,
                 title: chapter.title.clone(),
                 url: chapter.url.clone(),
+                volume: None,
+                page_count: None,
                 downloaded_at_unix: None,
+                placeholder: false,
             });
             next_index += 1;
         }
@@ -6778,7 +6963,10 @@ fn check_one_subscription(
         .known_chapters
         .iter()
         .enumerate()
-        .filter(|(_, chapter)| chapter.downloaded_at_unix.is_none())
+        // Placeholders are retried here: a chapter that failed once is usually
+        // a transient upstream hiccup, and leaving it permanently "done" would
+        // bake the error notice into every rebuilt EPUB.
+        .filter(|(_, chapter)| chapter.needs_fetch())
         .map(|(position, _)| position)
         .collect();
     update_webnovel_job(job_id, |status| {
@@ -6786,6 +6974,7 @@ fn check_one_subscription(
     });
 
     let mut downloaded_indices: Vec<u32> = Vec::new();
+    let mut repaired_chapters = 0usize;
     let mut fetch_error: Option<VaultError> = None;
     let mut consecutive_failures = 0usize;
     let mut skipped_chapters = 0usize;
@@ -6801,7 +6990,8 @@ fn check_one_subscription(
                 url: chapter.url.clone(),
             }
         };
-        let content = match source.fetch_chapter(client, &chapter_ref) {
+        let was_placeholder = subscription.known_chapters[*chapter_position].placeholder;
+        let (content, is_placeholder) = match source.fetch_chapter(client, &chapter_ref) {
             Ok(content) => {
                 consecutive_failures = 0;
                 debug_log(&format!(
@@ -6812,7 +7002,7 @@ fn check_one_subscription(
                     content.xhtml.len(),
                     chapter_ref.url
                 ));
-                content
+                (content, false)
             }
             Err(error) => {
                 consecutive_failures += 1;
@@ -6832,8 +7022,8 @@ fn check_one_subscription(
                 }
                 // A single unparseable chapter (e.g. an author-note "not a
                 // chapter" filler) must not block the rest of the novel: store
-                // a placeholder so the run continues and it is not retried
-                // forever.
+                // a placeholder so the run continues.  The chapter stays
+                // flagged and is retried on the next check.
                 skipped_chapters += 1;
                 debug_log(&format!(
                     "chapter {}/{}: übersprungen (Platzhalter) '{}'",
@@ -6841,14 +7031,17 @@ fn check_one_subscription(
                     pending.len(),
                     chapter_ref.title
                 ));
-                ChapterContent {
-                    title: chapter_ref.title.clone(),
-                    xhtml: format!(
-                        "<p><em>[Dieses Kapitel konnte nicht automatisch geladen \
-                         werden. Bitte im Browser öffnen: {}]</em></p>",
-                        chapter_ref.url
-                    ),
-                }
+                (
+                    ChapterContent {
+                        title: chapter_ref.title.clone(),
+                        xhtml: format!(
+                            "<p><em>[Dieses Kapitel konnte nicht automatisch geladen \
+                             werden. Bitte im Browser öffnen: {}]</em></p>",
+                            chapter_ref.url
+                        ),
+                    },
+                    true,
+                )
             }
         };
 
@@ -6865,7 +7058,14 @@ fn check_one_subscription(
         )
         .map_err(VaultError::from)?;
         chapter.downloaded_at_unix = Some(unix_now());
-        downloaded_indices.push(chapter.index);
+        chapter.placeholder = is_placeholder;
+        if was_placeholder && !is_placeholder {
+            // A retry that finally succeeded: the cached text changed, so the
+            // complete EPUB has to be rebuilt even if nothing else is new.
+            repaired_chapters += 1;
+        } else if !was_placeholder {
+            downloaded_indices.push(chapter.index);
+        }
 
         // Persist after every chapter so an aborted run can resume.
         save_subscription(&vault.system_dir(), subscription)?;
@@ -6883,7 +7083,11 @@ fn check_one_subscription(
     let safe_title = novel_folder_name(subscription);
     let complete_file = format!("{safe_title}.epub");
     let complete_missing = !novel_dir.join(&complete_file).exists();
-    if options.build_complete && (!downloaded_indices.is_empty() || cover_added || complete_missing)
+    if options.build_complete
+        && (!downloaded_indices.is_empty()
+            || repaired_chapters > 0
+            || cover_added
+            || complete_missing)
     {
         build_complete_epub(vault, subscription)?;
     } else if !complete_missing {
@@ -6894,7 +7098,14 @@ fn check_one_subscription(
 
     if skipped_chapters > 0 {
         debug_log(&format!(
-            "check: '{}' — {skipped_chapters} Kapitel als Platzhalter übersprungen",
+            "check: '{}' — {skipped_chapters} Kapitel als Platzhalter übersprungen \
+             (werden beim nächsten Check erneut versucht)",
+            subscription.title
+        ));
+    }
+    if repaired_chapters > 0 {
+        debug_log(&format!(
+            "check: '{}' — {repaired_chapters} Platzhalter-Kapitel nachgeladen",
             subscription.title
         ));
     }
@@ -6902,7 +7113,7 @@ fn check_one_subscription(
     if let Some(error) = fetch_error {
         return Err(error);
     }
-    Ok(downloaded_indices.len())
+    Ok(downloaded_indices.len() + repaired_chapters)
 }
 
 /// How many chapters may fail back to back before the run aborts (and resumes
@@ -7989,7 +8200,7 @@ const DEBUG_LOG_MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// The log records every URL the fetcher visits, i.e. a complete reading
 /// history — it is therefore owner-readable only and rotated at
 /// [`DEBUG_LOG_MAX_BYTES`] so it cannot grow without bound.
-fn debug_log(message: &str) {
+pub(crate) fn debug_log(message: &str) {
     let Some(path) = debug_log_path() else {
         return;
     };
@@ -8257,7 +8468,7 @@ fn unix_now_ms() -> u128 {
 }
 
 /// Closes the browser window at the end of a manual run.
-fn close_browser_window() {
+pub(crate) fn close_browser_window() {
     if let Some(handle) = APP_HANDLE.get() {
         let handle = handle.clone();
         let inner = handle.clone();
@@ -8273,7 +8484,7 @@ fn close_browser_window() {
 ///
 /// Blocks the calling (worker) thread until the injected relay delivers the
 /// page via the window title, a challenge times out, or rendering times out.
-fn render_page_via_window(url: &str) -> Result<String> {
+pub(crate) fn render_page_via_window(url: &str) -> Result<String> {
     let handle = APP_HANDLE
         .get()
         .cloned()
@@ -8507,5 +8718,77 @@ mod tests {
         // A pinned name is sanitized too — stored records are not trusted.
         subscription.folder_name = Some("..".to_string());
         assert_eq!(novel_folder_name(&subscription), "Neuer Titel");
+    }
+
+    #[test]
+    fn manga_chapters_group_under_their_series() {
+        // One CBZ per chapter: grouping by the file's own title would give
+        // every chapter its own collection node.
+        let path_for = |chapter: &str| {
+            build_collection_path(
+                MediaType::Manga,
+                Some(chapter),
+                None,
+                Some("Yakuza Fiancé"),
+                None,
+                None,
+            )
+        };
+
+        assert_eq!(path_for("Chapter 1"), "Manga/Yakuza Fiancé");
+        assert_eq!(path_for("Chapter 2"), path_for("Chapter 1"));
+        assert_eq!(path_for("Chapter 38.1"), path_for("Chapter 1"));
+    }
+
+    #[test]
+    fn manga_without_a_series_title_falls_back_to_the_file_title() {
+        // Hand-imported CBZ files carry no sidecar series title.
+        assert_eq!(
+            build_collection_path(MediaType::Manga, Some("Berserk"), None, None, None, None),
+            "Manga/Berserk"
+        );
+        assert_eq!(
+            build_collection_path(MediaType::Manga, None, None, None, None, None),
+            "Manga/Unbenannt"
+        );
+    }
+
+    #[test]
+    fn comics_and_hentai_manga_group_the_same_way() {
+        assert_eq!(
+            build_collection_path(
+                MediaType::Comic,
+                Some("Issue 3"),
+                None,
+                Some("Saga"),
+                None,
+                None
+            ),
+            "Comics/Saga"
+        );
+        assert_eq!(
+            build_collection_path(
+                MediaType::HentaiManga,
+                Some("Chapter 3"),
+                None,
+                Some("Serie"),
+                None,
+                None
+            ),
+            "Hentai/Serie"
+        );
+    }
+
+    #[test]
+    fn other_media_types_keep_grouping_by_their_own_title() {
+        // The manga branch must not change how films or books are grouped.
+        assert_eq!(
+            build_collection_path(MediaType::Film, Some("Dune"), Some(2021), None, None, None),
+            "Filme/Dune (2021)"
+        );
+        assert_eq!(
+            build_collection_path(MediaType::Document, Some("Vertrag"), None, None, None, None),
+            "Dokumente/Vertrag"
+        );
     }
 }
